@@ -3605,9 +3605,11 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     delivered_steer_events: list[dict] = []
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
+    prose_segment_first_seq = 0
     fresh_segment = True
     last_ts = None
     reasoning_first_tool_count: int | None = None
+    reasoning_first_seq: int | None = None
 
     def _materialize_reasoning_text() -> str:
         nonlocal reasoning_text, reasoning_dirty
@@ -3616,8 +3618,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             reasoning_dirty = False
         return reasoning_text
 
-    def mark_boundary() -> int:
-        nonlocal current_activity_burst_id
+    def mark_boundary(event_seq: int | None = None) -> int:
+        nonlocal current_activity_burst_id, prose_segment_first_seq
         text_end = len(assistant_text)
         if text_end <= 0:
             return current_activity_burst_id
@@ -3628,11 +3630,16 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if text_end > last_end:
             current_activity_burst_id += 1
             activity_burst_anchors.append(
-                {"id": current_activity_burst_id, "textEnd": text_end}
+                {
+                    "id": current_activity_burst_id,
+                    "textEnd": text_end,
+                    "_journal_seq": int(prose_segment_first_seq or event_seq or 0) or None,
+                }
             )
+            prose_segment_first_seq = 0
         return current_activity_burst_id
 
-    def update_completed_tool(payload: dict) -> None:
+    def update_completed_tool(payload: dict, event_seq: int) -> None:
         tool_id = _run_journal_snapshot_tool_id(payload)
         name = str(payload.get("name") or "").strip()
         for call in reversed(tool_calls):
@@ -3667,6 +3674,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "_live": True,
             "_journal_snapshot": True,
             "_journal_stream_id": stream_id,
+            "_journal_seq": event_seq or None,
         }
         tool_id = _run_journal_snapshot_tool_id(payload)
         if tool_id:
@@ -3690,7 +3698,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         return reasoning_index.matches_tail(text)
 
     def strip_reasoning_echo_tail(text: str) -> bool:
-        nonlocal reasoning_text, reasoning_dirty, reasoning_first_tool_count
+        nonlocal reasoning_text, reasoning_dirty, reasoning_first_tool_count, reasoning_first_seq
         cut = reasoning_index.cut_to(text)
         if cut is None:
             return False
@@ -3705,6 +3713,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         reasoning_index.append(next_reasoning)
         if not _compact_for_echo_compare(reasoning_text):
             reasoning_first_tool_count = None
+            reasoning_first_seq = None
         return True
 
     for event in events:
@@ -3717,10 +3726,13 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             last_ts = event.get("created_at", last_ts)
             continue
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        event_seq = int(event.get("seq") or 0)
         last_ts = event.get("created_at", last_ts)
         if event_name == "token":
             text = str(payload.get("text") or "")
             if text:
+                if not prose_segment_first_seq:
+                    prose_segment_first_seq = event_seq
                 assistant_text += text
                 fresh_segment = False
             continue
@@ -3729,6 +3741,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             if text:
                 if reasoning_first_tool_count is None:
                     reasoning_first_tool_count = len(tool_calls)
+                    reasoning_first_seq = event_seq or None
                 reasoning_parts.append(text)
                 reasoning_index.append(text)
                 reasoning_dirty = True
@@ -3736,6 +3749,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if event_name == "interim_assistant":
             visible = str(payload.get("text") or "").strip()
             if visible:
+                if not prose_segment_first_seq:
+                    prose_segment_first_seq = event_seq
                 if payload.get("reasoning_echo") or reasoning_echo_tail_matches(visible):
                     strip_reasoning_echo_tail(visible)
                 if payload.get("already_streamed"):
@@ -3743,14 +3758,14 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                         assistant_text = visible
                 else:
                     assistant_text = f"{assistant_text}\n\n{visible}" if assistant_text else visible
-                mark_boundary()
+                mark_boundary(event_seq)
                 fresh_segment = True
             continue
         if event_name == "tool":
             name = str(payload.get("name") or "").strip()
             if not name or name == "clarify":
                 continue
-            boundary_id = mark_boundary()
+            boundary_id = mark_boundary(event_seq)
             tool_id = _run_journal_snapshot_tool_id(payload)
             call = {
                 "name": name,
@@ -3760,6 +3775,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "_live": True,
                 "_journal_snapshot": True,
                 "_journal_stream_id": stream_id,
+                "_journal_seq": event_seq or None,
             }
             if tool_id:
                 call["tid"] = tool_id
@@ -3773,13 +3789,13 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             fresh_segment = True
             continue
         if event_name == "tool_complete":
-            update_completed_tool(payload)
+            update_completed_tool(payload, event_seq)
             fresh_segment = True
             continue
         if event_name == "steer_delivered":
             text = str(payload.get("text") or "").strip()
             if text:
-                event_seq = int(event.get("seq") or 0)
+                mark_boundary(event_seq)
                 delivered_steer_events.append(
                     {
                         "event_id": _run_journal_snapshot_event_id_for_run(
@@ -3823,7 +3839,14 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             group["activity_burst_id"] = burst_id
         return group
 
-    def scene_prose_row(text: str, *, burst_id: int | None, segment_seq: int, status: str) -> dict | None:
+    def scene_prose_row(
+        text: str,
+        *,
+        burst_id: int | None,
+        segment_seq: int,
+        status: str,
+        journal_seq: int | None,
+    ) -> dict | None:
         clean = str(text or "").strip()
         if not clean:
             return None
@@ -3843,7 +3866,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "local_id": local_id,
             "run_id": run_id,
             "stream_id": stream_id,
-            "seq": None,
+            "seq": journal_seq,
             "status": status,
             "created_at": last_ts,
             "identity": {
@@ -3851,7 +3874,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "local_id": local_id,
                 "run_id": run_id,
                 "stream_id": stream_id,
-                "seq": None,
+                "seq": journal_seq,
             },
             "group": scene_group(segment_seq, burst_id),
             "text": clean,
@@ -3865,7 +3888,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             },
         }
 
-    def scene_thinking_row(text: str, *, status: str) -> dict | None:
+    def scene_thinking_row(text: str, *, status: str, journal_seq: int | None) -> dict | None:
         clean = str(text or "").strip()
         if not clean:
             return None
@@ -3886,7 +3909,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "local_id": local_id,
             "run_id": run_id,
             "stream_id": stream_id,
-            "seq": None,
+            "seq": journal_seq,
             "status": status,
             "created_at": last_ts,
             "identity": {
@@ -3894,7 +3917,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "local_id": local_id,
                 "run_id": run_id,
                 "stream_id": stream_id,
-                "seq": None,
+                "seq": journal_seq,
             },
             "group": scene_group(),
             "text": clean,
@@ -3920,6 +3943,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         burst_id = int(call.get("activityBurstId") or 0) or None
         segment_seq = int(call.get("activitySegmentSeq") or burst_id or 0) or None
         status = "error" if call.get("is_error") else ("completed" if call.get("done") else "running")
+        journal_seq = int(call.get("_journal_seq") or 0) or None
         row_id = f"tool:{tool_id or name}:{fallback_order}"
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
         preview = str(call.get("preview") or "")
@@ -3963,7 +3987,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "local_id": tool_id or row_id,
             "run_id": run_id,
             "stream_id": stream_id,
-            "seq": None,
+            "seq": journal_seq,
             "status": status,
             "created_at": last_ts,
             "identity": {
@@ -3971,7 +3995,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "local_id": tool_id or row_id,
                 "run_id": run_id,
                 "stream_id": stream_id,
-                "seq": None,
+                "seq": journal_seq,
             },
             "group": scene_group(segment_seq, burst_id),
             "text": snippet or preview,
@@ -3991,7 +4015,11 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             return
         if not force and reasoning_first_tool_count and tool_rows_rendered < reasoning_first_tool_count:
             return
-        row = scene_thinking_row(reasoning_text, status="running")
+        row = scene_thinking_row(
+            reasoning_text,
+            status="running",
+            journal_seq=reasoning_first_seq,
+        )
         if not row:
             return
         row["order_index"] = len(anchor_activity_rows)
@@ -4029,6 +4057,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             burst_id=burst_id,
             segment_seq=segment_seq,
             status="completed",
+            journal_seq=anchor.get("_journal_seq"),
         )
         if prose:
             anchor_activity_rows.append(prose)
@@ -4048,6 +4077,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             burst_id=None,
             segment_seq=segment_seq,
             status="running",
+            journal_seq=prose_segment_first_seq or None,
         )
         if tail:
             anchor_activity_rows.append(tail)
@@ -4107,6 +4137,19 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "payload": control.get("payload") or {},
             }
         )
+
+    # Aggregation builds prose, thinking, and tool rows by type. Journal seq is
+    # the cross-reload chronology authority, so stable-sort the completed rows
+    # before presentation and rebuild their contiguous order indices.
+    anchor_activity_rows.sort(
+        key=lambda row: (
+            row.get("seq")
+            if isinstance(row.get("seq"), int) and row.get("seq") > 0
+            else 2**63
+        )
+    )
+    for order_index, row in enumerate(anchor_activity_rows):
+        row["order_index"] = order_index
 
     # Keep a live anchor shell during session-switch replay even before the
     # journal has projected visible prose or tool rows from the first events.
@@ -4187,7 +4230,10 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         "last_assistant_text": assistant_text,
         "last_reasoning_text": reasoning_text,
         "runtime_model": runtime_model_from_events(session_id, stream_id, events),
-        "activity_burst_anchors": activity_burst_anchors,
+        "activity_burst_anchors": [
+            {key: value for key, value in anchor.items() if not key.startswith("_")}
+            for anchor in activity_burst_anchors
+        ],
         "current_activity_burst_id": current_activity_burst_id,
         "current_live_segment_seq": current_live_segment_seq,
         "anchor_activity_scene": {
