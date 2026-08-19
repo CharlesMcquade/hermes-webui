@@ -3955,11 +3955,23 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
     const entryProvider=String(existing.providerId||'').toLowerCase();
     return !provider||!entryProvider||entryProvider===provider;
   })) return true;
+  // provider/... is an equivalent routing spelling for the catalog's bare ID
+  // only when the stripped prefix matches both the configured badge provider
+  // and the existing picker row's provider. Preserve multi-segment IDs from
+  // other providers instead of globally discarding another slash segment.
+  const rawId=String(modelId||'');
+  const slashPrefix=provider?`${provider}/`:'';
+  if(slashPrefix&&rawId.toLowerCase().startsWith(slashPrefix)){
+    const routedId=rawId.slice(slashPrefix.length);
+    if((entries||[]).some(entry=>
+      String(entry.providerId||'').toLowerCase()===provider
+      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
+    )) return true;
+  }
   // @provider:model is an equivalent routing spelling only when an existing
   // picker row belongs to that same provider. This supports named custom
   // providers (@custom:name:model) without collapsing matching model IDs from
   // different providers.
-  const rawId=String(modelId||'');
   const prefix=provider?`@${provider}:`:'';
   if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
   const routedId=rawId.slice(prefix.length);
