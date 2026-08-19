@@ -15939,13 +15939,13 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {"ok": True, "provider": provider_id})
 
     if parsed.path == "/api/reasoning":
-        # CLI-parity /reasoning handler — writes to the same config.yaml keys
-        # the CLI uses (display.show_reasoning, agent.reasoning_effort) so a
-        # preference set via WebUI is honoured in the terminal REPL and vice
-        # versa.  Body is one of:
+        # CLI-parity /reasoning handler — writes display.show_reasoning plus
+        # either a selected model's agent.reasoning_overrides entry or the
+        # legacy global agent.reasoning_effort key. Body is one of:
         #   {"display": "show"|"hide"|"on"|"off"}   → display.show_reasoning
         #   {"effort":  "none"|"minimal"|"low"|"medium"|"high"|"xhigh"}
-        #                                            → agent.reasoning_effort
+        #                      → per-model override when model_id is supplied;
+        #                        otherwise agent.reasoning_effort
         try:
             display = body.get("display")
             effort = body.get("effort")
