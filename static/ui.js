@@ -4109,32 +4109,23 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
     const entryProvider=String(existing.providerId||'').toLowerCase();
     return !provider||!entryProvider||entryProvider===provider;
   })) return true;
+  // provider/... is an equivalent routing spelling for the catalog's bare ID
+  // only when the stripped prefix matches both the configured badge provider
+  // and the existing picker row's provider. Preserve multi-segment IDs from
+  // other providers instead of globally discarding another slash segment.
+  const rawId=String(modelId||'');
+  const slashPrefix=provider?`${provider}/`:'';
+  if(slashPrefix&&rawId.toLowerCase().startsWith(slashPrefix)){
+    const routedId=rawId.slice(slashPrefix.length);
+    if((entries||[]).some(entry=>
+      String(entry.providerId||'').toLowerCase()===provider
+      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
+    )) return true;
+  }
   // @provider:model is an equivalent routing spelling only when an existing
   // picker row belongs to that same provider. This supports named custom
   // providers (@custom:name:model) without collapsing matching model IDs from
   // different providers.
-  const rawId=String(modelId||'');
-  // `<provider>/<model>` is another routing spelling of `<model>`, so its badge
-  // key must not become a second picker row. configured_model_badges holds every
-  // spelling of a configured model and renderModelDropdown() synthesises a row
-  // for each key this predicate does not recognise. The provider-qualified
-  // spelling was missed because _normalizeConfiguredModelKey() strips only one
-  // leading slash segment (#3360 keeps `vendor_a/x` and `vendor_b/y/x` distinct),
-  // so `acme/example-model` and `custom/acme/example-model` normalise to
-  // different keys and the picker lists one model twice.
-  // Match it the way the `@provider:` rule below does: the badge declares a
-  // provider, the key starts with that provider's `<provider>/` prefix, and an
-  // existing row from the same provider normalises equal to the remainder. Two
-  // different models never satisfy the last clause, so this can only drop a
-  // duplicate of a row the catalog already produced.
-  const slashPrefix=provider?`${provider}/`:'';
-  if(slashPrefix&&rawId.toLowerCase().startsWith(slashPrefix)){
-    const slashRoutedId=rawId.slice(slashPrefix.length);
-    if(slashRoutedId&&(entries||[]).some(entry=>
-      String(entry.providerId||'').toLowerCase()===provider
-      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(slashRoutedId)
-    )) return true;
-  }
   const prefix=provider?`@${provider}:`:'';
   if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
   const routedId=rawId.slice(prefix.length);
