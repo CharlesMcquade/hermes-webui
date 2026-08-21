@@ -13625,63 +13625,140 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
 
 def _accept_and_publish_steer_event(agent, session_id: str, stream_id: str, text: str):
     """Accept and journal one steer before a terminal event can win the run."""
+def _steer_attachment_paths(value) -> list[str]:
+    """Return bounded, single-line attachment paths for runtime guidance."""
+    if not isinstance(value, list):
+        return []
+    paths = []
+    for raw in value[:20]:
+        path = re.sub(r"[\x00-\x1f\x7f]+", " ", str(raw or "").strip()).strip()[:2048]
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _verified_steer_attachment_paths(session_id: str, value) -> list[str]:
+    """Accept only real files from this session's server-owned upload inbox."""
+    from api.upload import _session_attachment_dir
+
+    session_root = _session_attachment_dir(str(session_id)).resolve()
+    verified = []
+    for raw in _steer_attachment_paths(value):
+        candidate = Path(raw).expanduser().resolve()
+        if not candidate.is_relative_to(session_root) or not candidate.is_file():
+            raise ValueError("Steer attachment path is not a session upload")
+        verified.append(str(candidate))
+    return verified
+
+
+def _steer_display_file_names(value) -> list[str]:
+    """Return bounded, path-free attachment labels for the visible steer row."""
+    names = []
+    for path in _steer_attachment_paths(value):
+        label = re.split(r"[/\\\\]", path)[-1].strip()[:255]
+        if label:
+            names.append(label)
+    return names
+
+
+def _steer_runtime_text(user_text: str, attachment_paths) -> str:
+    """Build the model-facing Steer from one visible text + structured paths."""
+    text = str(user_text or "").strip()
+    paths = _steer_attachment_paths(attachment_paths)
+    if not paths:
+        return text
+    note = (
+        f"[Attached files for this steer: {', '.join(paths)}]\n"
+        "Use the file tools/read_file to inspect these documents if needed."
+    )
+    return f"{text}\n\n{note}" if text else note
+
+
+def _accept_and_publish_steer_event(
+    agent,
+    session_id: str,
+    stream_id: str,
+    runtime_text: str,
+    *,
+    display_text: str,
+    files=None,
+):
+    """Accept, durably journal, and publish one ordered Steer event."""
     created_at = time.time()
     payload = {
         "session_id": str(session_id),
         "stream_id": str(stream_id),
-        "text": str(text),
+        # Attachment steers append an internal read_file hint to ``runtime_text``;
+        # that belongs in model context, not in the visible transcript.
+        "text": str(display_text),
+        "files": _steer_display_file_names(files),
         "status": "delivered",
         "created_at": created_at,
     }
-    writer = RunJournalWriter(str(session_id), str(stream_id))
-    accepted, journaled, reason, error = writer.accept_and_append_if_nonterminal(
-        "steer_delivered",
-        payload,
-        lambda: agent.steer(text),
-    )
-    if reason == "terminal":
-        return False, "stream_dead", False
-    if reason == "journal_malformed":
-        return False, "steer_error", False
-    if error is not None:
-        logger.warning(
-            "Failed to persist accepted steer for session=%s stream=%s",
-            session_id,
-            stream_id,
-            exc_info=(type(error), error, error.__traceback__),
-        )
-        return accepted, "persistence_error", False
-    if not accepted or not isinstance(journaled, dict):
-        return False, None, False
-
-    event_id = journaled.get("event_id")
-    payload["created_at"] = journaled.get("created_at", created_at)
     with STREAMS_LOCK:
         stream = STREAMS.get(str(stream_id))
-    if event_id:
-        STREAM_LAST_EVENT_ID[str(stream_id)] = str(event_id)
-        if stream is not None and hasattr(stream, "note_last_event_id"):
-            try:
+    writer = RunJournalWriter(str(session_id), str(stream_id))
+
+    def publish(journaled):
+        event_id = journaled.get("event_id")
+        payload["created_at"] = journaled.get("created_at", created_at)
+        if stream is None or not callable(getattr(stream, "put_nowait", None)):
+            raise RuntimeError("active stream channel unavailable during steer publication")
+        if event_id:
+            STREAM_LAST_EVENT_ID[str(stream_id)] = str(event_id)
+            if hasattr(stream, "note_last_event_id"):
                 stream.note_last_event_id(str(event_id))
-            except Exception:
-                logger.debug("Failed to note steer event id %s", event_id, exc_info=True)
-    if stream is None or not callable(getattr(stream, "put_nowait", None)):
-        return True, None, True
-    try:
         item = (
             ("steer_delivered", payload, event_id)
             if event_id
             else ("steer_delivered", payload)
         )
         stream.put_nowait(item)
-    except Exception:
+
+    accepted, journaled, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        payload,
+        lambda: agent.steer(runtime_text),
+        publish=publish,
+    )
+    outcome = {
+        "accepted": bool(accepted),
+        "fallback": None,
+        "durable": False,
+        "published": False,
+        "event": journaled if isinstance(journaled, dict) else None,
+        "payload": payload,
+    }
+    if reason == "terminal":
+        outcome["fallback"] = "stream_dead"
+        return outcome
+    if reason == "journal_malformed":
+        outcome["fallback"] = "steer_error"
+        return outcome
+    if reason == "persistence_error" or (error is not None and journaled is None):
         logger.warning(
-            "Failed to broadcast accepted steer for session=%s stream=%s",
+            "Failed to persist accepted steer for session=%s stream=%s",
             session_id,
             stream_id,
-            exc_info=True,
+            exc_info=(type(error), error, error.__traceback__) if error is not None else None,
         )
-    return True, None, True
+        outcome["fallback"] = "persistence_error"
+        return outcome
+    if not accepted or not isinstance(journaled, dict):
+        return outcome
+
+    outcome["durable"] = True
+    if reason == "publication_error":
+        logger.warning(
+            "Failed to broadcast durable steer for session=%s stream=%s",
+            session_id,
+            stream_id,
+            exc_info=(type(error), error, error.__traceback__) if error is not None else None,
+        )
+        outcome["fallback"] = "publication_error"
+        return outcome
+    outcome["published"] = True
+    return outcome
 
 
 def _handle_chat_steer(handler, body: dict) -> bool:
@@ -13707,16 +13784,31 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     Steer is active-run guidance, not implicit permission to Queue, Interrupt,
     or Stop-and-send.
 
-    Returns 200 with {"accepted": bool, "fallback": str|None,
-    "stream_id": str|None, "durable": false?}. The optional ``durable`` field
-    is emitted only for accepted runtime delivery whose journal persistence
-    failed, preserving the legacy success response while exposing degradation.
+    Returns 200 with the legacy accepted/fallback/stream_id fields plus explicit
+    durable/published state and the canonical journal envelope when accepted.
     """
     from api.helpers import j, bad
     from api import config as _cfg
 
     sid = str((body or {}).get("session_id", "") or "").strip()
-    text = str((body or {}).get("text", "") or "").strip()
+    structured_input = "user_text" in (body or {}) or "attachment_paths" in (body or {})
+    if structured_input:
+        display_text = str((body or {}).get("user_text") or "").strip()
+        try:
+            attachment_paths = _verified_steer_attachment_paths(
+                sid,
+                (body or {}).get("attachment_paths"),
+            )
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        text = _steer_runtime_text(display_text, attachment_paths)
+        display_files = _steer_display_file_names(attachment_paths)
+    else:
+        # Legacy clients send one authoritative text string. Ignore any separate
+        # display_text so the transcript can never hide different runtime input.
+        text = str((body or {}).get("text", "") or "").strip()
+        display_text = text
+        display_files = _steer_display_file_names((body or {}).get("files"))
     if not sid:
         return bad(handler, "session_id required")
     if not text:
