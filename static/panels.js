@@ -13257,7 +13257,28 @@ function _gatewayActionButton(action){
 }
 function _gatewayActionControls(r){
   const actions=(r&&r.running)?['stop','restart']:['start'];
-  return `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">${actions.map(_gatewayActionButton).join('')}</div>`;
+  return `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">${actions.map(_gatewayActionButton).join('')}</div>${_webuiRestartControl()}`;
+}
+let _webuiRestartInFlight=false;
+function _webuiRestartControl(){
+  return `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"><button class="sm-btn webui-restart-btn" id="btnRestartWebUI" type="button" onclick="_restartWebUI()" ${_webuiRestartInFlight?'disabled':''} style="padding:5px 10px;font-size:12px">${esc(t('webui_restart'))}</button></div>`;
+}
+async function _restartWebUI(){
+  if(_webuiRestartInFlight) return;
+  _webuiRestartInFlight=true;
+  const btn=document.getElementById('btnRestartWebUI');
+  if(btn){btn.disabled=true;}
+  try{
+    const result=await api('/api/webui/restart',{method:'POST',body:JSON.stringify({}),timeoutMs:15000,timeoutToast:false});
+    if(typeof showToast==='function') showToast((result&&result.message)||t('webui_restart_success'),4000,'success');
+  }catch(e){
+    const msg=e&&e.message?e.message:String(e||'');
+    // A restart interrupts the connection itself — a fetch error here can still mean the restart succeeded.
+    if(typeof showToast==='function') showToast(`${t('webui_restart_failed')}${msg?': '+msg:''}`,5000,'error');
+  }finally{
+    _webuiRestartInFlight=false;
+    if(btn){btn.disabled=false;}
+  }
 }
 function _renderGatewayStatus(r){
   const card=$('gatewayStatusCard');
