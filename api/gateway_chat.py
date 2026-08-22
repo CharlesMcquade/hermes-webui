@@ -2638,3 +2638,15 @@ def _run_gateway_chat_streaming(
         # the process lifetime (compare-and-clear: only clears if still owned by
         # this stream, mirroring the local streaming teardown).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
+        # Retire the worker settlement participant on every Gateway producer
+        # exit (gate-certifier blocker #1: SILENT lifecycle leak — Gateway
+        # teardown omitted worker retirement, leaking
+        # _STREAM_SETTLEMENT_PARTICIPANTS and the terminal fence).
+        try:
+            from api.streaming import _retire_worker_cancelled_state
+            _retire_worker_cancelled_state(stream_id)
+        except Exception:
+            logger.debug(
+                "Failed to retire worker settlement participant for gateway "
+                "teardown stream %s", stream_id, exc_info=True,
+            )
