@@ -2594,7 +2594,6 @@ class TestCancelInterrupt:
         from api.streaming import (
             _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED,
             _STREAM_SETTLEMENT_TERMINAL, _publish_fallback_notice,
-            STREAMS_LOCK,
         )
         from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
 
