@@ -13049,6 +13049,7 @@ const LOCALES = {
     project_chip_unassigned: '未指派',
     project_chip_unassigned_title: '顯示尚未指派至專案的對話',
     _speech: 'zh-TW',
+    loading_more: '載入更多…',
     // boot.js
     cancelling: '正在取消……',
     cancel_failed: '取消失敗。',
