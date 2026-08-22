@@ -5908,21 +5908,58 @@ function _prependTouchBatch(){
     commitTargets.push({wrapper:wrapper, body:body, beforeSpacer:beforeSpacer, label:label, isNew:isNew});
   }
   // Phase 2: attach newly created wrappers to the live DOM in canonical order.
-  // Insert each new wrapper before the next existing canonical wrapper that
-  // follows it — not just at the list end. Without this, a missing earlier
-  // group A is committed after an existing later group B, producing B, A
-  // instead of canonical A, B.
+  //
+  // The prepend interval is [targetStart, oldStart). commitTargets only
+  // contains groups whose rows fall inside that interval — it does NOT contain
+  // the already-rendered group at oldStart. When the prepend interval consists
+  // entirely of absent earlier groups (all isNew) and the current window
+  // begins in an already-live later group B, the old forward search through
+  // commitTargets found no non-new successor and fell through to the sentinel
+  // branch — which inserts AFTER B, producing live order B, A instead of the
+  // canonical A, B.
+  //
+  // Fix: derive the insertion position from the full canonical group order /
+  // live DOM. The canonical successor to every prepend-interval group is the
+  // group containing row oldStart (the first row of the current live window).
+  // If that group's wrapper already exists in the DOM, insert ALL new wrappers
+  // before it in canonical order. This handles the common boundary case where
+  // the prepend crosses into entirely absent earlier date groups while the
+  // current later group remains live.
+  // Find the first live (already-rendered) wrapper that is a canonical
+  // successor to every group in the prepend interval. Walk flatRows forward
+  // from oldStart to identify the label of the group at the window start,
+  // then look it up in the live DOM.
+  let liveSuccessor=null;
+  if(newWrappers.length>0){
+    const successorRow=state.flatRows[oldStart];
+    if(successorRow&&successorRow.group){
+      const successorLabel=successorRow.group.label;
+      // Only treat it as a successor if it is NOT itself in the prepend
+      // interval (i.e. its wrapper was not just created).
+      const inPrependInterval=commitTargets.some(function(t){return t.label===successorLabel;});
+      if(!inPrependInterval){
+        liveSuccessor=list.querySelector('.session-date-group[data-group-label="'+CSS.escape(successorLabel)+'"]');
+      }
+    }
+  }
   for(let gi=0; gi<commitTargets.length; gi++){
     const target=commitTargets[gi];
     if(!target.isNew) continue;
     let insertBeforeEl=null;
+    // First, try the forward search within commitTargets (handles the case
+    // where a mix of new and existing groups are in the prepend interval).
     for(let gj=gi+1; gj<commitTargets.length; gj++){
       if(!commitTargets[gj].isNew){
         insertBeforeEl=commitTargets[gj].wrapper;
         break;
       }
     }
+    // If no non-new successor within commitTargets, use the live successor
+    // derived from the full canonical group order (the group at oldStart).
+    if(!insertBeforeEl) insertBeforeEl=liveSuccessor;
     if(!insertBeforeEl){
+      // No live successor at all (prepend reaches the very first group) —
+      // insert before the sentinel, or at the list start.
       const sentinel=list.querySelector('[data-touch-sentinel]');
       if(sentinel) list.insertBefore(target.wrapper, sentinel);
       else list.appendChild(target.wrapper);
