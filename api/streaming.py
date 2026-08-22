@@ -13393,8 +13393,8 @@ def _run_agent_streaming(
                                     # _pending_fallback_notices here too.
                                     if _pending_fallback_notices:
                                         for _dm in reversed(s.messages):
-                                            if isinstance(_dm, dict) and _dm.get("role") == "assistant":
-                                                _dm["_fallbackNotice"] = _clean_fallback_notice(_pending_fallback_notices[-1])
+                                            if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
+                                                _dm['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
                                                 break
                                     # Bind the durable token to the notice stamped on
                                     # THIS row — a B published between stamp and save
@@ -13420,7 +13420,7 @@ def _run_agent_streaming(
                                     "usage": {"input_tokens": 0, "output_tokens": 0},
                                 })
                                 put("stream_end", {"session_id": session_id})
-                            logger.info("[webui] self-heal (except path): retry succeeded")
+                            logger.info('[webui] self-heal (except path): retry succeeded')
                             return  # skip error emission
                     except Exception as _retry_exc2:
                         logger.warning('[webui] self-heal (except path): retry failed: %s', _retry_exc2)
