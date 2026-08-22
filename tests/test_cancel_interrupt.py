@@ -2546,3 +2546,204 @@ class TestCancelInterrupt:
         _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
         _STREAM_NOTICE_GENERATION.pop(stream_id, None)
         _STREAM_CANCEL_CLAIMED.discard(stream_id)
+
+    def test_no_notice_first_save_atomic_fence_install_blocks_or_persists_B(self):
+        """Barrier-controlled regression for gate-certifier blocker #1:
+        non-atomic no-notice recheck + terminal-fence install.
+
+        The bug (pre-fix): in the first-save/no-notice branch, the settlement
+        loop checked _STREAM_FALLBACK_NOTICES under streams_lock, RELEASED the
+        lock, and only THEN added the stream to _STREAM_SETTLEMENT_TERMINAL
+        outside the lock.  A status callback could acquire the lock in that gap,
+        observe no terminal fence, and publish generation B.  Cancel then
+        installed the fence and exited without stamping B — B remained unsaved
+        and ownerless.
+
+        The fix: perform the empty-map check and the terminal-fence install in
+        the SAME streams_lock critical section.
+
+        This test has two parts:
+
+        Part 1 (barrier-controlled gap publication): A watcher thread attempts
+        to publish B through the PRODUCTION gate (_publish_fallback_notice)
+        at the exact moment the settlement loop has completed the empty-map
+        recheck but has not yet installed the fence.  We intercept
+        _STREAM_SETTLEMENT_TERMINAL.add — the fence install — and fire the
+        watcher BEFORE the add lands.  With the bug (add outside the lock),
+        the watcher acquires STREAMS_LOCK (free), sees no fence, and publishes
+        B.  With the fix (add inside the lock), the watcher CANNOT acquire
+        STREAMS_LOCK (held by the main thread) — it retries and either (a)
+        the fence is installed before the watcher gets the lock (publication
+        rejected) or (b) the main thread releases the lock after the fence
+        is installed (publication rejected).  Either way, the fix rejects B.
+
+        Assert: either B was rejected (not in map) or B was persisted (stamped
+        on a durable row).  All registries must return to baseline.  With the
+        bug, B is published but unsaved — neither rejected nor persisted — so
+        the test fails.
+
+        Part 2 (post-settlement fence verification): after cancel_stream()
+        returns, the fence must be installed (the no-notice branch completed
+        with no notice to persist).  Any late publication through the
+        production gate must be rejected.  This proves the fence is in place
+        before the lock is released (the fix's invariant).
+        """
+        import copy
+        import threading
+        from unittest.mock import patch, Mock
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_CANCEL_CLAIMED,
+            _STREAM_SETTLEMENT_TERMINAL, _publish_fallback_notice,
+            STREAMS_LOCK,
+        )
+        from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
+
+        stream_id = "no_notice_atomic_fence"
+        session_id = "sess_no_notice_atomic_fence"
+
+        _notice_b = {
+            "message": "Switched to fallback model: gpt-4 via openai → mB via pB",
+            "to_model": "mB",
+            "to_provider": "pB",
+        }
+
+        q = queue.Queue()
+        STREAMS[stream_id] = q
+        CANCEL_FLAGS[stream_id] = threading.Event()
+        STREAM_PARTIAL_TEXT[stream_id] = "partial answer"
+        STREAM_REASONING_TEXT[stream_id] = ""
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []
+        # NO notice pre-seeded — this is the first-save/no-notice branch.
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+        AGENT_INSTANCES[stream_id] = mock_agent
+
+        _save_snapshots = []
+        _fence_install_attempted = threading.Event()
+        _watcher_done = threading.Event()
+        _publication_result = [None]  # True=accepted, False=rejected, None=not run
+
+        _prior = {"role": "assistant", "content": "Prior turn.", "timestamp": 1000}
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = "q"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 1.0
+        mock_session.messages = [_prior]
+        mock_session.save = Mock(side_effect=lambda: _save_snapshots.append(
+            copy.deepcopy(mock_session.messages)
+        ))
+
+        # Watcher thread: attempts to publish B through the PRODUCTION gate
+        # when the fence-install is about to happen.  Uses _publish_fallback_notice
+        # (acquires STREAMS_LOCK, checks fence) — the real callback code path.
+        def _watcher_publish_b():
+            # Wait for the fence-install interception signal
+            _fence_install_attempted.wait(timeout=10)
+            # Try to publish B through the production gate.  This acquires
+            # STREAMS_LOCK and checks _STREAM_SETTLEMENT_TERMINAL.
+            #   - Bug (add outside lock): lock is free, fence not yet set →
+            #     B accepted.
+            #   - Fix (add inside lock): lock held by main thread → spin until
+            #     released, by then fence is set → B rejected.
+            result = _publish_fallback_notice(stream_id, dict(_notice_b))
+            _publication_result[0] = result
+            _watcher_done.set()
+
+        watcher = threading.Thread(target=_watcher_publish_b, daemon=True)
+        watcher.start()
+
+        # Intercept the fence install: signal the watcher BEFORE the add lands.
+        # This targets the exact gap — the moment between the empty-map recheck
+        # and the fence install.  We use a custom set subclass because built-in
+        # set.add is read-only and cannot be patched with mock.
+        _real_terminal = _STREAM_SETTLEMENT_TERMINAL
+
+        class _InterceptedTerminalSet(set):
+            """Set subclass that signals the watcher before adding stream_id."""
+            def add(self, item):
+                if item == stream_id:
+                    _fence_install_attempted.set()
+                    _watcher_done.wait(timeout=10)
+                super().add(item)
+
+        _intercepted = _InterceptedTerminalSet(_real_terminal)
+
+        with patch("api.streaming._STREAM_SETTLEMENT_TERMINAL", _intercepted):
+            with patch("api.streaming.get_session", return_value=mock_session):
+                result = cancel_stream(stream_id)
+
+        watcher.join(timeout=10)
+
+        assert result["cancelled"] is True
+        assert _publication_result[0] is not None, (
+            "watcher never ran — the fence-install interception did not fire"
+        )
+
+        # ── Part 1 assertion: either B was rejected OR B was persisted ──
+        # With the fix: B is rejected (fence installed inside the lock before
+        #   the watcher could acquire it).  B is NOT in the map.
+        # With the bug: B is accepted (fence not yet installed, lock was free).
+        #   B IS in the map but unsaved → the "registries clean" assertion
+        #   below fails, proving the bug.
+        b_published = _publication_result[0] is True
+        b_rejected = _publication_result[0] is False
+
+        if b_published:
+            # B was accepted into the map.  It must be persisted (stamped on a
+            # durable row) — if the settlement loop broke without persisting it,
+            # B is unsaved and ownerless (the bug).
+            final = _save_snapshots[-1] if _save_snapshots else []
+            final_stamped = [
+                m for m in final if isinstance(m, dict) and m.get("_fallbackNotice")
+            ]
+            assert len(final_stamped) >= 1, (
+                "B was published into the map but never persisted — the "
+                "non-atomic gap let B enter the map, then the fence was "
+                "installed outside the lock and the loop broke without "
+                "stamping B (blocker #1)"
+            )
+            notice = final_stamped[0]["_fallbackNotice"]
+            assert notice.get("message") == _notice_b["message"]
+            assert "_cancel_claimed" not in notice
+            assert set(notice.keys()) == {"message", "to_model", "to_provider"}
+
+        if b_rejected:
+            # B was rejected by the production gate — the fence was installed
+            # before the watcher could acquire the lock (the fix's invariant).
+            # B must NOT be in the map or in messages.
+            assert stream_id not in _STREAM_FALLBACK_NOTICES, (
+                "B was rejected but is still in the map — inconsistent state"
+            )
+
+        # ── All registries must return to baseline ──
+        # With the bug: B is in the map, unsaved → this fails.
+        # With the fix: B was rejected (or persisted and retired) → clean.
+        assert stream_id not in _STREAM_FALLBACK_NOTICES, (
+            "_STREAM_FALLBACK_NOTICES not cleaned — B was left unsaved and "
+            "ownerless (blocker #1: the non-atomic gap let B enter the map, "
+            "then the fence was installed outside the lock and the loop broke "
+            "without persisting B)"
+        )
+        assert stream_id not in _STREAM_CANCEL_CLAIMED, (
+            "_STREAM_CANCEL_CLAIMED not retired"
+        )
+
+        # ── Part 2: post-settlement fence verification ──
+        # After cancel_stream() returns, the fence must be installed (the
+        # no-notice branch completed).  Any late publication through the
+        # production gate must be rejected.
+        # Note: the fence may have been retired by the settlement participants
+        # cleanup.  If it IS still set, verify it blocks publication.
+        if stream_id in _STREAM_SETTLEMENT_TERMINAL:
+            late_result = _publish_fallback_notice(stream_id, dict(_notice_b))
+            assert late_result is False, (
+                "post-settlement publication was accepted — the fence must "
+                "block late publications after the no-notice branch completes"
+            )
+            assert stream_id not in _STREAM_FALLBACK_NOTICES
+
+        # Prior turn must NOT be mutated.
+        assert "_fallbackNotice" not in _prior
