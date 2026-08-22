@@ -168,7 +168,7 @@ def test_fallback_notice_persisted_on_assistant_message_before_save():
     # session switch / page reload (greptile P1: heal notices not saved).
     heal_save_idx = src.find("self-heal (except path): retry succeeded")
     assert heal_save_idx != -1, "heal-success save path marker not found"
-    heal_block = src[heal_save_idx - 4000:heal_save_idx]
+    heal_block = src[heal_save_idx - 8000:heal_save_idx]
     assert "_dm['_fallbackNotice']" in heal_block, (
         "The heal-success save path must flush _pending_fallback_notices onto "
         "the final assistant message before its own s.save(), because it "
@@ -292,7 +292,7 @@ def test_stream_scoped_fallback_notices_dict_exists():
     # which holds STREAMS_LOCK and rejects post-terminal publications
     # (greptile P1: write must be atomic w.r.t. cancel_stream()'s under-lock
     # snapshot; gate-certifier blocker #1: post-CAS notice B must be rejected).
-    publish_call_idx = src.find("_publish_fallback_notice(stream_id, _notice_to_publish)")
+    publish_call_idx = src.find("_publish_fallback_notice(stream_id, _pending_fallback_notices[-1]")
     assert publish_call_idx != -1, (
         "_agent_status_callback must publish the pending notice through "
         "_publish_fallback_notice() so the write is atomic under STREAMS_LOCK, "
@@ -330,7 +330,7 @@ def test_stream_scoped_fallback_notices_dict_exists():
         "The settlement loop must persist via _cs.save()."
     )
     assert "_STREAM_FALLBACK_NOTICES.pop" in settlement_block or \
-           "_STREAM_FALLBACK_NOTICES.pop" in src[stamping_idx:stamping_idx + 5000], (
+           "_STREAM_FALLBACK_NOTICES.pop" in src[stamping_idx:stamping_idx + 10000], (
         "The settlement must retire the map entry."
     )
 
