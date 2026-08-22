@@ -52,6 +52,11 @@ async function cancelStream(reason){
   // `cancel` event can clear INFLIGHT, render "Task cancelled", and refresh
   // the sidebar. Only clear locally when the backend says there is no active
   // stream left to settle.
+  // Track persistence failure so callers can preserve the warning instead of
+  // overwriting it with a success toast (gate-certifier blocker #4: SILENT
+  // false success — active-chat persistence failure was overwritten by
+  // success UI).
+  let _persistenceFailed = false;
   if(respOk && respBody && respBody.cancelled===false && S.activeStreamId===streamId){
     S.activeStreamId=null;
     setBusy(false);
@@ -60,13 +65,21 @@ async function cancelStream(reason){
     // The server may report a fallback-notice persistence failure even though
     // the stream is no longer active; preserve the pending-prompt cleanup.
     if(typeof _clearPendingPromptsForSession==='function') _clearPendingPromptsForSession(sid);
+    // Surface persistence failure honestly: when the backend reports
+    // persistence_failed, the terminal fallback notice could not be saved —
+    // show a truthful warning instead of the generic "stream no longer
+    // active" toast.
     if(respBody.persistence_failed && typeof showToast==='function'){
+      _persistenceFailed = true;
       showToast('Cancellation incomplete — response may not be fully saved',4000);
     }else if(typeof showToast==='function'){
       showToast('Stream is no longer active',2000);
     }
   }
-  return respOk;
+  // Return a structured cancellation result matching cancelSessionStream()'s
+  // contract so callers can distinguish success from persistence failure
+  // (gate-certifier blocker #4).
+  return {cancelled: respOk, persistence_failed: _persistenceFailed};
 }
 
 async function cancelSessionStream(session){
