@@ -2775,6 +2775,10 @@ list.querySelectorAll = function(sel) {{
 const _origCreate = _createTouchGroupWrapper;
 _createTouchGroupWrapper = function(g, st) {{
   const wrapper = _origCreate(g, st);
+  // Fix dataset key: the mock's setAttribute converts 'data-group-label' to
+  // 'grouplabel' (removing hyphens), but our DOM-faithful querySelector
+  // checks 'group-label'. Set it directly to match.
+  wrapper.dataset['group-label'] = g.label;
   const trackingBody = makeBodyThatTracksItems(list);
   trackingBody.className = 'session-date-body';
   wrapper.children = wrapper.children.filter(c => c.className !== 'session-date-body');
@@ -5280,7 +5284,7 @@ console.log(JSON.stringify({{
     assert result["pendingFinal"] is False, \
         f"_touchBatchPending must be false after chain completes, got {result['pendingFinal']}"
     assert result["ownerNull"] is True, \
-        f"_touchContinuousBatchOwner must be null after chain completes"
+        "_touchContinuousBatchOwner must be null after chain completes"
     assert result["totalItems"] == 180, \
         f"DOM should have 180 items, got {result['totalItems']}"
     assert result["uniqueCount"] == 180, \
@@ -5451,3 +5455,298 @@ console.log(JSON.stringify({
         f"scrollTop must be preserved ({result['scrollBefore']} → {result['scrollAfter']})"
     assert result["scrollAfter"] == 5000, \
         f"scrollTop must remain 5000, got {result['scrollAfter']}"
+
+
+@_node_tests
+def test_prepend_crosses_absent_earlier_group_inserts_before_live_later():
+    """Production-composed: prepend crosses into an entirely absent earlier
+    date group A while the current later group B remains live.
+
+    The prepend interval [targetStart, oldStart) contains only absent group A.
+    commitTargets therefore has exactly one entry (A, isNew=true). The old
+    Phase 2 forward search found no non-new successor within commitTargets and
+    fell through to the sentinel branch — which inserts AFTER the already-live
+    group B, producing live order B, A instead of canonical A, B.
+
+    Fix: derive the insertion position from the full canonical group order /
+    live DOM. The group at oldStart (group B) is the canonical successor to
+    every prepend-interval group. Insert all new wrappers before it.
+
+    This test exercises the full production-composed chain:
+    renderSessionListFromCache-equivalent initial paint → _prependTouchBatch →
+    verify exact wrapper identity/order, exact SID order, no duplicates,
+    unchanged viewport anchor, and correct start/end advancement across
+    repeated prepends.
+
+    Scenario: 120 rows in 3 groups.
+      - Group A (rows 0-39):  "Earlier"  — entirely absent at start
+      - Group B (rows 40-79): "Today"    — live, current window starts here
+      - Group C (rows 80-119):"Later"    — live, current window ends here
+    Initial window: [40, 120) painted. Start=40, loaded=120.
+    First prepend: [0, 40) → group A created and inserted BEFORE group B.
+    Verify: live order is A, B, C (canonical), SIDs s0..s119 exactly once,
+    start=0, loaded=120, scrollTop unchanged.
+    """
+    total = 120
+    flat_rows = []
+    for i in range(total):
+        if i < 40:
+            label = "Earlier"
+        elif i < 80:
+            label = "Today"
+        else:
+            label = "Later"
+        flat_rows.append({
+            "group": {"label": label, "isPinned": False},
+            "session": {"session_id": f"s{i}"},
+        })
+
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchTotalCount = {total};
+
+// ── DOM-faithful list: querySelector/querySelectorAll derive authority
+//    from the live child tree (list.children), NOT from _groups/_items
+//    side registries. ──
+list.querySelector = function(sel) {{
+  if (sel === '[data-touch-sentinel]') {{
+    return list.children.find(c => c.dataset && c.dataset['touch-sentinel'] !== undefined) || null;
+  }}
+  var m = sel.match(/^\\.session-date-group\\[data-group-label="([^"]+)"\\]$/);
+  if (m) {{
+    return list.children.find(c => c.dataset && c.dataset['group-label'] === m[1]) || null;
+  }}
+  m = sel.match(/^\\.session-date-group\\[data-group-label\\]$/);
+  if (m) {{
+    return list.children.find(c => c.dataset && c.dataset['group-label'] !== undefined) || null;
+  }}
+  return null;
+}};
+list.querySelectorAll = function(sel) {{
+  if (sel === '.session-item[data-sid]') {{
+    var items = [];
+    for (var gi = 0; gi < list.children.length; gi++) {{
+      var gw = list.children[gi];
+      if (!gw.dataset || gw.dataset['group-label'] === undefined) continue;
+      var body = null;
+      if (typeof gw.querySelector === 'function') {{
+        body = gw.querySelector('.session-date-body');
+      }} else {{
+        body = gw.children.find(c => c.className && c.className.indexOf('session-date-body') >= 0) || null;
+      }}
+      if (!body) continue;
+      for (var bi = 0; bi < body.children.length; bi++) {{
+        var c = body.children[bi];
+        if (c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid) {{
+          items.push(c);
+        }}
+      }}
+    }}
+    return items;
+  }}
+  if (sel === '.session-date-group[data-group-label]') {{
+    return list.children.filter(c => c.dataset && c.dataset['group-label'] !== undefined);
+  }}
+  if (sel === '.session-virtual-spacer[data-virtual-spacer="after"]') {{
+    return list._afterSpacers || [];
+  }}
+  return [];
+}};
+
+// Override _createTouchGroupWrapper so newly created group A's body tracks
+// session items in the live DOM tree.
+const _origCreate = _createTouchGroupWrapper;
+_createTouchGroupWrapper = function(g, st) {{
+  const wrapper = _origCreate(g, st);
+  // Fix dataset key: the mock's setAttribute converts 'data-group-label' to
+  // 'grouplabel' (removing hyphens), but our DOM-faithful querySelector
+  // checks 'group-label'. Set it directly to match.
+  wrapper.dataset['group-label'] = g.label;
+  const trackingBody = makeBodyThatTracksItems(list);
+  trackingBody.className = 'session-date-body';
+  wrapper.children = wrapper.children.filter(c => c.className !== 'session-date-body');
+  wrapper.appendChild(trackingBody);
+  wrapper.querySelector = function(sel) {{
+    if (sel === '.session-date-body') return trackingBody;
+    return null;
+  }};
+  wrapper.querySelectorAll = function(sel) {{
+    if (sel === '.session-virtual-spacer[data-virtual-spacer="after"]') {{
+      return trackingBody.children.filter(c => c.className && c.className.indexOf('session-virtual-spacer') >= 0);
+    }}
+    if (sel === '.session-virtual-spacer[data-virtual-spacer="before"]') {{
+      return trackingBody.children.filter(c => c.className && c.className.indexOf('session-virtual-spacer') >= 0 && c.dataset && c.dataset['virtual-spacer'] === 'before');
+    }}
+    return [];
+  }};
+  return wrapper;
+}};
+
+// ── Helper: create a live group wrapper with a tracking body ──
+function makeLiveGroup(label) {{
+  const gw = makeEl('div');
+  gw.className = 'session-date-group';
+  gw.dataset['group-label'] = label;
+  const body = makeBodyThatTracksItems(list);
+  body.className = 'session-date-body';
+  gw.appendChild(body);
+  gw.querySelector = function(sel) {{
+    if (sel === '.session-date-body') return body;
+    return null;
+  }};
+  gw.querySelectorAll = function(sel) {{
+    if (sel === '.session-virtual-spacer[data-virtual-spacer="after"]') {{
+      return body.children.filter(c => c.className && c.className.indexOf('session-virtual-spacer') >= 0);
+    }}
+    if (sel === '.session-virtual-spacer[data-virtual-spacer="before"]') {{
+      return body.children.filter(c => c.className && c.className.indexOf('session-virtual-spacer') >= 0 && c.dataset && c.dataset['virtual-spacer'] === 'before');
+    }}
+    return [];
+  }};
+  return gw;
+}}
+
+// ── Initial paint: groups B (Today, rows 40-79) and C (Later, rows 80-119) ──
+// Group A (Earlier, rows 0-39) is ENTIRELY ABSENT — no wrapper in the DOM.
+const gwB = makeLiveGroup('Today');
+const bodyB = gwB.querySelector('.session-date-body');
+for (let i = 40; i < 80; i++) bodyB.appendChild(makeSessionItem('s' + i));
+list.children.push(gwB);
+
+const gwC = makeLiveGroup('Later');
+const bodyC = gwC.querySelector('.session-date-body');
+for (let i = 80; i < 120; i++) bodyC.appendChild(makeSessionItem('s' + i));
+list.children.push(gwC);
+
+// Sentinel
+const sentinel = makeEl('div');
+sentinel.className = 'touch-sentinel';
+sentinel.dataset['touch-sentinel'] = '1';
+list.children.push(sentinel);
+
+// Touch state: window starts at row 40 (group B), loaded=120
+_sessionTouchStartIndex = 40;
+_sessionTouchLoadedCount = 120;
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: 's60',
+  itemHeight: SESSION_VIRTUAL_ROW_HEIGHT,
+}};
+
+// Set scrollTop to simulate the user scrolled into the middle of group B
+list.scrollTop = 40 * SESSION_VIRTUAL_ROW_HEIGHT + 200;
+const scrollBefore = list.scrollTop;
+
+// ── Snapshot live tree BEFORE prepend ──
+const labelsBefore = list.children
+  .filter(c => c.dataset && c.dataset['group-label'] !== undefined)
+  .map(c => c.dataset['group-label']);
+const itemCountBefore = list.querySelectorAll('.session-item[data-sid]').length;
+
+// ── Execute prepend: [0, 40) → group A created and inserted before B ──
+// ── Execute prepend: [0, 40) → group A created and inserted before B ──
+_prependTouchBatch();
+
+// ── Verify AFTER prepend ──
+const labelsAfter = list.children
+  .filter(c => c.dataset && c.dataset['group-label'] !== undefined)
+  .map(c => c.dataset['group-label']);
+const scrollAfter = list.scrollTop;
+const allItems = list.querySelectorAll('.session-item[data-sid]');
+const allSids = allItems.map(i => i.dataset.sid);
+const uniqueSids = new Set(allSids).size;
+
+// Wrapper identity: group A must be a real element in the tree, B and C must
+// be the SAME objects as before (not replaced).
+const gwAAfter = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Earlier');
+const gwBAfter = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Today');
+const gwCAfter = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Later');
+const bSameRef = gwBAfter === gwB;
+const cSameRef = gwCAfter === gwC;
+const aExists = gwAAfter !== null && gwAAfter !== undefined;
+
+// SID order: must be s0..s119 in order across all groups
+const ordered = allSids.every((sid, idx) => sid === 's' + idx);
+
+// Body ownership: A=s0..s39, B=s40..s79, C=s80..s119
+const bodyA = gwAAfter ? gwAAfter.querySelector('.session-date-body') : null;
+const sidsInA = bodyA ? bodyA.children
+  .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
+  .map(c => c.dataset.sid) : [];
+const sidsInB = gwBAfter.querySelector('.session-date-body').children
+  .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
+  .map(c => c.dataset.sid);
+const sidsInC = gwCAfter.querySelector('.session-date-body').children
+  .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
+  .map(c => c.dataset.sid);
+
+const result = {{
+  labelsBefore: labelsBefore,
+  labelsAfter: labelsAfter,
+  itemCountBefore: itemCountBefore,
+  itemCountAfter: allItems.length,
+  uniqueSids: uniqueSids,
+  ordered: ordered,
+  startAfter: _sessionTouchStartIndex,
+  loadedAfter: _sessionTouchLoadedCount,
+  scrollBefore: scrollBefore,
+  scrollAfter: scrollAfter,
+  scrollPreserved: scrollBefore === scrollAfter,
+  aExists: aExists,
+  bSameRef: bSameRef,
+  cSameRef: cSameRef,
+  sidsInA: sidsInA,
+  sidsInB: sidsInB,
+  sidsInC: sidsInC,
+}};
+console.log(JSON.stringify(result));
+"""
+    result = json.loads(_run_node_vm(source))
+
+    # Before prepend: only B and C exist (no A)
+    assert result["labelsBefore"] == ["Today", "Later"], \
+        f"Before prepend, only B and C should exist, got {result['labelsBefore']}"
+
+    # After prepend: A must be FIRST (canonical order A, B, C) — NOT B, A, C
+    assert result["labelsAfter"] == ["Earlier", "Today", "Later"], \
+        f"After prepend, order must be A, B, C (canonical), got {result['labelsAfter']}"
+
+    # Item count: 40 new + 80 existing = 120
+    assert result["itemCountAfter"] == total, \
+        f"After prepend, total items must be {total}, got {result['itemCountAfter']}"
+
+    # No duplicates
+    assert result["uniqueSids"] == total, \
+        f"After prepend, all {total} SIDs must be unique, got {result['uniqueSids']}"
+
+    # SIDs in canonical order s0..s119
+    assert result["ordered"] is True, \
+        f"After prepend, SIDs must be in order s0..s{total-1}"
+
+    # Start advanced to 0, loaded unchanged at 120
+    assert result["startAfter"] == 0, \
+        f"After prepend, startIndex must be 0, got {result['startAfter']}"
+    assert result["loadedAfter"] == total, \
+        f"After prepend, loadedCount must stay {total}, got {result['loadedAfter']}"
+
+    # Viewport anchor preserved
+    assert result["scrollPreserved"] is True, \
+        f"scrollTop must be preserved ({result['scrollBefore']} → {result['scrollAfter']})"
+
+    # Wrapper identity: A exists, B and C are the same object refs
+    assert result["aExists"] is True, "Group A wrapper must exist after prepend"
+    assert result["bSameRef"] is True, "Group B wrapper must be the same object reference"
+    assert result["cSameRef"] is True, "Group C wrapper must be the same object reference"
+
+    # Body ownership: A=s0..s39, B=s40..s79, C=s80..s119
+    assert result["sidsInA"] == [f"s{i}" for i in range(40)], \
+        f"Group A must contain s0..s39, got {result['sidsInA']}"
+    assert result["sidsInB"] == [f"s{i}" for i in range(40, 80)], \
+        f"Group B must contain s40..s79, got {result['sidsInB']}"
+    assert result["sidsInC"] == [f"s{i}" for i in range(80, 120)], \
+        f"Group C must contain s80..s119, got {result['sidsInC']}"
