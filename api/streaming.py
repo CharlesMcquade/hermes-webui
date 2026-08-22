@@ -3068,6 +3068,45 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.',
             if _fb is not None:
                 _cancel_msg['_fallbackNotice'] = _clean_fallback_notice(_fb)
         session.messages.append(_cancel_msg)
+    elif stream_id is not None:
+        # A cancel marker already exists (e.g. cancel_stream wrote it first,
+        # then the worker's _finalize_cancelled_turn reaches here with a newer
+        # dead-letter generation).  Stamp the CURRENT notice on the existing
+        # marker row so the exact (generation, clean notice) pair actually
+        # serialized is durable (gate-certifier blocker #3: SILENT false
+        # durability — worker recovery can mark a newer dead-letter generation
+        # saved without stamping it).  Without this, the worker captures
+        # generation 2 but saves the unchanged generation-1 row, then records
+        # gen 2 as durable and deletes its dead letter — without ever stamping
+        # gen 2 on the persisted row.
+        _fb = _STREAM_FALLBACK_NOTICES.get(stream_id)
+        if _fb is None:
+            _fb = _dead_letter_notice(_STREAM_FALLBACK_DEAD_LETTER.get(stream_id))
+        if _fb is not None:
+            _fb_clean = _clean_fallback_notice(_fb)
+            # Find the existing cancel marker (last assistant message with a
+            # cancel pattern before the next user message) and stamp it.
+            for _idx in range(len(session.messages) - 1, -1, -1):
+                _m = session.messages[_idx]
+                if not isinstance(_m, dict):
+                    continue
+                if _m.get('role') == 'user':
+                    break
+                if _m.get('role') != 'assistant':
+                    continue
+                _content = _m.get('content')
+                _text = ''
+                if isinstance(_content, str):
+                    _text = _content
+                elif isinstance(_content, list):
+                    _parts = []
+                    for _part in _content:
+                        if isinstance(_part, dict):
+                            _parts.append(str(_part.get('text') or _part.get('content') or ''))
+                    _text = '\n'.join(_parts)
+                if any(_p in _text.strip().lower() for _p in _CANCEL_MARKER_PATTERNS):
+                    _m['_fallbackNotice'] = _fb_clean
+                    break
 
 
 def _cleanup_ephemeral_cancelled_turn(session) -> None:
@@ -9860,6 +9899,21 @@ def _run_agent_streaming(
                 "Failed to clear session writeback owner for stream %s", stream_id,
                 exc_info=True,
             )
+        # Retire the worker settlement participant that cancel_stream() may have
+        # registered for this stream (gate-certifier blocker #1: SILENT lifecycle
+        # leak — pre-start local exits never retire the registered worker
+        # participant, leaking _STREAM_SETTLEMENT_PARTICIPANTS and the terminal
+        # fence indefinitely).  When the worker never started, there is no
+        # durable save to compare against, so retire unconditionally under the
+        # lock.  _retire_worker_cancelled_state_locked is a no-op for streams
+        # that never entered cancellation settlement.
+        try:
+            _retire_worker_cancelled_state(stream_id)
+        except Exception:
+            logger.debug(
+                "Failed to retire worker settlement participant for pre-start "
+                "stream %s", stream_id, exc_info=True,
+            )
         return
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
@@ -14608,6 +14662,7 @@ def cancel_stream(stream_id: str) -> dict:
     _snap_owner_session_id = None
     _claimed_fb_notice = None
     _claimed_fb_generation = None
+    _cancel_session_id = None
     _cancel_session_payload = None
 
     with streams_lock:
@@ -15147,7 +15202,6 @@ def cancel_stream(stream_id: str) -> dict:
                             # a notice published during the first no-notice
                             # save was never persisted).  Fence/finish only
                             # while the map remains empty.
-                            #
                             # ATOMIC no-notice recheck + terminal-fence
                             # install (gate-certifier blocker #1): the
                             # empty-map check and the fence add MUST happen
@@ -15175,18 +15229,15 @@ def cancel_stream(stream_id: str) -> dict:
                                     # it.  Do NOT install the fence: the
                                     # stream is still owned by an unsaved
                                     # notice.
-                                    pass
-                                else:
-                                    # No notice appeared — settlement done.
-                                    # Install the terminal fence WHILE STILL
-                                    # HOLDING the lock so no callback can
-                                    # publish generation B into the
-                                    # now-unfenced stream between this read
-                                    # and a later fence add.
-                                    _STREAM_SETTLEMENT_TERMINAL.add(stream_id)
-                                    _settled = True
-                            if _late_fb is not None:
-                                continue
+                                    continue
+                                # No notice appeared — settlement done.
+                                # Install the terminal fence WHILE STILL
+                                # HOLDING the lock so no callback can
+                                # publish generation B into the
+                                # now-unfenced stream between this read
+                                # and a later fence add.
+                                _STREAM_SETTLEMENT_TERMINAL.add(stream_id)
+                                _settled = True
                             break
                         with streams_lock:
                             _final_fb = _STREAM_FALLBACK_NOTICES.get(stream_id)
