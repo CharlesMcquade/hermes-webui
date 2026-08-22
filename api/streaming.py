@@ -15135,8 +15135,15 @@ def cancel_stream(stream_id: str) -> bool:
             # canonical event ID and a late Steer could land after it.
             _cancel_run_journal = None
             try:
+                # #7188 CORE #5: use the immutable journal session id
+                # (captured at run admission) for the terminal journal,
+                # NOT _cancel_session_id which may be the compression
+                # continuation id. The fence was closed under
+                # _journal_session_id above; the terminal must land in
+                # the SAME journal so the run's events are not split
+                # across two session journals.
                 _cancel_run_journal = RunJournalWriter(
-                    str(_cancel_session_id or active_run_session_id or ""),
+                    str(_journal_session_id or active_run_session_id or _cancel_session_id or ""),
                     str(stream_id),
                 )
             except Exception:
