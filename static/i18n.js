@@ -12526,6 +12526,7 @@ const LOCALES = {
     sessions_source_webui: 'WebUI 對話 ({0})',
     sessions_source_cli: 'CLI 對話 ({0})',
     _speech: 'zh-TW',
+    loading_more: '載入更多…',
     // boot.js
     cancelling: '正在取消……',
     cancel_failed: '取消失敗。',
