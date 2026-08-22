@@ -12158,6 +12158,7 @@ const LOCALES = {
     _lang: 'zh-Hant',
     _label: '繁體中文',
     _speech: 'zh-TW',
+    loading_more: '載入更多…',
     // boot.js
     cancelling: '正在取消……',
     cancel_failed: '取消失敗。',
