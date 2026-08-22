@@ -14423,18 +14423,46 @@ def cancel_stream(stream_id: str) -> dict:
                             # a notice published during the first no-notice
                             # save was never persisted).  Fence/finish only
                             # while the map remains empty.
+                            #
+                            # ATOMIC no-notice recheck + terminal-fence
+                            # install (gate-certifier blocker #1): the
+                            # empty-map check and the fence add MUST happen
+                            # in the SAME streams_lock critical section.  A
+                            # status callback can acquire the lock in the gap
+                            # between a lock-released empty read and a
+                            # later fence add, observe no terminal fence,
+                            # and publish generation B.  Cancel then
+                            # installs the fence and exits without stamping
+                            # B; if the worker participant has already
+                            # retired, the outer completion removes
+                            # settlement authority while B remains unsaved
+                            # and ownerless.  Performing both the recheck
+                            # and the fence add under the single lock
+                            # acquisition closes that gap: either a notice
+                            # exists (continue settlement to persist it) or
+                            # the fence is installed before the lock is
+                            # released (no callback can publish into an
+                            # unfenced stream).
                             with streams_lock:
                                 _late_fb = _STREAM_FALLBACK_NOTICES.get(stream_id)
+                                if _late_fb is not None:
+                                    # A notice appeared during the first
+                                    # save — loop back to stamp and persist
+                                    # it.  Do NOT install the fence: the
+                                    # stream is still owned by an unsaved
+                                    # notice.
+                                    pass
+                                else:
+                                    # No notice appeared — settlement done.
+                                    # Install the terminal fence WHILE STILL
+                                    # HOLDING the lock so no callback can
+                                    # publish generation B into the
+                                    # now-unfenced stream between this read
+                                    # and a later fence add.
+                                    _STREAM_SETTLEMENT_TERMINAL.add(stream_id)
+                                    _settled = True
                             if _late_fb is not None:
-                                # A notice appeared during the first save —
-                                # loop back to stamp and persist it.
                                 continue
-                            # No notice appeared — settlement done.
-                            # Set the fence for consistency: the post-settlement
-                            # window must stay sealed even when there was no
-                            # notice to retire.
-                            _STREAM_SETTLEMENT_TERMINAL.add(stream_id)
-                            _settled = True
                             break
                         with streams_lock:
                             _final_fb = _STREAM_FALLBACK_NOTICES.get(stream_id)
