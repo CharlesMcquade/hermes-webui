@@ -12,8 +12,6 @@ Blocker #4: SILENT false success — active-chat persistence failure is
 
 Each test MUST fail before the fix and pass after.
 """
-import queue
-import threading
 from unittest.mock import Mock
 
 import pytest
@@ -72,7 +70,7 @@ class TestBlocker1PreStartWorkerRetirement:
         removed, the pre-start return must retire the worker participant."""
         from api.streaming import (
             STREAMS_LOCK,
-            _STREAM_SETTLEMENT_PARTICIPANTS, _STREAM_SETTLEMENT_TERMINAL,
+            _STREAM_SETTLEMENT_PARTICIPANTS,
             _STREAM_CANCEL_CLAIMED,
             _set_stream_settlement_participants_locked,
             _retire_worker_cancelled_state,
@@ -262,7 +260,7 @@ class TestBlocker2FirstSaveNoticeBarrier:
         _STREAM_FALLBACK_NOTICES after the save and continue settlement if
         a notice appeared."""
         from api.streaming import (
-            STREAMS_LOCK, _STREAM_FALLBACK_NOTICES, _STREAM_SETTLEMENT_TERMINAL,
+            STREAMS_LOCK, _STREAM_FALLBACK_NOTICES,
             _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_PARTICIPANTS,
             _publish_fallback_notice, _clean_fallback_notice,
             _stamp_notice_on_current_turn_row,
@@ -310,7 +308,6 @@ class TestBlocker2FirstSaveNoticeBarrier:
         # Simulate the settlement loop's first-save-with-no-notice path
         # followed by the recheck.  We test the recheck logic directly:
         # after the first save, we recheck _STREAM_FALLBACK_NOTICES.
-        from api.streaming import _STREAM_NOTICE_GENERATION
 
         # First save (no notice exists yet)
         mock_session.messages.append({'role': 'assistant', 'content': 'Task cancelled.', '_error': True})
@@ -355,7 +352,7 @@ class TestBlocker3PreExistingMarkerNewerDeadLetter:
         """_persist_cancelled_turn() must stamp the fallback notice on the
         existing cancel marker row even when a marker already exists."""
         from api.streaming import (
-            _persist_cancelled_turn, _STREAM_FALLBACK_NOTICES,
+            _persist_cancelled_turn,
             _STREAM_FALLBACK_DEAD_LETTER, STREAMS_LOCK,
         )
 
