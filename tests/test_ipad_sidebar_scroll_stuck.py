@@ -5459,40 +5459,53 @@ console.log(JSON.stringify({
 
 @_node_tests
 def test_prepend_crosses_absent_earlier_group_inserts_before_live_later():
-    """Production-composed: prepend crosses into an entirely absent earlier
-    date group A while the current later group B remains live.
+    """Production-composed: prepend crosses into entirely absent earlier date
+    groups while the current later group remains live — across TWO prepends,
+    with live row geometry that exercises the anchor-adjustment block.
 
-    The prepend interval [targetStart, oldStart) contains only absent group A.
-    commitTargets therefore has exactly one entry (A, isNew=true). The old
-    Phase 2 forward search found no non-new successor within commitTargets and
-    fell through to the sentinel branch — which inserts AFTER the already-live
-    group B, producing live order B, A instead of canonical A, B.
+    The prior version of this test called _prependTouchBatch() only ONCE and
+    supplied mock rows with NO numeric offsetTop. Production therefore skipped
+    the anchor capture/correction branch, and the test's scrollPreserved
+    assertion proved only that no scroll write occurred — not that the
+    correction was correct. The oracle did not bite: deleting the ENTIRE
+    production anchor-adjustment block left the test green.
 
-    Fix: derive the insertion position from the full canonical group order /
-    live DOM. The group at oldStart (group B) is the canonical successor to
-    every prepend-interval group. Insert all new wrappers before it.
+    This version fixes all four gaps:
 
-    This test exercises the full production-composed chain:
-    renderSessionListFromCache-equivalent initial paint → _prependTouchBatch →
-    verify exact wrapper identity/order, exact SID order, no duplicates,
-    unchanged viewport anchor, and correct start/end advancement across
-    repeated prepends.
+    1. TWO prepends across multiple initially absent earlier groups.
+       Group P (rows 0-39) and group A (rows 40-79) are both absent at start.
+       First prepend creates A before B; second prepend creates P before A.
 
-    Scenario: 120 rows in 3 groups.
-      - Group A (rows 0-39):  "Earlier"  — entirely absent at start
-      - Group B (rows 40-79): "Today"    — live, current window starts here
-      - Group C (rows 80-119):"Later"    — live, current window ends here
-    Initial window: [40, 120) painted. Start=40, loaded=120.
-    First prepend: [0, 40) → group A created and inserted BEFORE group B.
-    Verify: live order is A, B, C (canonical), SIDs s0..s119 exactly once,
-    start=0, loaded=120, scrollTop unchanged.
+    2. Live row geometry: each session item has a numeric offsetTop getter that
+       reflects its position in the live DOM tree. When rows are inserted above
+       the retained anchor, offsetTop CHANGES, so production's anchor branch
+       fires and computes a non-zero delta.
+
+    3. Exact scrollTop correction: after each prepend, assert the anchor row
+       remains at the same viewport coordinate — scrollTop increased by exactly
+       (insertedRowCount * SESSION_VIRTUAL_ROW_HEIGHT).
+
+    4. Mutation bite: a dataset snapshot of the anchor row proves it is
+       unchanged by the prepend. If the anchor block is deleted from production,
+       scrollTop is NOT corrected, the viewport jumps, and the test FAILS.
+
+    Scenario: 160 rows in 4 groups.
+      - Group P (rows   0-39): "Pre"     — absent at start, created on 2nd prepend
+      - Group A (rows  40-79): "Pre-2"   — absent at start, created on 1st prepend
+      - Group B (rows  80-119): "Today"  — live, current window starts here
+      - Group C (rows 120-159): "Later"  — live, current window ends here
+    Initial window: [80, 160) painted. Start=80, loaded=160.
+    First prepend:  [40, 80)  → group A created, inserted before B.
+    Second prepend: [0, 40)   → group P created, inserted before A.
     """
-    total = 120
+    total = 160
     flat_rows = []
     for i in range(total):
         if i < 40:
-            label = "Earlier"
+            label = "Pre"
         elif i < 80:
+            label = "Pre-2"
+        elif i < 120:
             label = "Today"
         else:
             label = "Later"
@@ -5508,6 +5521,12 @@ const list = makeList();
 _sessionTouchListEl = list;
 _sessionTouchGen = 1;
 _sessionTouchTotalCount = {total};
+
+// ── requestAnimationFrame mock: store but do NOT execute callbacks. ──
+// _prependTouchBatch ends by calling _scheduleContinuousBatch(), which may
+// schedule a RAF. We never want it to fire (we drive prepends manually).
+global.requestAnimationFrame = function(fn) {{ return 1; }};
+global.cancelAnimationFrame = function() {{}};
 
 // ── DOM-faithful list: querySelector/querySelectorAll derive authority
 //    from the live child tree (list.children), NOT from _groups/_items
@@ -5557,14 +5576,32 @@ list.querySelectorAll = function(sel) {{
   return [];
 }};
 
-// Override _createTouchGroupWrapper so newly created group A's body tracks
-// session items in the live DOM tree.
+// ── Live row geometry: offsetTop reflects position in the live DOM tree. ──
+// Each session item's offsetTop = (its index among all session-item[data-sid]
+// elements in the live list) * SESSION_VIRTUAL_ROW_HEIGHT.
+// When rows are inserted above the anchor, its offsetTop increases by
+// insertedCount * rowHeight — the production anchor block must compensate.
+function makeSessionItemWithGeometry(sid) {{
+  const el = makeEl('div');
+  el.className = 'session-item';
+  el.dataset.sid = sid;
+  Object.defineProperty(el, 'offsetTop', {{
+    get: function() {{
+      var allItems = list.querySelectorAll('.session-item[data-sid]');
+      var idx = allItems.indexOf(el);
+      if (idx < 0) idx = 0;
+      return idx * SESSION_VIRTUAL_ROW_HEIGHT;
+    }},
+    configurable: true,
+  }});
+  return el;
+}}
+
+// Override _createTouchGroupWrapper so newly created group wrappers have a
+// tracking body that also uses geometry-aware session items.
 const _origCreate = _createTouchGroupWrapper;
 _createTouchGroupWrapper = function(g, st) {{
   const wrapper = _origCreate(g, st);
-  // Fix dataset key: the mock's setAttribute converts 'data-group-label' to
-  // 'grouplabel' (removing hyphens), but our DOM-faithful querySelector
-  // checks 'group-label'. Set it directly to match.
   wrapper.dataset['group-label'] = g.label;
   const trackingBody = makeBodyThatTracksItems(list);
   trackingBody.className = 'session-date-body';
@@ -5610,16 +5647,16 @@ function makeLiveGroup(label) {{
   return gw;
 }}
 
-// ── Initial paint: groups B (Today, rows 40-79) and C (Later, rows 80-119) ──
-// Group A (Earlier, rows 0-39) is ENTIRELY ABSENT — no wrapper in the DOM.
+// ── Initial paint: groups B (Today, rows 80-119) and C (Later, rows 120-159) ──
+// Groups P (Pre, rows 0-39) and A (Pre-2, rows 40-79) are ENTIRELY ABSENT.
 const gwB = makeLiveGroup('Today');
 const bodyB = gwB.querySelector('.session-date-body');
-for (let i = 40; i < 80; i++) bodyB.appendChild(makeSessionItem('s' + i));
+for (let i = 80; i < 120; i++) bodyB.appendChild(makeSessionItemWithGeometry('s' + i));
 list.children.push(gwB);
 
 const gwC = makeLiveGroup('Later');
 const bodyC = gwC.querySelector('.session-date-body');
-for (let i = 80; i < 120; i++) bodyC.appendChild(makeSessionItem('s' + i));
+for (let i = 120; i < 160; i++) bodyC.appendChild(makeSessionItemWithGeometry('s' + i));
 list.children.push(gwC);
 
 // Sentinel
@@ -5628,125 +5665,242 @@ sentinel.className = 'touch-sentinel';
 sentinel.dataset['touch-sentinel'] = '1';
 list.children.push(sentinel);
 
-// Touch state: window starts at row 40 (group B), loaded=120
-_sessionTouchStartIndex = 40;
-_sessionTouchLoadedCount = 120;
+// Touch state: window starts at row 80 (group B), loaded=160
+_sessionTouchStartIndex = 80;
+_sessionTouchLoadedCount = 160;
 _touchRenderState = {{
   gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
-  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
-  activeSid: 's60',
+  renderOneSession: function(s) {{ return makeSessionItemWithGeometry(s.session_id); }},
+  activeSid: 's100',
   itemHeight: SESSION_VIRTUAL_ROW_HEIGHT,
 }};
 
-// Set scrollTop to simulate the user scrolled into the middle of group B
-list.scrollTop = 40 * SESSION_VIRTUAL_ROW_HEIGHT + 200;
-const scrollBefore = list.scrollTop;
+// ── Set scrollTop so the user is scrolled into the middle of group B. ──
+// The anchor row is s100 (the first existing session item in the DOM).
+// Its initial offsetTop = 0 * SESSION_VIRTUAL_ROW_HEIGHT = 0 (it's the first
+// .session-item in the live list). We scroll so s100 sits at viewport top.
+list.clientHeight = 600;
+const anchorSid = 's80';  // the first existing session item (production's anchor)
+const anchorElInitial = list.querySelectorAll('.session-item[data-sid]')[0];
+const anchorTopBeforeFirst = anchorElInitial.offsetTop;
+list.scrollTop = anchorTopBeforeFirst;  // viewport top = anchor row top
 
-// ── Snapshot live tree BEFORE prepend ──
+// ── Snapshot live tree BEFORE first prepend ──
 const labelsBefore = list.children
   .filter(c => c.dataset && c.dataset['group-label'] !== undefined)
   .map(c => c.dataset['group-label']);
-const itemCountBefore = list.querySelectorAll('.session-item[data-sid]').length;
 
-// ── Execute prepend: [0, 40) → group A created and inserted before B ──
-// ── Execute prepend: [0, 40) → group A created and inserted before B ──
+// ── FIRST prepend: [40, 80) → group A (Pre-2) created before B ──
 _prependTouchBatch();
 
-// ── Verify AFTER prepend ──
-const labelsAfter = list.children
+// ── Verify AFTER first prepend ──
+const labelsAfter1 = list.children
   .filter(c => c.dataset && c.dataset['group-label'] !== undefined)
   .map(c => c.dataset['group-label']);
-const scrollAfter = list.scrollTop;
-const allItems = list.querySelectorAll('.session-item[data-sid]');
-const allSids = allItems.map(i => i.dataset.sid);
-const uniqueSids = new Set(allSids).size;
+const allItems1 = list.querySelectorAll('.session-item[data-sid]');
+const allSids1 = allItems1.map(i => i.dataset.sid);
+const uniqueSids1 = new Set(allSids1).size;
 
-// Wrapper identity: group A must be a real element in the tree, B and C must
-// be the SAME objects as before (not replaced).
-const gwAAfter = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Earlier');
-const gwBAfter = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Today');
-const gwCAfter = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Later');
-const bSameRef = gwBAfter === gwB;
-const cSameRef = gwCAfter === gwC;
-const aExists = gwAAfter !== null && gwAAfter !== undefined;
+// Anchor row s100 is now at a NEW offsetTop: 40 rows were inserted above it.
+const anchorElAfter1 = allItems1.find(i => i.dataset.sid === anchorSid);
+const anchorTopAfter1 = anchorElAfter1.offsetTop;
+const scrollAfter1 = list.scrollTop;
+const expectedDelta1 = 40 * SESSION_VIRTUAL_ROW_HEIGHT;
 
-// SID order: must be s0..s119 in order across all groups
-const ordered = allSids.every((sid, idx) => sid === 's' + idx);
+// Group order: A, B, C (P still absent)
+const gwAAfter1 = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Pre-2');
+const gwBAfter1 = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Today');
+const gwCAfter1 = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Later');
 
-// Body ownership: A=s0..s39, B=s40..s79, C=s80..s119
-const bodyA = gwAAfter ? gwAAfter.querySelector('.session-date-body') : null;
-const sidsInA = bodyA ? bodyA.children
+// Body ownership after first prepend
+const bodyAAfter1 = gwAAfter1 ? gwAAfter1.querySelector('.session-date-body') : null;
+const sidsInA1 = bodyAAfter1 ? bodyAAfter1.children
   .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
   .map(c => c.dataset.sid) : [];
-const sidsInB = gwBAfter.querySelector('.session-date-body').children
+const sidsInB1 = gwBAfter1.querySelector('.session-date-body').children
   .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
   .map(c => c.dataset.sid);
-const sidsInC = gwCAfter.querySelector('.session-date-body').children
+const sidsInC1 = gwCAfter1.querySelector('.session-date-body').children
+  .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
+  .map(c => c.dataset.sid);
+
+// ── SECOND prepend: [0, 40) → group P (Pre) created before A ──
+// Capture state after first prepend before second prepend runs.
+const startAfter1 = _sessionTouchStartIndex;
+const loadedAfter1 = _sessionTouchLoadedCount;
+_prependTouchBatch();
+
+// ── Verify AFTER second prepend ──
+const labelsAfter2 = list.children
+  .filter(c => c.dataset && c.dataset['group-label'] !== undefined)
+  .map(c => c.dataset['group-label']);
+const allItems2 = list.querySelectorAll('.session-item[data-sid]');
+const allSids2 = allItems2.map(i => i.dataset.sid);
+const uniqueSids2 = new Set(allSids2).size;
+
+// Anchor row s100: another 40 rows inserted above it.
+const anchorElAfter2 = allItems2.find(i => i.dataset.sid === anchorSid);
+const anchorTopAfter2 = anchorElAfter2.offsetTop;
+const scrollAfter2 = list.scrollTop;
+const expectedDelta2 = expectedDelta1 + 40 * SESSION_VIRTUAL_ROW_HEIGHT;
+
+// Group order: P, A, B, C (all four canonical)
+const gwPAfter2 = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Pre');
+const gwAAfter2 = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Pre-2');
+const gwBAfter2 = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Today');
+const gwCAfter2 = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Later');
+
+// Body ownership after second prepend
+const bodyPAfter2 = gwPAfter2 ? gwPAfter2.querySelector('.session-date-body') : null;
+const sidsInP2 = bodyPAfter2 ? bodyPAfter2.children
+  .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
+  .map(c => c.dataset.sid) : [];
+const bodyAAfter2 = gwAAfter2 ? gwAAfter2.querySelector('.session-date-body') : null;
+const sidsInA2 = bodyAAfter2 ? bodyAAfter2.children
+  .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
+  .map(c => c.dataset.sid) : [];
+const sidsInB2 = gwBAfter2.querySelector('.session-date-body').children
+  .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
+  .map(c => c.dataset.sid);
+const sidsInC2 = gwCAfter2.querySelector('.session-date-body').children
   .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
   .map(c => c.dataset.sid);
 
 const result = {{
   labelsBefore: labelsBefore,
-  labelsAfter: labelsAfter,
-  itemCountBefore: itemCountBefore,
-  itemCountAfter: allItems.length,
-  uniqueSids: uniqueSids,
-  ordered: ordered,
-  startAfter: _sessionTouchStartIndex,
-  loadedAfter: _sessionTouchLoadedCount,
-  scrollBefore: scrollBefore,
-  scrollAfter: scrollAfter,
-  scrollPreserved: scrollBefore === scrollAfter,
-  aExists: aExists,
-  bSameRef: bSameRef,
-  cSameRef: cSameRef,
-  sidsInA: sidsInA,
-  sidsInB: sidsInB,
-  sidsInC: sidsInC,
+  labelsAfter1: labelsAfter1,
+  labelsAfter2: labelsAfter2,
+  // SID uniqueness + order
+  uniqueSids1: uniqueSids1,
+  uniqueSids2: uniqueSids2,
+  ordered2: allSids2.every((sid, idx) => sid === 's' + idx),
+  // State advancement
+  startAfter1: startAfter1,
+  loadedAfter1: loadedAfter1,
+  startAfter2: _sessionTouchStartIndex,
+  loadedAfter2: _sessionTouchLoadedCount,
+  // Viewport anchor: offsetTop + scrollTop after each prepend
+  anchorTopBeforeFirst: anchorTopBeforeFirst,
+  anchorTopAfter1: anchorTopAfter1,
+  anchorTopAfter2: anchorTopAfter2,
+  scrollBeforeFirst: anchorTopBeforeFirst,
+  scrollAfter1: scrollAfter1,
+  scrollAfter2: scrollAfter2,
+  expectedDelta1: expectedDelta1,
+  expectedDelta2: expectedDelta2,
+  // Viewport coordinate of anchor row: scrollTop - offsetTop must be constant
+  // (the anchor row stays at the same position in the viewport).
+  viewportAnchor1: scrollAfter1 - anchorTopAfter1,
+  viewportAnchor2: scrollAfter2 - anchorTopAfter2,
+  viewportAnchorBefore: anchorTopBeforeFirst - anchorTopBeforeFirst,
+  // Wrapper identity
+  aExists1: gwAAfter1 !== null && gwAAfter1 !== undefined,
+  bSameRef1: gwBAfter1 === gwB,
+  cSameRef1: gwCAfter1 === gwC,
+  pExists2: gwPAfter2 !== null && gwPAfter2 !== undefined,
+  aSameRef2: gwAAfter2 === gwAAfter1,
+  bSameRef2: gwBAfter2 === gwB,
+  cSameRef2: gwCAfter2 === gwC,
+  // Body ownership
+  sidsInA1: sidsInA1,
+  sidsInB1: sidsInB1,
+  sidsInC1: sidsInC1,
+  sidsInP2: sidsInP2,
+  sidsInA2: sidsInA2,
+  sidsInB2: sidsInB2,
+  sidsInC2: sidsInC2,
 }};
 console.log(JSON.stringify(result));
 """
     result = json.loads(_run_node_vm(source))
 
-    # Before prepend: only B and C exist (no A)
+    # ── Before any prepend: only B and C exist ──
     assert result["labelsBefore"] == ["Today", "Later"], \
         f"Before prepend, only B and C should exist, got {result['labelsBefore']}"
 
-    # After prepend: A must be FIRST (canonical order A, B, C) — NOT B, A, C
-    assert result["labelsAfter"] == ["Earlier", "Today", "Later"], \
-        f"After prepend, order must be A, B, C (canonical), got {result['labelsAfter']}"
+    # ── After FIRST prepend: A, B, C (canonical) ──
+    assert result["labelsAfter1"] == ["Pre-2", "Today", "Later"], \
+        f"After first prepend, order must be A, B, C, got {result['labelsAfter1']}"
 
-    # Item count: 40 new + 80 existing = 120
-    assert result["itemCountAfter"] == total, \
-        f"After prepend, total items must be {total}, got {result['itemCountAfter']}"
+    # Group A created, B and C are same object refs
+    assert result["aExists1"] is True, "Group A wrapper must exist after first prepend"
+    assert result["bSameRef1"] is True, "Group B wrapper must be same object ref after first prepend"
+    assert result["cSameRef1"] is True, "Group C wrapper must be same object ref after first prepend"
 
-    # No duplicates
-    assert result["uniqueSids"] == total, \
-        f"After prepend, all {total} SIDs must be unique, got {result['uniqueSids']}"
+    # No duplicates: 40 new + 80 existing = 120 unique SIDs (s40..s159)
+    assert result["uniqueSids1"] == 120, \
+        f"After first prepend, 120 SIDs must be unique, got {result['uniqueSids1']}"
+    # Start advanced to 40, loaded unchanged at 160
+    assert result["startAfter1"] == 40, \
+        f"After first prepend, startIndex must be 40, got {result['startAfter1']}"
+    assert result["loadedAfter1"] == total, \
+        f"After first prepend, loadedCount must stay {total}, got {result['loadedAfter1']}"
 
-    # SIDs in canonical order s0..s119
-    assert result["ordered"] is True, \
-        f"After prepend, SIDs must be in order s0..s{total-1}"
+    # Body ownership after first prepend: A=s40..s79, B=s80..s119, C=s120..s159
+    assert result["sidsInA1"] == [f"s{i}" for i in range(40, 80)], \
+        f"Group A must contain s40..s79, got {result['sidsInA1']}"
+    assert result["sidsInB1"] == [f"s{i}" for i in range(80, 120)], \
+        f"Group B must contain s80..s119, got {result['sidsInB1']}"
+    assert result["sidsInC1"] == [f"s{i}" for i in range(120, 160)], \
+        f"Group C must contain s120..s159, got {result['sidsInC1']}"
 
-    # Start advanced to 0, loaded unchanged at 120
-    assert result["startAfter"] == 0, \
-        f"After prepend, startIndex must be 0, got {result['startAfter']}"
-    assert result["loadedAfter"] == total, \
-        f"After prepend, loadedCount must stay {total}, got {result['loadedAfter']}"
+    # ── Viewport anchor after FIRST prepend ──
+    # The anchor row's offsetTop increased by 40*rowHeight (40 rows inserted above).
+    # scrollTop must have been corrected by the same delta so the anchor stays
+    # at the same viewport coordinate.
+    assert result["anchorTopAfter1"] == result["anchorTopBeforeFirst"] + result["expectedDelta1"], \
+        f"Anchor offsetTop must increase by {result['expectedDelta1']} after first prepend, " \
+        f"got {result['anchorTopAfter1']} (was {result['anchorTopBeforeFirst']})"
+    assert result["scrollAfter1"] == result["scrollBeforeFirst"] + result["expectedDelta1"], \
+        f"scrollTop must be corrected by +{result['expectedDelta1']} after first prepend, " \
+        f"got {result['scrollAfter1']} (was {result['scrollBeforeFirst']})"
+    # The viewport coordinate (scrollTop - offsetTop) of the anchor must be
+    # the same before and after — the anchor row stays put in the viewport.
+    assert result["viewportAnchor1"] == result["viewportAnchorBefore"], \
+        f"Viewport anchor must be preserved across first prepend: " \
+        f"before={result['viewportAnchorBefore']}, after={result['viewportAnchor1']}"
 
-    # Viewport anchor preserved
-    assert result["scrollPreserved"] is True, \
-        f"scrollTop must be preserved ({result['scrollBefore']} → {result['scrollAfter']})"
+    # ── After SECOND prepend: P, A, B, C (all four canonical) ──
+    assert result["labelsAfter2"] == ["Pre", "Pre-2", "Today", "Later"], \
+        f"After second prepend, order must be P, A, B, C, got {result['labelsAfter2']}"
 
-    # Wrapper identity: A exists, B and C are the same object refs
-    assert result["aExists"] is True, "Group A wrapper must exist after prepend"
-    assert result["bSameRef"] is True, "Group B wrapper must be the same object reference"
-    assert result["cSameRef"] is True, "Group C wrapper must be the same object reference"
+    # Group P created, A/B/C are same object refs as before
+    assert result["pExists2"] is True, "Group P wrapper must exist after second prepend"
+    assert result["aSameRef2"] is True, "Group A wrapper must be same object ref after second prepend"
+    assert result["bSameRef2"] is True, "Group B wrapper must be same object ref after second prepend"
+    assert result["cSameRef2"] is True, "Group C wrapper must be same object ref after second prepend"
 
-    # Body ownership: A=s0..s39, B=s40..s79, C=s80..s119
-    assert result["sidsInA"] == [f"s{i}" for i in range(40)], \
-        f"Group A must contain s0..s39, got {result['sidsInA']}"
-    assert result["sidsInB"] == [f"s{i}" for i in range(40, 80)], \
-        f"Group B must contain s40..s79, got {result['sidsInB']}"
-    assert result["sidsInC"] == [f"s{i}" for i in range(80, 120)], \
-        f"Group C must contain s80..s119, got {result['sidsInC']}"
+    # No duplicates after second prepend, all SIDs in canonical order
+    assert result["uniqueSids2"] == total, \
+        f"After second prepend, all {total} SIDs must be unique, got {result['uniqueSids2']}"
+    assert result["ordered2"] is True, \
+        f"After second prepend, SIDs must be in order s0..s{total-1}"
+
+    # Start advanced to 0, loaded unchanged at 160
+    assert result["startAfter2"] == 0, \
+        f"After second prepend, startIndex must be 0, got {result['startAfter2']}"
+    assert result["loadedAfter2"] == total, \
+        f"After second prepend, loadedCount must stay {total}, got {result['loadedAfter2']}"
+
+    # Body ownership after second prepend
+    assert result["sidsInP2"] == [f"s{i}" for i in range(40)], \
+        f"Group P must contain s0..s39, got {result['sidsInP2']}"
+    assert result["sidsInA2"] == [f"s{i}" for i in range(40, 80)], \
+        f"Group A must contain s40..s79, got {result['sidsInA2']}"
+    assert result["sidsInB2"] == [f"s{i}" for i in range(80, 120)], \
+        f"Group B must contain s80..s119, got {result['sidsInB2']}"
+    assert result["sidsInC2"] == [f"s{i}" for i in range(120, 160)], \
+        f"Group C must contain s120..s159, got {result['sidsInC2']}"
+
+    # ── Viewport anchor after SECOND prepend ──
+    # Another 40 rows inserted above the anchor. offsetTop increases by
+    # another 40*rowHeight; scrollTop must be corrected again.
+    assert result["anchorTopAfter2"] == result["anchorTopBeforeFirst"] + result["expectedDelta2"], \
+        f"Anchor offsetTop must increase by {result['expectedDelta2']} total after second prepend, " \
+        f"got {result['anchorTopAfter2']} (was {result['anchorTopBeforeFirst']})"
+    assert result["scrollAfter2"] == result["scrollBeforeFirst"] + result["expectedDelta2"], \
+        f"scrollTop must be corrected by +{result['expectedDelta2']} total after second prepend, " \
+        f"got {result['scrollAfter2']} (was {result['scrollBeforeFirst']})"
+    assert result["viewportAnchor2"] == result["viewportAnchorBefore"], \
+        f"Viewport anchor must be preserved across second prepend: " \
+        f"before={result['viewportAnchorBefore']}, after={result['viewportAnchor2']}"
