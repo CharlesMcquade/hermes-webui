@@ -496,7 +496,9 @@ def test_persistence_failed_clears_owned_stream_and_preserves_warning():
     # cancelSessionStream itself — the Stop callback's suppress-toast contract
     # means stream_stopped / cancel_failed were NOT rendered.
     assert len(result["toastMessages"]) == 1
-    assert "incomplete" in result["toastMessages"][0].lower()
+    # The toast uses the localized i18n key cancel_persistence_warning
+    # (the test's t() mock returns the key name, not translated text)
+    assert "cancel_persistence_warning" in result["toastMessages"][0].lower()
     # Neither stream_stopped nor cancel_failed was rendered
     assert "stopped" not in " ".join(result["toastMessages"]).lower()
     assert "failed" not in " ".join(result["toastMessages"]).lower()

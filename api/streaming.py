@@ -2830,18 +2830,23 @@ def _cancelled_turn_content(message: str = 'Task cancelled.', agent_name: str | 
 
 
 def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.',
-                          stream_id: str | None = None) -> None:
+                          stream_id: str | None = None,
+                          notice_snapshot=None) -> None:
     """Persist a user-cancelled terminal state without provider-error wording.
 
     cancel_stream() usually writes this marker first, but the streaming thread can
     later unwind through the silent-failure or exception path. Those paths must
     not append a misleading provider no-response error after an explicit cancel.
 
-    If ``stream_id`` is provided and a confirmed fallback notice exists in
-    ``_STREAM_FALLBACK_NOTICES``, it is stamped on the cancel marker so the
-    notice survives reload regardless of which side (worker or cancel_stream)
-    wins the session lock.  Internal coordination flags (``_cancel_claimed``)
-    are stripped before persistence.
+    If ``notice_snapshot`` is provided it MUST be used directly — it is an
+    immutable ``(generation, cleaned_notice)`` pair captured under the owner
+    lock by the caller (gate-certifier blocker: rereading the mutable
+    live/dead-letter registries here can miss the notice during the live-map
+    → dead-letter handoff interval where neither registry contains it).
+
+    If ``stream_id`` is provided WITHOUT a snapshot, fall back to reading the
+    registries (legacy cancel_stream path).  Internal coordination flags
+    (``_cancel_claimed``) are stripped before persistence.
     """
     _materialize_pending_user_turn_before_error(session)
     session.pending_user_message = None
@@ -2858,35 +2863,38 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.',
             'provider_details_label': 'Cancellation details',
             'timestamp': int(time.time()),
         }
-        # Stamp fallback notice if one was published for this stream.
-        # This makes persistence idempotent: whichever side wins the session
-        # lock (worker or cancel_stream) stamps the notice.
-        # Also check dead-letter: if cancel_stream's settlement failed, the
-        # notice was transferred to _STREAM_FALLBACK_DEAD_LETTER — the worker
-        # can still pick it up from there (gate-certifier blocker #3).
-        if stream_id is not None:
+        # Stamp fallback notice from the immutable snapshot when available;
+        # fall back to registry reads for callers that don't pass one.
+        if notice_snapshot is not None:
+            _fb_clean = notice_snapshot[1] if len(notice_snapshot) > 1 else None
+        elif stream_id is not None:
             _fb = _STREAM_FALLBACK_NOTICES.get(stream_id)
             if _fb is None:
                 _fb = _dead_letter_notice(_STREAM_FALLBACK_DEAD_LETTER.get(stream_id))
-            if _fb is not None:
-                _cancel_msg['_fallbackNotice'] = _clean_fallback_notice(_fb)
+            _fb_clean = _clean_fallback_notice(_fb) if _fb is not None else None
+        else:
+            _fb_clean = None
+        if _fb_clean is not None:
+            _cancel_msg['_fallbackNotice'] = _fb_clean
         session.messages.append(_cancel_msg)
-    elif stream_id is not None:
+    elif stream_id is not None or notice_snapshot is not None:
         # A cancel marker already exists (e.g. cancel_stream wrote it first,
         # then the worker's _finalize_cancelled_turn reaches here with a newer
         # dead-letter generation).  Stamp the CURRENT notice on the existing
         # marker row so the exact (generation, clean notice) pair actually
         # serialized is durable (gate-certifier blocker #3: SILENT false
         # durability — worker recovery can mark a newer dead-letter generation
-        # saved without stamping it).  Without this, the worker captures
-        # generation 2 but saves the unchanged generation-1 row, then records
-        # gen 2 as durable and deletes its dead letter — without ever stamping
-        # gen 2 on the persisted row.
-        _fb = _STREAM_FALLBACK_NOTICES.get(stream_id)
-        if _fb is None:
-            _fb = _dead_letter_notice(_STREAM_FALLBACK_DEAD_LETTER.get(stream_id))
-        if _fb is not None:
-            _fb_clean = _clean_fallback_notice(_fb)
+        # saved without stamping it).
+        if notice_snapshot is not None:
+            _fb_clean = notice_snapshot[1] if len(notice_snapshot) > 1 else None
+        elif stream_id is not None:
+            _fb = _STREAM_FALLBACK_NOTICES.get(stream_id)
+            if _fb is None:
+                _fb = _dead_letter_notice(_STREAM_FALLBACK_DEAD_LETTER.get(stream_id))
+            _fb_clean = _clean_fallback_notice(_fb) if _fb is not None else None
+        else:
+            _fb_clean = None
+        if _fb_clean is not None:
             # Find the existing cancel marker (last assistant message with a
             # cancel pattern before the next user message) and stamp it.
             for _idx in range(len(session.messages) - 1, -1, -1):
@@ -3087,7 +3095,13 @@ def _finalize_cancelled_turn(
                 _saved_generation = int((_dl or {}).get('generation') or _current_notice_generation(stream_id))
                 _saved_notice = _clean_fallback_notice(_dead_letter_notice(_dl))
 
-    _persist_cancelled_turn(session, message=message, stream_id=stream_id)
+    # Pass the immutable snapshot directly into persistence so the notice
+    # is not lost during the live-map → dead-letter handoff interval where
+    # neither registry contains it (gate-certifier blocker: rereading mutable
+    # registries in _persist_cancelled_turn can return None during that gap).
+    _notice_snapshot = (_saved_generation, _saved_notice) if _saved_notice is not None else None
+    _persist_cancelled_turn(session, message=message, stream_id=stream_id,
+                           notice_snapshot=_notice_snapshot)
     try:
         session.save()
         if stream_id is not None:

@@ -14900,9 +14900,9 @@ function _fallbackNoticeHtml(notice){
   const toProvider=String(notice.to_provider||'');
   const modelLabel=toModel?(toProvider?`${toModel} (${toProvider})`:toModel):'';
   return `<div class="fallback-notice" data-fallback-notice="1">`+
-    `<span class="fallback-notice-icon">⚠️</span>`+
+    `<span class="fallback-notice-icon" role="img" aria-label="Warning">⚠️</span>`+
     `<span class="fallback-notice-text">${esc(message)}</span>`+
-    (modelLabel?`<span class="fallback-notice-model">${esc(modelLabel)}</span>`:'')+
+    (modelLabel?`<span class="fallback-notice-model" title="${esc(modelLabel)}">${esc(modelLabel)}</span>`:'')+
     `</div>`;
 }
 
