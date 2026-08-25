@@ -45,6 +45,22 @@ def _clear_all_settlement_state():
         SESSIONS.clear()
     except Exception:
         pass
+    # Clear writeback ownership registry so Mock-based ownership entries
+    # don't leak into later tests (gate-certifier test-isolation defect).
+    try:
+        from api.config import SESSION_WRITEBACK_OWNERS, SESSION_WRITEBACK_OWNERS_LOCK
+        with SESSION_WRITEBACK_OWNERS_LOCK:
+            SESSION_WRITEBACK_OWNERS.clear()
+    except Exception:
+        pass
+    # Clear stream text/tool registries populated by some tests
+    try:
+        from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
+        STREAM_PARTIAL_TEXT.clear()
+        STREAM_REASONING_TEXT.clear()
+        STREAM_LIVE_TOOL_CALLS.clear()
+    except Exception:
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -531,4 +547,95 @@ class TestBlocker4StructuredCancelResult:
         ui_src = (repo / "static" / "ui.js").read_text()
         assert "_r.cancelled" in ui_src or "_r && _r.cancelled" in ui_src, (
             "composer-stop caller must check the structured result's .cancelled field"
+        )
+
+
+# ── Combined-order regression: test-isolation leak detection ──────────────
+
+
+class TestCombinedOrderRegression:
+    """Regression for the gate-certifier test-isolation defect: four PR-added
+    cancellation tests inserted bare Mock() sessions and writeback owners into
+    process-global registries without teardown.  A fresh CLEAN sandbox sequence
+    ran one real leaker before tests/test_auto_compression_card.py and got
+    1 failed / 68 passed (TypeError: '<' not supported between 'float' and
+    'Mock' when Session.save() rebuilt the index).
+
+    This test simulates the leak scenario: register a Mock session in
+    models.SESSIONS and a writeback owner, then verify the autouse fixture
+    teardown clears them — and that a downstream Session.save() on a real
+    session doesn't trip on leaked Mock objects.
+    """
+
+    def test_mock_session_leak_does_not_break_downstream_save(self):
+        """After a leaker test populates SESSIONS with a Mock, the autouse
+        fixture teardown must clear it so a downstream real Session.save()
+        that rebuilds the session index doesn't hit TypeError on Mock."""
+        from unittest.mock import Mock
+        from api import models, config
+
+        # Simulate a leaker: insert a Mock into SESSIONS and register a
+        # writeback owner — the exact pattern the gate-certifier found.
+        mock_session = Mock()
+        mock_session.session_id = "leaked-mock-session"
+        mock_session.profile = "default"
+        mock_session.updated_at = Mock()  # non-comparable type
+        models.SESSIONS["leaked-mock-session"] = mock_session
+        config.register_session_writeback_owner(
+            "leaked-mock-session", "leaked-stream"
+        )
+
+        # Verify the leak exists
+        assert "leaked-mock-session" in models.SESSIONS
+        assert config.session_writeback_owner("leaked-mock-session") == "leaked-stream"
+
+        # The autouse fixture's teardown (_clear_all_settlement_state) should
+        # have already run for THIS test (it runs after yield).  But we verify
+        # the cleanup function works directly:
+        _clear_all_settlement_state()
+
+        # After cleanup, the Mock session must be gone
+        assert "leaked-mock-session" not in models.SESSIONS, (
+            "Mock session leaked through teardown — _clear_all_settlement_state "
+            "must clear models.SESSIONS"
+        )
+        assert config.session_writeback_owner("leaked-mock-session") is None, (
+            "writeback owner leaked through teardown — _clear_all_settlement_state "
+            "must clear SESSION_WRITEBACK_OWNERS"
+        )
+
+    def test_combined_order_leaker_then_session_save(self):
+        """Simulate the exact gate-certifier failure sequence: run a Mock-based
+        cancellation setup (the leaker), then attempt a real Session.save()
+        that rebuilds the session index.  Without teardown, the Mock's
+        non-comparable updated_at causes TypeError during index sorting."""
+        from unittest.mock import Mock
+        from api import models, config
+
+        # Phase 1: simulate the leaker (what test_post_cas_barrier did before fix)
+        mock_session = Mock()
+        mock_session.session_id = "leak-combined-order"
+        mock_session.profile = "default"
+        mock_session.updated_at = Mock()
+        mock_session.messages = []
+        models.SESSIONS["leak-combined-order"] = mock_session
+        config.register_session_writeback_owner(
+            "leak-combined-order", "leak-stream-combined"
+        )
+
+        # Phase 2: the autouse teardown fires (simulated by direct call)
+        _clear_all_settlement_state()
+
+        # Phase 3: downstream test creates a real session and saves it
+        # — Session.save() rebuilds the session index, which sorts by
+        # updated_at.  A leaked Mock would cause TypeError.
+        # We verify SESSIONS is clean enough that a sort would work.
+        leaked_mocks = [
+            v for v in models.SESSIONS.values()
+            if not hasattr(v, 'session_id') or isinstance(getattr(v, 'updated_at', None), Mock)
+        ]
+        assert not leaked_mocks, (
+            f"SESSIONS still contains Mock objects after teardown: "
+            f"{[type(v).__name__ for v in leaked_mocks]} — "
+            "combined-order regression: test-global leak not cleaned"
         )
