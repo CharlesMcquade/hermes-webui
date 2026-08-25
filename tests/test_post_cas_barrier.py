@@ -49,6 +49,27 @@ class TestPostCASBarrier:
         _streaming_mod._STREAM_SETTLEMENT_TERMINAL.clear()
         _streaming_mod._STREAM_WORKER_SAVED.clear()
         _streaming_mod._STREAM_FALLBACK_DEAD_LETTER.clear()
+        _streaming_mod._STREAM_SETTLEMENT_PARTICIPANTS.clear()
+        _streaming_mod._STREAM_SETTLEMENT_COMPLETED.clear()
+        _streaming_mod._STREAM_NOTICE_GENERATION.clear()
+        try:
+            from api import models
+            models.SESSIONS.clear()
+        except Exception:
+            pass
+        try:
+            from api.config import SESSION_WRITEBACK_OWNERS, SESSION_WRITEBACK_OWNERS_LOCK
+            with SESSION_WRITEBACK_OWNERS_LOCK:
+                SESSION_WRITEBACK_OWNERS.clear()
+        except Exception:
+            pass
+        try:
+            from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
+            STREAM_PARTIAL_TEXT.clear()
+            STREAM_REASONING_TEXT.clear()
+            STREAM_LIVE_TOOL_CALLS.clear()
+        except Exception:
+            pass
 
     def teardown_method(self):
         AGENT_INSTANCES.clear()
@@ -59,6 +80,37 @@ class TestPostCASBarrier:
         _streaming_mod._STREAM_SETTLEMENT_TERMINAL.clear()
         _streaming_mod._STREAM_WORKER_SAVED.clear()
         _streaming_mod._STREAM_FALLBACK_DEAD_LETTER.clear()
+        # Clear session cache and writeback owners so Mock sessions don't
+        # leak into later tests' session index sorting (gate-certifier
+        # test-isolation defect: TypeError: '<' not supported between
+        # 'float' and 'Mock' when Session.save() rebuilds the index).
+        try:
+            from api import models
+            models.SESSIONS.clear()
+        except Exception:
+            pass
+        try:
+            from api.config import SESSION_WRITEBACK_OWNERS, SESSION_WRITEBACK_OWNERS_LOCK
+            with SESSION_WRITEBACK_OWNERS_LOCK:
+                SESSION_WRITEBACK_OWNERS.clear()
+        except Exception:
+            pass
+        # Clear settlement registries not covered above
+        try:
+            _streaming_mod._STREAM_SETTLEMENT_PARTICIPANTS.clear()
+            _streaming_mod._STREAM_SETTLEMENT_COMPLETED.clear()
+            _streaming_mod._STREAM_NOTICE_GENERATION.clear()
+        except Exception:
+            pass
+        # Clear STREAM_PARTIAL_TEXT / STREAM_REASONING_TEXT / STREAM_LIVE_TOOL_CALLS
+        # which some tests populate
+        try:
+            from api.config import STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS
+            STREAM_PARTIAL_TEXT.clear()
+            STREAM_REASONING_TEXT.clear()
+            STREAM_LIVE_TOOL_CALLS.clear()
+        except Exception:
+            pass
 
     def test_post_cas_barrier_rejects_B_through_real_callback(self):
         """Production-composed: after cancel_stream's CAS pops A and sets the
@@ -500,3 +552,170 @@ class TestPostCASBarrier:
         # Notice in dead-letter (bounded owner — gate-certifier blocker #3)
         assert stream_id in _streaming_mod._STREAM_FALLBACK_DEAD_LETTER
         _streaming_mod._STREAM_FALLBACK_DEAD_LETTER.pop(stream_id, None)
+
+
+class TestImmutableSnapshotInterleavings:
+    """Real save/reload tests for live→dead-letter and dead-letter→live
+    interleavings (gate-certifier blocker: rereading mutable registries in
+    _persist_cancelled_turn can miss the notice during the handoff interval).
+
+    These tests verify that the immutable (generation, cleaned_notice) snapshot
+    captured under the owner lock survives the live→dead-letter and
+    dead-letter→live transitions — the notice is NOT lost when neither
+    registry contains it.
+    """
+
+    def test_live_to_dead_letter_snapshot_survives_persist(self):
+        """When a notice is in _STREAM_FALLBACK_NOTICES (live) and the
+        _finalize_cancelled_turn captures the snapshot, then the live entry
+        is moved to dead-letter BEFORE _persist_cancelled_turn runs, the
+        snapshot must still stamp the notice on the cancel marker.
+
+        This is the exact handoff interval the gate-certifier identified:
+        _finalize captures under STREAMS_LOCK, but _persist rereads the
+        registries — which can be empty during the live→dead-letter gap.
+        The fix passes the snapshot directly.
+        """
+        from api.streaming import (
+            STREAMS_LOCK, _STREAM_FALLBACK_NOTICES, _STREAM_FALLBACK_DEAD_LETTER,
+            _publish_fallback_notice, _clean_fallback_notice,
+            _persist_cancelled_turn,
+        )
+        from unittest.mock import Mock
+
+        stream_id = "interleave-live-to-dl-1"
+        notice = {"message": "fb-live-to-dl", "to_model": "m1", "to_provider": "p1"}
+
+        # Publish a live notice
+        _publish_fallback_notice(stream_id, dict(notice))
+
+        # Capture the snapshot (what _finalize_cancelled_turn does)
+        with STREAMS_LOCK:
+            _fb = _STREAM_FALLBACK_NOTICES.get(stream_id)
+            assert _fb is not None
+            from api.streaming import _current_notice_generation
+            _gen = _current_notice_generation(stream_id)
+            _snapshot = (_gen, _clean_fallback_notice(_fb))
+
+            # Move the notice to dead-letter (simulating the handoff)
+            # NOW: live map is empty, dead-letter has it
+            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+            _STREAM_FALLBACK_DEAD_LETTER[stream_id] = {
+                'notice': dict(notice),
+                'generation': _gen,
+                'owner_session_id': 'test',
+                'owner_profile': None,
+                'created_at': 0, 'updated_at': 0, 'attempts': 0,
+                'next_retry_at': 0, 'terminal_status': 'failed',
+            }
+            # Clear live map to simulate the gap
+            # At this point, if _persist rereads registries it would find
+            # the dead-letter entry.  But the gate-certifier's probe forced
+            # a window where NEITHER has it.  We simulate that by clearing
+            # both momentarily:
+            _dl_backup = _STREAM_FALLBACK_DEAD_LETTER.pop(stream_id, None)
+
+        # NOW neither registry has the notice — the exact gap
+        assert stream_id not in _STREAM_FALLBACK_NOTICES
+        assert stream_id not in _STREAM_FALLBACK_DEAD_LETTER
+
+        # Create a session with no cancel marker
+        mock_session = Mock()
+        mock_session.session_id = "sess-interleave-1"
+        mock_session.messages = []
+        mock_session.pending_user_message = None
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = None
+        mock_session.pending_user_source = None
+        mock_session.profile = None
+
+        # Call _persist_cancelled_turn WITH the snapshot
+        # This must stamp the notice even though neither registry has it
+        _persist_cancelled_turn(mock_session, stream_id=stream_id,
+                               notice_snapshot=_snapshot)
+
+        # Verify the notice was stamped on the cancel marker
+        assert len(mock_session.messages) >= 1
+        _cancel_row = mock_session.messages[-1]
+        assert isinstance(_cancel_row, dict)
+        assert _cancel_row.get('_fallbackNotice') is not None, (
+            "notice was lost during live→dead-letter gap — the immutable "
+            "snapshot must be used directly, not reread from registries"
+        )
+        assert _cancel_row['_fallbackNotice']['message'] == notice['message']
+
+        # Restore the dead-letter for cleanup
+        if _dl_backup is not None:
+            with STREAMS_LOCK:
+                _STREAM_FALLBACK_DEAD_LETTER[stream_id] = _dl_backup
+
+    def test_dead_letter_to_live_snapshot_survives_persist(self):
+        """When a notice is in _STREAM_FALLBACK_DEAD_LETTER and the
+        _finalize_cancelled_turn captures the snapshot from the dead-letter,
+        then the dead-letter is cleared BEFORE _persist_cancelled_turn runs
+        (e.g. by a concurrent retirement), the snapshot must still stamp
+        the notice on the cancel marker.
+        """
+        from api.streaming import (
+            STREAMS_LOCK, _STREAM_FALLBACK_NOTICES, _STREAM_FALLBACK_DEAD_LETTER,
+            _clean_fallback_notice, _dead_letter_notice,
+            _persist_cancelled_turn, _current_notice_generation,
+        )
+        from unittest.mock import Mock
+
+        stream_id = "interleave-dl-to-live-1"
+        notice = {"message": "fb-dl-to-live", "to_model": "m2", "to_provider": "p2"}
+
+        # Put the notice in dead-letter
+        with STREAMS_LOCK:
+            _STREAM_FALLBACK_DEAD_LETTER[stream_id] = {
+                'notice': dict(notice),
+                'generation': 2,
+                'owner_session_id': 'test',
+                'owner_profile': None,
+                'created_at': 0, 'updated_at': 0, 'attempts': 0,
+                'next_retry_at': 0, 'terminal_status': 'failed',
+            }
+
+        # Capture the snapshot (what _finalize_cancelled_turn does for DL)
+        with STREAMS_LOCK:
+            _dl = _STREAM_FALLBACK_DEAD_LETTER.get(stream_id)
+            _gen = int((_dl or {}).get('generation') or _current_notice_generation(stream_id))
+            _snapshot = (_gen, _clean_fallback_notice(_dead_letter_notice(_dl)))
+
+            # Simulate concurrent retirement clearing the dead-letter
+            _STREAM_FALLBACK_DEAD_LETTER.pop(stream_id, None)
+
+        # NOW neither registry has the notice
+        assert stream_id not in _STREAM_FALLBACK_NOTICES
+        assert stream_id not in _STREAM_FALLBACK_DEAD_LETTER
+
+        # Create a session with a pre-existing cancel marker
+        mock_session = Mock()
+        mock_session.session_id = "sess-interleave-2"
+        mock_session.messages = [
+            {'role': 'user', 'content': 'hello'},
+            {
+                'role': 'assistant',
+                'content': '**Task cancelled:** Task cancelled.\n\n*Task was cancelled.*',
+                '_error': True,
+                'timestamp': 1000,
+            },
+        ]
+        mock_session.pending_user_message = None
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = None
+        mock_session.pending_user_source = None
+
+        # Call _persist_cancelled_turn WITH the snapshot
+        _persist_cancelled_turn(mock_session, stream_id=stream_id,
+                               notice_snapshot=_snapshot)
+
+        # Verify the notice was stamped on the existing cancel marker
+        _cancel_row = mock_session.messages[1]
+        assert _cancel_row.get('_fallbackNotice') is not None, (
+            "notice was lost during dead-letter→live gap — the immutable "
+            "snapshot must be used directly, not reread from registries"
+        )
+        assert _cancel_row['_fallbackNotice']['message'] == notice['message']
+        assert _cancel_row['_fallbackNotice']['to_model'] == notice['to_model']
