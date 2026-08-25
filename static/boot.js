@@ -47,16 +47,18 @@ async function cancelStream(reason){
   if(sid && S.activeStreamId !== streamId && typeof closeLiveStream==='function'){
     closeLiveStream(sid, streamId);
   }
+  // Derive persistence-failure truth DIRECTLY from the accepted response,
+  // independent of current pane/stream ownership (gate-certifier blocker #2:
+  // owner switch A→B suppressed a real persistence_failed response).  The old
+  // code only checked persistence_failed inside the old-owner branch, so an
+  // A→B (or A→B→A) switch while /api/chat/cancel was pending returned
+  // {persistence_failed:false} for a real failure and showed no warning.
+  const _persistenceFailed = !!(respOk && respBody && respBody.persistence_failed);
   // Owner guard: if the backend accepted the active-session cancel, leave
   // the current SSE transport and owner state intact so the terminal
   // `cancel` event can clear INFLIGHT, render "Task cancelled", and refresh
   // the sidebar. Only clear locally when the backend says there is no active
   // stream left to settle.
-  // Track persistence failure so callers can preserve the warning instead of
-  // overwriting it with a success toast (gate-certifier blocker #4: SILENT
-  // false success — active-chat persistence failure was overwritten by
-  // success UI).
-  let _persistenceFailed = false;
   if(respOk && respBody && respBody.cancelled===false && S.activeStreamId===streamId){
     S.activeStreamId=null;
     setBusy(false);
@@ -66,12 +68,16 @@ async function cancelStream(reason){
     // persistence_failed, the terminal fallback notice could not be saved —
     // show a truthful warning instead of the generic "stream no longer
     // active" toast.
-    if(respBody.persistence_failed && typeof showToast==='function'){
-      _persistenceFailed = true;
-      showToast('Cancellation incomplete — response may not be fully saved',4000);
+    if(_persistenceFailed && typeof showToast==='function'){
+      showToast(t('cancel_persistence_warning'),4000,'warning');
     }else if(typeof showToast==='function'){
-      showToast('Stream is no longer active',2000);
+      showToast(t('stream_no_longer_active'),2000);
     }
+  }else if(_persistenceFailed && typeof showToast==='function'){
+    // Owner switched (A→B) before the response arrived — still surface the
+    // persistence-failure warning against the originating cancellation
+    // transaction without mutating successor B's state.
+    showToast(t('cancel_persistence_warning'),4000,'warning');
   }
   // Return a structured cancellation result matching cancelSessionStream()'s
   // contract so callers can distinguish success from persistence failure
@@ -98,7 +104,7 @@ async function cancelSessionStream(session){
   if(!respOk) return {cancelled: false, persistence_failed: false};
   const persistenceFailed = !!(respBody && respBody.persistence_failed);
   if(persistenceFailed){
-    if(typeof showToast==='function') showToast('Cancellation incomplete — response may not be fully saved',4000);
+    if(typeof showToast==='function') showToast(t('cancel_persistence_warning'),4000,'warning');
     // The backend DID cancel the stream (agent interrupted, cancel marker
     // persisted) — only the fallback-notice stamping failed.  Continue with
     // local UI cleanup (closeLiveStream, active_stream_id=null, INFLIGHT
