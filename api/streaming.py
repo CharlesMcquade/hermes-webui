@@ -3714,6 +3714,18 @@ def _sanitize_generated_title(text: str) -> str:
     return s[:80]
 
 
+_TITLE_OPTION_MENU_RE = re.compile(
+    r'^\s*(?:(?:here (?:are|is)|some|good|possible)\s+)?'
+    r'(?:session\s+)?title\s+(?:options?|suggestions?|ideas?|candidates?)\s*:',
+    flags=re.IGNORECASE,
+)
+
+
+def _looks_like_title_option_menu(text: str) -> bool:
+    """Return True for a title-model menu rather than one selected title."""
+    return bool(_TITLE_OPTION_MENU_RE.match(str(text or '')))
+
+
 def _looks_invalid_generated_title(text: str) -> bool:
     """True when an existing/persisted title is structurally invalid (CoT leak).
 
@@ -3732,6 +3744,7 @@ def _looks_invalid_generated_title(text: str) -> bool:
         or re.search(r'^\s*(i|we)\s+(should|need to|will|can)\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
+        or _looks_like_title_option_menu(s)
     )
 
 
@@ -3997,6 +4010,20 @@ def _latest_exchange_snippets(messages):
     return user_text[:500], asst_text[:500]
 
 
+def _title_exchange_for_unresolved_title(messages):
+    """Pick the best completed exchange while an automatic title is unresolved.
+
+    The first exchange is normally the right title source.  If its model output
+    was rejected, however, retrying that same opener on every later turn cannot
+    recover a session that starts with a warm-up message.  Use the latest
+    completed exchange once another user turn exists, while leaving successful
+    titles and configured periodic refreshes untouched.
+    """
+    if _count_exchanges(messages) > 1:
+        return _latest_exchange_snippets(messages)
+    return _first_exchange_snippets(messages)
+
+
 def _count_exchanges(messages):
     """Count the number of user messages (rough exchange count)."""
     count = 0
@@ -4050,8 +4077,13 @@ def _is_provisional_title(current_title: str, messages) -> bool:
     return any(candidate and current == candidate for candidate in candidates)
 
 
-def _background_title_generation_inputs(session):
-    """Return sanitized first-exchange inputs when background title generation is eligible."""
+def _background_title_generation_eligible(session):
+    """True when background title generation should run for *session*.
+
+    Covers the default/provisional placeholders plus structurally invalid
+    generated titles (e.g. a persisted title-option menu), which must re-enter
+    the self-heal path even though ``llm_title_generated`` is set.
+    """
     messages = getattr(session, 'messages', None) or []
     title = getattr(session, 'title', '')
     invalid_existing_title = _looks_invalid_generated_title(title)
@@ -4062,11 +4094,24 @@ def _background_title_generation_inputs(session):
         or _is_provisional_title(title, messages)
         or invalid_existing_title
     )
-    if not eligible_title or (
-        getattr(session, 'llm_title_generated', False) and not invalid_existing_title
-    ):
+    if not eligible_title:
+        return False
+    return not (getattr(session, 'llm_title_generated', False) and not invalid_existing_title)
+
+
+def _background_title_generation_inputs(session):
+    """Return (user_text, assistant_text) title inputs when eligible, else None.
+
+    Exchange selection: normally the first completed exchange names the
+    session; if its model output was rejected, retrying the same warm-up
+    opener forever cannot recover, so a later completed exchange is used
+    instead once one exists.
+    """
+    if not _background_title_generation_eligible(session):
         return None
-    user_text, assistant_text = _first_exchange_snippets(messages)
+    user_text, assistant_text = _title_exchange_for_unresolved_title(
+        getattr(session, 'messages', None) or []
+    )
     return (user_text, assistant_text) if user_text and assistant_text else None
 
 
@@ -4829,26 +4874,35 @@ def _is_generic_fallback_title(title: str) -> bool:
 def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None):
     """Generate and publish a better title after `done`, then end the stream."""
     try:
+        # Read the canonical in-memory session while deciding whether this
+        # automatic pass may run. A manual rename can race the background LLM
+        # request, so the later write path rebinds under the same lock too.
         try:
-            s = get_session(session_id)
+            with LOCK:
+                s = get_session(session_id)
+                cached_session = SESSIONS.get(session_id)
+                if cached_session is not None and getattr(cached_session, 'session_id', None) == session_id:
+                    s = cached_session
+                _invalid_existing = _looks_invalid_generated_title(s.title)
+                current = str(s.title or '').strip()
+                already_generated = getattr(s, 'llm_title_generated', False)
+                manual_title = session_has_manual_title(s)
+                still_auto = (
+                    current == placeholder_title
+                    or current in ('Untitled', 'New Chat', '')
+                    or _is_provisional_title(current, s.messages)
+                    or _invalid_existing
+                )
         except KeyError:
             _put_title_status(put_event, session_id, 'skipped', 'missing_session')
             return
         # Allow self-heal when a previously generated title leaked thinking text.
-        _invalid_existing = _looks_invalid_generated_title(s.title)
-        if getattr(s, 'llm_title_generated', False) and not _invalid_existing:
-            _put_title_status(put_event, session_id, 'skipped', 'already_generated', str(s.title or ''))
+        if already_generated and not _invalid_existing:
+            _put_title_status(put_event, session_id, 'skipped', 'already_generated', current)
             return
-        current = str(s.title or '').strip()
-        if session_has_manual_title(s):
+        if manual_title:
             _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
             return
-        still_auto = (
-            current == placeholder_title
-            or current in ('Untitled', 'New Chat', '')
-            or _is_provisional_title(current, s.messages)
-            or _invalid_existing
-        )
         if not still_auto:
             _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
             return
@@ -4859,16 +4913,31 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 _put_title_status(put_event, session_id, 'skipped', 'title_generation_disabled', current)
                 return
             aux_title_configured = _aux_title_configured()
+            rejected_model_output = False
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                rejected_model_output = llm_status in ('llm_invalid', 'llm_language_mismatch')
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
+                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux')
             else:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
+                rejected_model_output = llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux')
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid', 'llm_language_mismatch')
             source = llm_status
-            if not next_title:
+            # An invalid response is different from an unavailable title model:
+            # choosing a local fallback here would mark a warm-up opener as
+            # successfully titled, blocking the later unresolved-title retry.
+            # Keep the provisional title and retry on the next completed exchange.
+            invalid_model_output = rejected_model_output or llm_status in {
+                'llm_invalid',
+                'llm_invalid_aux',
+                'llm_language_mismatch',
+                'llm_language_mismatch_aux',
+            }
+            if not next_title and not invalid_model_output:
                 fallback_title = _fallback_title_from_exchange(user_text, assistant_text)
                 if fallback_title and not _is_generic_fallback_title(fallback_title):
                     logger.debug("Using local fallback for session title generation")
@@ -11675,7 +11744,11 @@ def _run_agent_streaming(
                 # Only auto-generate title when still default; preserves user renames
                 if s.title == 'Untitled' or s.title == 'New Chat' or not s.title:
                     s.title = title_from(s.messages, s.title)
-                _bg_title_inputs = _background_title_generation_inputs(s)
+                _bg_title_inputs = None
+                if _background_title_generation_eligible(s):
+                    _u0, _a0 = _title_exchange_for_unresolved_title(s.messages)
+                    if _u0 and _a0:
+                        _bg_title_inputs = (_u0, _a0)
                 # Read token/cost usage from the agent object (if available).
                 # Per-turn overwrite (#1857): replace cumulative session totals with the
                 # agent's most recent values, which already represent the current turn's
