@@ -48,6 +48,38 @@ Extensions cannot, by themselves:
 - change Hermes Agent permissions, models, memory, or tools unless they call
   existing authenticated APIs that already allow those changes
 
+## Browser sidecar CDP relay
+
+Standalone WebUI deployments also expose a narrow in-process relay for trusted
+browser companion extensions that already operate as the signed-in WebUI user.
+The Hermes Agent Chrome Extension uses this path to long-poll WebUI from a
+normal authenticated tab, execute Chrome DevTools Protocol commands through its
+`chrome.debugger` permission, and post responses back without requiring Chrome
+`--remote-debugging-port` or the newer gateway `/api/ws` contract.
+
+The relay surface is intentionally small:
+
+- `POST /api/sidecar/cdp/register` — register or replace one extension relay.
+- `POST /api/sidecar/cdp/unregister` — disconnect a relay and fail pending commands.
+- `POST /api/sidecar/cdp/poll` — long-poll for the next queued command.
+- `POST /api/sidecar/cdp/respond` — resolve a pending command.
+- `GET /api/sidecar/cdp/relays` — list connected relays after the normal `/api/`
+  request-visibility guard has accepted the request.
+- `POST /api/sidecar/cdp/command` — enqueue a command for a relay and wait for
+  the response. `cdp.listRelays` is handled locally; `cdp.listTabs` and
+  `cdp.detach` are normalized to extension-side special methods.
+
+The in-memory registry lives in `api.sidecar_cdp`. Agent tools running inside the
+same WebUI process may import that module directly, which avoids routing command
+requests over HTTP. Either way, the browser extension is still the final safety
+boundary: it should require explicit operator opt-in before registering a relay
+or executing unsafe CDP commands, and it should not invent an implicit active-tab
+target when the caller omitted one.
+
+This relay inherits WebUI's authentication and CSRF posture. It is not a general
+remote-control API for untrusted clients; do not expose it as a public browser
+control service or use it to bypass WebUI auth.
+
 ## Configuration
 
 ### One-click install (no configuration required)

@@ -13238,6 +13238,11 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path.startswith("/api/") and not _guard_request_session_visibility(handler, parsed, method="GET"):
         return True
 
+    if parsed.path == "/api/sidecar/cdp/relays":
+        from api import sidecar_cdp
+
+        return j(handler, {"ok": True, "relays": sidecar_cdp.list_relays()})
+
     # ── Insights / knowledge status ──
     if parsed.path == "/api/insights":
         return _handle_insights(handler, parsed)
@@ -15123,6 +15128,56 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return True
+
+    if parsed.path.startswith("/api/sidecar/cdp/"):
+        from api import sidecar_cdp
+
+        try:
+            if parsed.path == "/api/sidecar/cdp/register":
+                peer = ""
+                try:
+                    peer = str(getattr(handler, "client_address", [""])[0] or "")
+                except Exception:
+                    peer = ""
+                return j(handler, sidecar_cdp.register_relay(body, peer=peer))
+            if parsed.path == "/api/sidecar/cdp/unregister":
+                return j(handler, sidecar_cdp.unregister_relay(body.get("relay_id")))
+            if parsed.path == "/api/sidecar/cdp/poll":
+                return j(
+                    handler,
+                    sidecar_cdp.poll(
+                        body.get("relay_id"),
+                        timeout_ms=body.get("timeout_ms", 25000),
+                    ),
+                )
+            if parsed.path == "/api/sidecar/cdp/respond":
+                return j(
+                    handler,
+                    sidecar_cdp.respond(
+                        relay_id=body.get("relay_id"),
+                        command_id=body.get("command_id"),
+                        ok=bool(body.get("ok")),
+                        result=body.get("result"),
+                        error=body.get("error"),
+                    ),
+                )
+            if parsed.path == "/api/sidecar/cdp/command":
+                method = str(body.get("method") or "").strip()
+                if method == "cdp.listRelays":
+                    return j(handler, {"ok": True, "relays": sidecar_cdp.list_relays()})
+                result = sidecar_cdp.send_command(
+                    method=method,
+                    params=body.get("params") or {},
+                    target=body.get("target"),
+                    timeout=body.get("timeout", 30),
+                    relay_id=body.get("relay_id"),
+                )
+                return j(handler, {"ok": True, "result": result})
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except RuntimeError as exc:
+            return j(handler, {"ok": False, "error": str(exc)})
+        return bad(handler, "unknown CDP sidecar endpoint", status=404)
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
