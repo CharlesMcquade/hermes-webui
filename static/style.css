@@ -1,8 +1,10 @@
+@import url("vendor/noto-color-emoji/0.2.0/index.css");
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   /* ── Typography contract ──
      --font-ui: shell chrome, controls, composer, labels, and ordinary UI.
      --font-conversation: user/assistant message prose (defaults to --font-ui).
      --font-mono: inline code, fenced code blocks, logs, tool/metadata strings, and terminal.
+     --font-emoji: color emoji fallback; Apple on Apple platforms, self-hosted Noto on Chrome/Edge.
   */
   /* ── Light mode (default) — warm gold-tinted palette from Hermes brand ── */
   :root {
@@ -19,9 +21,10 @@
     --font-size-xs:11px;--font-size-sm:12px;--font-size-md:14px;
     --message-body-font-size:14px;--message-body-line-height:1.75;--message-code-font-size:12.5px;--message-pre-code-font-size:13px;--message-table-font-size:12px;
     --file-tree-toggle-width:10px;
-    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+    --font-emoji:"Apple Color Emoji","Noto Color Emoji","Segoe UI Emoji","Segoe UI Symbol";
+    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,var(--font-emoji),sans-serif;
     --font-conversation:var(--font-ui);
-    --font-mono:ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --font-mono:ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",var(--font-emoji),monospace;
     --surface-subtle:rgba(0,0,0,.025);--surface-subtle-hover:rgba(0,0,0,.045);
     --border-subtle:rgba(0,0,0,.08);--border-muted:rgba(0,0,0,.12);
     font-family:var(--font-ui);font-size:14px;line-height:1.6;
@@ -148,7 +151,7 @@
     --error:#D44D4D;--success:#0F8F70;--warning:#B87916;--info:#55564F;
     --user-bubble-bg:#EFEFEF;--user-bubble-border:#DEDEDE;--user-bubble-text:#242424;--user-bubble-placeholder:#707070;
     --user-selection-bg:rgba(0,0,0,0.16);--user-selection-text:#111111;
-    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",var(--font-emoji),sans-serif;
     font-family:var(--font-ui);
   }
   :root.dark[data-skin="graphite"]{
@@ -274,7 +277,7 @@
     --error:#D92D20;--success:#2E7A60;--warning:#B87916;--info:#4D8DFF;
     --user-bubble-bg:#EBEBEB;--user-bubble-border:#D9D9D9;--user-bubble-text:#252523;--user-bubble-placeholder:#6A6A68;
     --user-selection-bg:rgba(46,122,96,0.20);--user-selection-text:#0D0D0D;
-    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",var(--font-emoji),sans-serif;
     font-family:var(--font-ui);
   }
   :root.dark[data-skin="codex"]{
@@ -400,7 +403,7 @@
     --error:#C15F3C;--success:#6EA100;--warning:#B87916;--info:#6396D6;
     --user-bubble-bg:#F0EEE6;--user-bubble-border:#E2DED2;--user-bubble-text:#30302E;--user-bubble-placeholder:#87867F;
     --user-selection-bg:rgba(217,119,87,0.24);--user-selection-text:#141413;
-    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",var(--font-emoji),sans-serif;
     font-family:var(--font-ui);
   }
   :root.dark[data-skin="terracotta"]{
@@ -526,7 +529,7 @@
     --error:#D1242F;--success:#1A7F37;--warning:#9A6700;--info:#0969DA;
     --user-bubble-bg:#EFEFEF;--user-bubble-border:#DEDEDE;--user-bubble-text:#242424;--user-bubble-placeholder:#707070;
     --user-selection-bg:rgba(0,0,0,0.16);--user-selection-text:#111111;
-    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",var(--font-emoji),sans-serif;
     font-family:var(--font-ui);
   }
   :root.dark[data-skin="github"]{
@@ -815,7 +818,7 @@
     --accent-hover:#3A6E9A;--accent-bg:rgba(70,130,180,0.06);--accent-bg-strong:rgba(70,130,180,0.12);--accent-text:#2C5F88;
     --error:#C62828;--success:#3D8B40;--warning:#E68A00;--info:#4682B4;
     --radius-sm:1px;--radius-md:2px;--radius-card:2px;--radius-lg:4px;
-    --font-ui:"SF Mono","Roboto Mono","Courier New",monospace;
+    --font-ui:"SF Mono","Roboto Mono","Courier New",var(--font-emoji),monospace;
     --surface-subtle:rgba(0,0,0,.025);--surface-subtle-hover:rgba(0,0,0,.045);
     --border-subtle:rgba(0,0,0,.08);--border-muted:rgba(0,0,0,.12);
     font-family:var(--font-ui);font-size:14.5px;line-height:1.7;
@@ -892,7 +895,7 @@
     --input-bg:#ffffff;--hover-bg:#f5f5f5;--code-bg:#fafafa;--code-inline-bg:#f5f5f5;--code-text:#111111;--pre-text:#111111;
     --error:#e5484d;--success:#007a45;--warning:#b45309;--info:#0070f3;
     --radius-sm:4px;--radius-md:6px;--radius-card:8px;--radius-lg:10px;
-    --font-ui:"Geist","Geist Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    --font-ui:"Geist","Geist Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,var(--font-emoji),sans-serif;
   }
   :root.dark[data-skin="geist-contrast"]{
     color-scheme:dark;
@@ -1086,7 +1089,7 @@
     --accent-hover:#7E22CE;--accent-bg:rgba(147,51,234,0.06);--accent-bg-strong:rgba(147,51,234,0.12);--accent-text:#6D28D9;
     --error:#DC2626;--success:#059669;--warning:#D97706;--info:#7C3AED;
     --radius-sm:2px;--radius-md:4px;--radius-card:4px;--radius-lg:6px;
-    --font-ui:system-ui,-apple-system,sans-serif;
+    --font-ui:system-ui,-apple-system,var(--font-emoji),sans-serif;
     --surface-subtle:rgba(147,51,234,.025);--surface-subtle-hover:rgba(147,51,234,.05);
     --border-subtle:rgba(147,51,234,.08);--border-muted:rgba(147,51,234,.12);
     --purple:#9333EA;
@@ -1166,7 +1169,7 @@
     --accent-hover:#7E22CE;--accent-bg:rgba(147,51,234,0.06);--accent-bg-strong:rgba(147,51,234,0.12);--accent-text:#6D28D9;
     --error:#DC2626;--success:#059669;--warning:#D97706;--info:#7C3AED;
     --radius-sm:2px;--radius-md:4px;--radius-card:4px;--radius-lg:6px;
-    --font-ui:system-ui,-apple-system,sans-serif;
+    --font-ui:system-ui,-apple-system,var(--font-emoji),sans-serif;
     --surface-subtle:rgba(147,51,234,.025);--surface-subtle-hover:rgba(147,51,234,.05);
     --border-subtle:rgba(147,51,234,.08);--border-muted:rgba(147,51,234,.12);
     --purple:#9333EA;
@@ -1232,7 +1235,7 @@
     --accent-hover:#E91E80;--accent-bg:rgba(255,45,149,0.06);--accent-bg-strong:rgba(255,45,149,0.12);--accent-text:#C2185B;
     --error:#FF1744;--success:#00E676;--warning:#FFB300;--info:#00E5FF;
     --radius-sm:2px;--radius-md:4px;--radius-card:4px;--radius-lg:6px;
-    --font-ui:system-ui,-apple-system,sans-serif;
+    --font-ui:system-ui,-apple-system,var(--font-emoji),sans-serif;
     --surface-subtle:rgba(255,45,149,.025);--surface-subtle-hover:rgba(255,45,149,.05);
     --border-subtle:rgba(255,45,149,.08);--border-muted:rgba(255,45,149,.12);
     --purple:#FF2D95;
