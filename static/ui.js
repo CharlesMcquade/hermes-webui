@@ -10038,6 +10038,8 @@ async function refreshSession() {
   } catch(e) { setStatus('Refresh failed: ' + e.message); }
 }
 // ── Update banner ──
+const UPDATE_BANNER_NOTICE_STORAGE_KEY='hermes-update-banner-last-shown-v1';
+const UPDATE_BANNER_NOTICE_INTERVAL_MS=7*24*60*60*1000;
 function _formatUpdateTargetStatus(label,info){
   const manualNoGit=!!(info&&info.no_git&&info.manual_update&&info.behind>0);
   if(!info||(info.no_git&&!manualNoGit)||!(info.behind>0)) return null;
@@ -10055,6 +10057,73 @@ function _formatUpdateCheckError(label,info){
   if(!info||!info.error) return null;
   const detail=String(info.error).replace(/^fetch failed:?\s*/i,'').trim();
   return detail ? `${label}: ${detail}` : label;
+}
+function _updateBannerNoticeSignature(data){
+  const targets=[
+    {key:'webui',label:'WebUI',info:data&&data.webui},
+    {key:'agent',label:'Agent',info:data&&data.agent},
+  ];
+  const payload=[];
+  targets.forEach((target)=>{
+    const info=target.info;
+    if(!_formatUpdateTargetStatus(target.label,info)) return;
+    payload.push({
+      key:target.key,
+      behind:Number(info.behind)||0,
+      release_based:!!info.release_based,
+      manual_update:!!info.manual_update,
+      branch:String(info.branch||''),
+      channel:String(info.channel||''),
+      current_version:String(info.current_version||''),
+      latest_version:String(info.latest_version||''),
+      current_sha:String(info.current_sha||''),
+      latest_sha:String(info.latest_sha||''),
+      compare_url:String(info.compare_url||''),
+    });
+  });
+  return payload.length?JSON.stringify(payload):'';
+}
+function _readUpdateBannerNoticeRecord(){
+  try{
+    const raw=localStorage.getItem(UPDATE_BANNER_NOTICE_STORAGE_KEY);
+    if(!raw) return null;
+    const parsed=JSON.parse(raw);
+    if(!parsed||typeof parsed!=='object') return null;
+    const signature=typeof parsed.signature==='string'?parsed.signature:'';
+    const shownAt=Number(parsed.shownAt)||0;
+    if(!signature||!shownAt) return null;
+    return {signature,shownAt};
+  }catch(_e){
+    try{localStorage.removeItem(UPDATE_BANNER_NOTICE_STORAGE_KEY);}catch(_ignore){}
+    return null;
+  }
+}
+function _rememberUpdateBannerNoticeShown(data){
+  const signature=_updateBannerNoticeSignature(data);
+  if(!signature) return;
+  try{
+    localStorage.setItem(UPDATE_BANNER_NOTICE_STORAGE_KEY,JSON.stringify({
+      signature,
+      shownAt:Date.now(),
+    }));
+  }catch(_e){}
+}
+function _shouldShowUpdateBannerNotice(data){
+  const options=arguments.length>1&&arguments[1]?arguments[1]:{};
+  if(options.force) return true;
+  const signature=_updateBannerNoticeSignature(data);
+  if(!signature) return true;
+  const record=_readUpdateBannerNoticeRecord();
+  const now=Date.now();
+  if(
+    record&&
+    record.signature===signature&&
+    record.shownAt<=now&&
+    now-record.shownAt<UPDATE_BANNER_NOTICE_INTERVAL_MS
+  ){
+    return false;
+  }
+  return true;
 }
 function _isSafeUpdateCompareUrl(url){
   if(!url||!/^https?:\/\//i.test(url)) return false;
@@ -10351,6 +10420,7 @@ function _renderUpdateWhatsNewLinks(data){
   _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
 function _showUpdateBanner(data){
+  const options=arguments.length>1&&arguments[1]?arguments[1]:{};
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
@@ -10384,7 +10454,13 @@ function _showUpdateBanner(data){
     msg.textContent='\u2B06 '+parts.join(', ')+' available'+(manualInstruction?' · '+manualInstruction:'');
   }
   const banner=$('updateBanner');
+  if(typeof _shouldShowUpdateBannerNotice==='function'&&!_shouldShowUpdateBannerNotice(data,options)){
+    if(banner) banner.classList.remove('visible');
+    if(typeof _hideUpdateSummaryPanel==='function') _hideUpdateSummaryPanel();
+    return;
+  }
   if(banner) banner.classList.add('visible');
+  if(typeof _rememberUpdateBannerNoticeShown==='function') _rememberUpdateBannerNoticeShown(data);
   const summaryMode=window._whatsNewSummaryEnabled===true?'summary':'diff';
   _renderUpdateWhatsNewLinks(data,{mode:summaryMode});
 }
@@ -10397,6 +10473,7 @@ function _i18nUpdateText(key, fallback){
 }
 function dismissUpdate(){
   const b=$('updateBanner');if(b)b.classList.remove('visible');
+  if(typeof _rememberUpdateBannerNoticeShown==='function') _rememberUpdateBannerNoticeShown(window._updateData||{});
   sessionStorage.setItem('hermes-update-dismissed','1');
 }
 function _isUpdateApplyNetworkError(error){
