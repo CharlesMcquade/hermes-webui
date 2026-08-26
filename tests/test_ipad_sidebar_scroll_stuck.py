@@ -924,6 +924,8 @@ function _invalidateTouchRender() {
 }
 
 // Extract and eval all touch functions
+eval(extractFunc('_touchIntervalState'));
+eval(extractFunc('_touchCurrentInterval'));
 eval(extractFunc('_createTouchGroupWrapper'));
 eval(extractFunc('_updateTouchGroupSpacers'));
 eval(extractFunc('_updateTouchSentinel'));
