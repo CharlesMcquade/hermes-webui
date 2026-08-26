@@ -1663,6 +1663,7 @@ class TestCancelInterrupt:
         from api.streaming import (
             _STREAM_FALLBACK_NOTICES, _STREAM_WORKER_SAVED,
             _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_TERMINAL,
+            _STREAM_FALLBACK_DEAD_LETTER,
             _finalize_cancelled_turn, _retire_worker_cancelled_state,
         )
 
@@ -1694,30 +1695,22 @@ class TestCancelInterrupt:
         models.SESSIONS[session_id] = ws
         config.register_session_writeback_owner(session_id, stream_id)
 
-        # First finalize: save FAILS -> _STREAM_WORKER_SAVED must not contain it
+        # The first attempt fails, but the built-in retry persists the same
+        # fully mutated session. That retry is authoritative for marker, notice,
+        # active_stream_id=None, and generation accounting.
         _finalize_cancelled_turn(ws, stream_id=stream_id)
-        assert stream_id not in _STREAM_WORKER_SAVED, (
-            "worker marked stream saved after a FAILED save"
-        )
-        # Worker retirement with a failed save must NOT pop the live notice
-        _retire_worker_cancelled_state(stream_id)
-        assert stream_id in _STREAM_FALLBACK_NOTICES, (
-            "worker retirement deleted the live notice after a failed save — "
-            "blocker #2: silent drop of the only copy"
-        )
-
-        # Retry: finalize again, save now succeeds -> _STREAM_WORKER_SAVED set
-        _finalize_cancelled_turn(ws, stream_id=stream_id)
-        assert stream_id in _STREAM_WORKER_SAVED, (
-            "worker failed to mark stream saved after a successful retry"
-        )
+        assert _saved[0] == 2
+        assert _STREAM_WORKER_SAVED.get(stream_id) == 1
+        assert stream_id not in _STREAM_FALLBACK_DEAD_LETTER
         stamped = [
             m for m in ws.messages
             if isinstance(m, dict) and m.get("_fallbackNotice")
         ]
-        assert len(stamped) >= 1, "worker retry did not persist a durable notice row"
+        assert len(stamped) >= 1, "successful retry did not persist the notice row"
+        assert ws.active_stream_id is None
 
-        # Worker retirement now pops the exact notice and empties all registries
+        # Retirement now compares against the generation proven durable by the
+        # retry and clears the exact live notice plus settlement bookkeeping.
         _retire_worker_cancelled_state(stream_id)
         assert stream_id not in _STREAM_FALLBACK_NOTICES
         assert stream_id not in _STREAM_WORKER_SAVED
@@ -2992,14 +2985,14 @@ class TestCancelInterrupt:
             "sidebar stays stuck in streaming state after first-save failure"
         )
 
-        # _STREAM_WORKER_SAVED is NOT recorded (the marker/notice save failed).
-        assert stream_id not in _STREAM_WORKER_SAVED, (
-            "worker marked stream saved after a FAILED first save"
-        )
-
-        # The notice is in the dead-letter (not silently lost).
-        assert stream_id in _STREAM_FALLBACK_DEAD_LETTER, (
-            "notice was not transferred to dead-letter after first-save failure"
+        # The fallback save persisted the same fully-mutated session, so its
+        # exact generation is authoritative and the temporary dead-letter is
+        # compare-retired rather than contradicting durable bytes.
+        assert _STREAM_WORKER_SAVED.get(stream_id) == 1
+        assert stream_id not in _STREAM_FALLBACK_DEAD_LETTER
+        assert any(
+            isinstance(m, dict) and m.get("_fallbackNotice")
+            for m in snap["messages"]
         )
 
         # Cleanup.

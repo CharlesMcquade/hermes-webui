@@ -128,11 +128,13 @@ def test_fallback_notice_persisted_on_assistant_message_before_save():
         "callback can accumulate fallback data for session persistence."
     )
 
-    # 2. The callback captures fallback data into the holder
-    capture_idx = src.find("_pending_fallback_notices.append(")
+    # 2. The callback delegates the atomic publish + holder append to the
+    # generation-minting helper, so rejected terminal publications never enter
+    # the pending list.
+    capture_idx = src.find("pending_notices=_pending_fallback_notices")
     assert capture_idx != -1, (
-        "_agent_status_callback must append to _pending_fallback_notices so "
-        "the fallback metadata is available for persistence before s.save()."
+        "_agent_status_callback must pass _pending_fallback_notices to the "
+        "atomic publication helper so accepted metadata is available before save."
     )
 
     # 3. The metadata is stamped on the last assistant message before s.save()
@@ -292,7 +294,7 @@ def test_stream_scoped_fallback_notices_dict_exists():
     # which holds STREAMS_LOCK and rejects post-terminal publications
     # (greptile P1: write must be atomic w.r.t. cancel_stream()'s under-lock
     # snapshot; gate-certifier blocker #1: post-CAS notice B must be rejected).
-    publish_call_idx = src.find("_publish_fallback_notice(stream_id, _pending_fallback_notices[-1]")
+    publish_call_idx = src.find("pending_notices=_pending_fallback_notices")
     assert publish_call_idx != -1, (
         "_agent_status_callback must publish the pending notice through "
         "_publish_fallback_notice() so the write is atomic under STREAMS_LOCK, "
