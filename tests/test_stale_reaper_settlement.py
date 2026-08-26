@@ -19,8 +19,8 @@ import pytest
 
 import api.streaming as _streaming_mod
 from api.config import (
-    ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS, STREAMS_LOCK,
-    register_stream_owner, unregister_stream_owner,
+    ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS,
+    register_stream_owner,
 )
 
 
@@ -139,10 +139,34 @@ class TestStaleReaperSettlementRetirement:
         assert stream_id in _streaming_mod._STREAM_FALLBACK_NOTICES
         assert stream_id in _streaming_mod._STREAM_SETTLEMENT_TERMINAL
 
-        # Directly invoke the abandonment helper (the routes.py reaper calls
-        # it inline after unregister_stream_owner).
-        from api.streaming import _abandon_stale_stream_settlement
-        _abandon_stale_stream_settlement(stream_id)
+        # Invoke the production routes reaper and prove its abandonment call
+        # runs after ACTIVE_RUNS_LOCK is released. A competing worker teardown
+        # must be able to acquire that lock while abandonment takes STREAMS_LOCK.
+        import threading
+        from unittest.mock import patch
+        from api.routes import _active_run_stream_for_session
+
+        real_abandon = _streaming_mod._abandon_stale_stream_settlement
+        lock_acquired = threading.Event()
+
+        def probing_abandon(raw_stream_id):
+            def acquire_active_runs():
+                with ACTIVE_RUNS_LOCK:
+                    lock_acquired.set()
+            contender = threading.Thread(target=acquire_active_runs)
+            contender.start()
+            assert lock_acquired.wait(1), (
+                "routes reaper called settlement abandonment while holding "
+                "ACTIVE_RUNS_LOCK (ABBA deadlock with worker teardown)"
+            )
+            contender.join(1)
+            real_abandon(raw_stream_id)
+
+        with patch.object(
+            _streaming_mod, "_abandon_stale_stream_settlement",
+            side_effect=probing_abandon,
+        ):
+            assert _active_run_stream_for_session(session_id) is None
 
         # ALL settlement registries must be at baseline.
         assert stream_id not in _streaming_mod._STREAM_FALLBACK_NOTICES
