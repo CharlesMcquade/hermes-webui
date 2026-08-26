@@ -2413,14 +2413,16 @@
   .msg-body a{color:var(--blue);text-decoration:underline;}
   .msg-body hr{border:none;border-top:1px solid var(--border);margin:14px 0;}
   .msg-body table{border-collapse:collapse;width:100%;margin:8px 0;font-size:12px;}
-  .msg-body th{background:rgba(255,255,255,.07);padding:6px 10px;text-align:left;font-weight:600;border:1px solid var(--border2);}
-  .msg-body td{padding:5px 10px;border:1px solid rgba(255,255,255,.06);}
+  .md-table-scroll{max-width:100%;overflow-x:auto;margin:10px 0;-webkit-overflow-scrolling:touch;}
+  .md-table-scroll table{width:max-content;min-width:100%;margin:0;}
+  .msg-body th{background:rgba(255,255,255,.07);padding:8px 12px;text-align:left;font-weight:600;border:1px solid var(--border2);vertical-align:top;overflow-wrap:normal;word-break:normal;hyphens:none;}
+  .msg-body td{padding:8px 12px;border:1px solid rgba(255,255,255,.06);vertical-align:top;overflow-wrap:anywhere;word-break:normal;line-height:1.45;max-width:32rem;}
   .msg-body tr:nth-child(even){background:rgba(255,255,255,.03);}
   .markdown-table-filter{display:block;width:min(260px,100%);margin:8px 0 4px;padding:5px 8px;border:1px solid var(--border2);border-radius:6px;background:var(--input-bg);color:var(--text);font:inherit;font-family:var(--font-ui);font-size:12px;}
   .markdown-table-filter:focus{outline:1px solid var(--accent);outline-offset:1px;}
-  .markdown-table-sort{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-height:20px;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-weight:inherit;text-align:left;cursor:pointer;}
+  .markdown-table-sort{display:flex;align-items:flex-start;justify-content:flex-start;gap:6px;width:100%;min-height:20px;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-weight:inherit;text-align:left;cursor:pointer;}
   .markdown-table-sort:focus-visible{outline:1px solid var(--accent);outline-offset:2px;}
-  .markdown-table-sort-label{min-width:0;}
+  .markdown-table-sort-label{min-width:0;overflow-wrap:normal;word-break:normal;hyphens:none;}
   .markdown-table-sort-indicator{flex:0 0 10px;color:var(--muted);font-size:10px;line-height:1;text-align:center;}
   /* Neutral (unsorted) affordance: a faint up/down glyph so it's discoverable
      that the header is clickable/sortable. Becomes a solid ▲/▼ when active. */
@@ -2703,6 +2705,25 @@
   .composer-mobile-context-action.ctx-mid .composer-mobile-config-value{color:var(--warning);}
   .composer-mobile-context-action.ctx-high .composer-mobile-config-value{color:var(--error);}
   .composer-mobile-context-action.ctx-high .composer-mobile-context-compress{border-color:var(--error);color:var(--error);}
+  .composer-content-width-wrap{position:relative;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;}
+  .composer-content-width-btn{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;padding:0;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;transition:background-color .12s,color .12s,border-color .12s,box-shadow .12s;}
+  .composer-content-width-btn:hover{background:var(--hover-bg);color:var(--text);}
+  .composer-content-width-btn[aria-expanded="true"]{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
+  .composer-content-width-btn:focus-visible,.composer-content-width-popup button:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+  .content-width-icon{display:block;width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;}
+  .content-width-icon-line{transform-box:fill-box;transform-origin:center;}
+  .composer-content-width-btn[data-content-width-mode="default"] .content-width-icon-line{transform:scaleX(.58);}
+  .composer-content-width-btn[data-content-width-mode="wide"] .content-width-icon-line,.composer-content-width-btn[data-content-width-mode="full"] .content-width-icon-line{transform:scaleX(.86);}
+  .content-width-icon-boundary{display:none;}
+  .composer-content-width-btn[data-content-width-mode="full"] .content-width-icon-boundary{display:block;}
+  .composer-content-width-popup{display:none;position:absolute;right:0;bottom:calc(100% + 8px);align-items:stretch;gap:4px;padding:5px;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -8px 28px rgba(0,0,0,.28);z-index:220;}
+  .composer-content-width-popup:not([hidden]){display:flex;}
+  .composer-content-width-popup button{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;width:58px;height:52px;padding:4px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-size:10px;cursor:pointer;}
+  .composer-content-width-popup button:hover{background:var(--hover-bg);color:var(--text);}
+  .composer-content-width-popup button[aria-selected="true"]{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);box-shadow:inset 0 1px 2px rgba(0,0,0,.18);}
+  .composer-content-width-popup button[data-content-width-value="default"] .content-width-icon-line{transform:scaleX(.58);}
+  .composer-content-width-popup button[data-content-width-value="wide"] .content-width-icon-line,.composer-content-width-popup button[data-content-width-value="full"] .content-width-icon-line{transform:scaleX(.86);}
+  .composer-content-width-popup button[data-content-width-value="full"] .content-width-icon-boundary{display:block;}
   .composer-right{display:flex;gap:8px;align-items:center;flex-shrink:0;}
   .composer-status{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px;}
   /* Context usage indicator */
@@ -3129,6 +3150,8 @@
     .composer-left > *{flex-shrink:0;}
     .composer-profile-wrap,
     .composer-ws-wrap{flex:0 0 auto;}
+    .composer-content-width-btn{width:44px;height:44px;}
+    .composer-content-width-popup{right:-2px;bottom:calc(100% + 6px);}
     .composer-right{flex:0 0 auto;width:auto;justify-content:flex-end;gap:6px;min-width:0;}
     /* icon-only composer chips below 640px */
     .composer-profile-label,
@@ -5900,6 +5923,8 @@ main.main > #mainPlugin{display:none;}
   --user-bubble-placeholder: rgba(255,255,255,.7);
   --user-selection-bg: rgba(0,0,0,.22);
   --user-selection-text: #fff;
+:root[data-content-width="wide"] { --msg-max: 1100px; }
+:root[data-content-width="full"] { --msg-max: 100%; }
 }
 /* Dark mode: keep user bubbles dark; skin remains a tint via border/fill. */
 :root.dark {
@@ -5962,10 +5987,14 @@ main.main > #mainPlugin{display:none;}
      WebKit and on Android it re-opens the #4856 / #5338 mobile jump-to-top
      regression the scroll-anchor work fought hard to close. */
 }
-.msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); }
+.msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); overflow-wrap:normal; }
+.msg-body p,.msg-body li,.msg-body td{overflow-wrap:anywhere;}
 .msg-body code,
-.msg-body pre,
-.msg-body table { font-family:var(--font-mono); }
+.msg-body pre { font-family:var(--font-mono); }
+:root[data-skin="graphite"] .msg-body table,
+:root[data-skin="codex"] .msg-body table,
+:root[data-skin="terracotta"] .msg-body table,
+:root[data-skin="github"] .msg-body table { font-family:var(--font-conversation)!important; }
 body code[class*="language-"],body pre[class*="language-"],body pre code[class*="language-"]{font-family:var(--font-mono);}
 .msg-body:empty { display: none; }
 .assistant-turn { width: 100%; }
@@ -6398,10 +6427,8 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 }
 .msg-date-sep::before, .msg-date-sep::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 
-/* ── Widths: collapse messages-inner to match content column ── */
+/* ── Widths: collapse messages-inner to match the selected content column ── */
 .messages-inner { max-width: var(--msg-max); }
-@media (min-width: 1400px) { .messages-inner { max-width: calc(var(--msg-max) + 40px); } }
-@media (min-width: 1800px) { .messages-inner { max-width: calc(var(--msg-max) + 80px); } }
 
 @media (max-width: 700px) {
   .msg-role { margin-bottom: 4px; }
