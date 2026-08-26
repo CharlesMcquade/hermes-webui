@@ -9997,6 +9997,8 @@ async function refreshSession() {
   } catch(e) { setStatus('Refresh failed: ' + e.message); }
 }
 // ── Update banner ──
+const UPDATE_BANNER_NOTICE_STORAGE_KEY='hermes-update-banner-last-shown-v1';
+const UPDATE_BANNER_NOTICE_INTERVAL_MS=7*24*60*60*1000;
 function _formatUpdateTargetStatus(label,info){
   const manualNoGit=!!(info&&info.no_git&&info.manual_update&&info.behind>0);
   if(!info||(info.no_git&&!manualNoGit)||!(info.behind>0)) return null;
@@ -10014,6 +10016,73 @@ function _formatUpdateCheckError(label,info){
   if(!info||!info.error) return null;
   const detail=String(info.error).replace(/^fetch failed:?\s*/i,'').trim();
   return detail ? `${label}: ${detail}` : label;
+}
+function _updateBannerNoticeSignature(data){
+  const targets=[
+    {key:'webui',label:'WebUI',info:data&&data.webui},
+    {key:'agent',label:'Agent',info:data&&data.agent},
+  ];
+  const payload=[];
+  targets.forEach((target)=>{
+    const info=target.info;
+    if(!_formatUpdateTargetStatus(target.label,info)) return;
+    payload.push({
+      key:target.key,
+      behind:Number(info.behind)||0,
+      release_based:!!info.release_based,
+      manual_update:!!info.manual_update,
+      branch:String(info.branch||''),
+      channel:String(info.channel||''),
+      current_version:String(info.current_version||''),
+      latest_version:String(info.latest_version||''),
+      current_sha:String(info.current_sha||''),
+      latest_sha:String(info.latest_sha||''),
+      compare_url:String(info.compare_url||''),
+    });
+  });
+  return payload.length?JSON.stringify(payload):'';
+}
+function _readUpdateBannerNoticeRecord(){
+  try{
+    const raw=localStorage.getItem(UPDATE_BANNER_NOTICE_STORAGE_KEY);
+    if(!raw) return null;
+    const parsed=JSON.parse(raw);
+    if(!parsed||typeof parsed!=='object') return null;
+    const signature=typeof parsed.signature==='string'?parsed.signature:'';
+    const shownAt=Number(parsed.shownAt)||0;
+    if(!signature||!shownAt) return null;
+    return {signature,shownAt};
+  }catch(_e){
+    try{localStorage.removeItem(UPDATE_BANNER_NOTICE_STORAGE_KEY);}catch(_ignore){}
+    return null;
+  }
+}
+function _rememberUpdateBannerNoticeShown(data){
+  const signature=_updateBannerNoticeSignature(data);
+  if(!signature) return;
+  try{
+    localStorage.setItem(UPDATE_BANNER_NOTICE_STORAGE_KEY,JSON.stringify({
+      signature,
+      shownAt:Date.now(),
+    }));
+  }catch(_e){}
+}
+function _shouldShowUpdateBannerNotice(data){
+  const options=arguments.length>1&&arguments[1]?arguments[1]:{};
+  if(options.force) return true;
+  const signature=_updateBannerNoticeSignature(data);
+  if(!signature) return true;
+  const record=_readUpdateBannerNoticeRecord();
+  const now=Date.now();
+  if(
+    record&&
+    record.signature===signature&&
+    record.shownAt<=now&&
+    now-record.shownAt<UPDATE_BANNER_NOTICE_INTERVAL_MS
+  ){
+    return false;
+  }
+  return true;
 }
 function _isSafeUpdateCompareUrl(url){
   if(!url||!/^https?:\/\//i.test(url)) return false;
@@ -10310,6 +10379,7 @@ function _renderUpdateWhatsNewLinks(data){
   _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
 function _showUpdateBanner(data){
+  const options=arguments.length>1&&arguments[1]?arguments[1]:{};
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
@@ -10343,7 +10413,13 @@ function _showUpdateBanner(data){
     msg.textContent='\u2B06 '+parts.join(', ')+' available'+(manualInstruction?' · '+manualInstruction:'');
   }
   const banner=$('updateBanner');
+  if(typeof _shouldShowUpdateBannerNotice==='function'&&!_shouldShowUpdateBannerNotice(data,options)){
+    if(banner) banner.classList.remove('visible');
+    if(typeof _hideUpdateSummaryPanel==='function') _hideUpdateSummaryPanel();
+    return;
+  }
   if(banner) banner.classList.add('visible');
+  if(typeof _rememberUpdateBannerNoticeShown==='function') _rememberUpdateBannerNoticeShown(data);
   const summaryMode=window._whatsNewSummaryEnabled===true?'summary':'diff';
   _renderUpdateWhatsNewLinks(data,{mode:summaryMode});
 }
@@ -10356,6 +10432,7 @@ function _i18nUpdateText(key, fallback){
 }
 function dismissUpdate(){
   const b=$('updateBanner');if(b)b.classList.remove('visible');
+  if(typeof _rememberUpdateBannerNoticeShown==='function') _rememberUpdateBannerNoticeShown(window._updateData||{});
   sessionStorage.setItem('hermes-update-dismissed','1');
 }
 function _isUpdateApplyNetworkError(error){
@@ -12968,6 +13045,58 @@ function _anchorSceneRowsForRendering(scene, opts){
   }
   return out;
 }
+function _anchorSceneDeliveredSteerRows(scene, opts){
+  return _anchorSceneRowsForRendering(scene,opts).filter(row=>
+    row&&row.role==='user'&&String(row.source_event_type||'')==='steer_delivered'
+  );
+}
+function _renderLiveAnchorSteerRowsOnly(streamId, scene, opts){
+  opts=opts||{};
+  if(!S.session||!S.activeStreamId) return false;
+  if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
+  if(streamId&&S.activeStreamId!==streamId) return false;
+  const rows=_anchorSceneDeliveredSteerRows(scene,{settled:false});
+  if(!rows.length) return false;
+  $('emptyState').style.display='none';
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    $('msgInner').appendChild(turn);
+  }
+  turn.setAttribute('data-anchor-scene-live-owner','1');
+  turn.setAttribute('data-anchor-stream-id',String(streamId||''));
+  turn.setAttribute('data-anchor-scene-live-mode','hide_all_activity');
+  turn.setAttribute('data-steer-only','1');
+  if(S.session) turn.dataset.sessionId=S.session.session_id;
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return false;
+  blocks.querySelectorAll('[data-steer-delivery="delivered"]').forEach(el=>el.remove());
+  for(const row of rows){
+    const node=_anchorSceneNodeForRow(row,{settled:false});
+    if(node) blocks.appendChild(node);
+  }
+  if(typeof scrollIfPinned==='function') scrollIfPinned();
+  return true;
+}
+function _renderSettledAnchorSteerRowsOnlyForMessage(message, segment, rawIdx){
+  if(!message||!message._anchor_activity_scene||!segment) return false;
+  const rows=_anchorSceneDeliveredSteerRows(message._anchor_activity_scene,{settled:true});
+  if(!rows.length) return false;
+  const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
+  if(!blocks) return false;
+  blocks.querySelectorAll('[data-anchor-settled-scene-row="1"][data-steer-delivery="delivered"]').forEach(el=>el.remove());
+  let wrote=false;
+  for(const row of rows){
+    const node=_anchorSceneNodeForRow(row,{settled:true});
+    if(!node) continue;
+    node.setAttribute('data-anchor-settled-scene-row','1');
+    if(segment.parentElement===blocks) blocks.insertBefore(node,segment);
+    else blocks.appendChild(node);
+    wrote=true;
+  }
+  return wrote;
+}
 function _anchorSceneIsSettledSuccessfulCompression(row, settled){
   if(!settled||!row||row.role!=='lifecycle') return false;
   const source=String(row.source_event_type||'');
@@ -13088,6 +13217,31 @@ function _anchorSceneNodeForRow(row, opts){
         id:row.row_id||row.local_id||'',
       });
     }
+  }else if(row.role==='user'&&String(row.source_event_type||'')==='steer_delivered'){
+    const text=String(row.text||'').trim();
+    const files=(row.payload&&Array.isArray(row.payload.files))?row.payload.files.filter(Boolean):[];
+    if(!text&&!files.length) return null;
+    node=document.createElement('div');
+    node.className='msg-row steer-delivered-row';
+    node.setAttribute('data-role','user');
+    node.setAttribute('data-steer-delivery','delivered');
+    const label=document.createElement('div');
+    label.className='steer-delivered-label';
+    label.textContent=(typeof t==='function'&&t('steer_message_label'))||'Steer';
+    node.appendChild(label);
+    const body=document.createElement('div');
+    body.className='msg-body';
+    // Steer is user-authored transcript content. Use the exact same safe user
+    // renderer as ordinary user bubbles so the render_user_markdown preference,
+    // fenced-block handling, sanitization, and render cache stay consistent.
+    body.innerHTML=_getCachedRender(text,true);
+    node.appendChild(body);
+    if(files.length){
+      const attachments=document.createElement('div');
+      attachments.className='steer-delivered-files';
+      attachments.textContent=files.join(', ');
+      node.appendChild(attachments);
+    }
   }else if(row.role==='control'){
     node=_activityStatusNode({
       kind:settled?'done':'waiting',
@@ -13123,7 +13277,11 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     segmentSeq:row.segment_seq||row.segmentSeq||'',
     burstId:row.activity_burst_id||row.burst_id||row.burstId||'',
   };
-  if(row.role==='prose'){
+  if(row.role==='user'&&String(row.source_event_type||'')==='steer_delivered'){
+    // User guidance should stay a user message in Transparent Stream, not gain
+    // generic activity chrome merely because it lives inside an assistant turn.
+    node=_anchorSceneNodeForRow(row,{settled});
+  }else if(row.role==='prose'){
     // The settled assistant segment already owns the FINAL answer prose, so a
     // prose row whose text matches the final answer must be suppressed here to
     // avoid duplicating the answer. But INTERMEDIATE progress prose (the
@@ -13477,13 +13635,21 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   // honor requestedMode ONLY when there is no usable active mode.
   const knownMode=(m)=>m==='compact_worklog'||m==='transparent_stream'||m==='hide_all_activity';
   const sceneMode=knownMode(activeMode)?activeMode:(knownMode(requestedMode)?requestedMode:activeMode);
-  if(sceneMode==='hide_all_activity') return false;
+  if(sceneMode==='hide_all_activity'){
+    // Keep the renderer's historical no-DOM early-out for ordinary activity;
+    // only user-authored Steer rows pierce Final-answer-only mode.
+    const hasDeliveredSteer=Array.isArray(scene&&scene.activity_rows)
+      && scene.activity_rows.some(row=>row&&String(row.source_event_type||'')==='steer_delivered');
+    if(!hasDeliveredSteer||typeof _renderLiveAnchorSteerRowsOnly!=='function') return false;
+    return _renderLiveAnchorSteerRowsOnly(streamId,scene,opts);
+  }
   const existingTurn=$('liveAssistantTurn');
   const requestedSessionId=String(opts.sessionId||'');
   const existingTurnSessionId=String(existingTurn&&existingTurn.dataset&&existingTurn.dataset.sessionId||'');
   if(existingTurn&&requestedSessionId&&existingTurnSessionId&&existingTurnSessionId!==requestedSessionId){
     if(!_resetMismatchedLiveAssistantTurnForSession(existingTurn, requestedSessionId)) return false;
   }
+  if(existingTurn&&typeof existingTurn.removeAttribute==='function') existingTurn.removeAttribute('data-steer-only');
   if(sceneMode==='transparent_stream'){
     return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);
   }
@@ -13909,6 +14075,7 @@ function _anchorSceneSceneHasWorklogWorthyRows(scene){
   for(const row of rows){
     if(!row||typeof row!=='object') continue;
     const role=String(row.role||'');
+    if(String(row.source_event_type||'')==='steer_delivered') return true;
     if(role==='tool'||role==='thinking') return true;
     if(role==='lifecycle'){
       const source=String(row.source_event_type||'');
@@ -14266,6 +14433,9 @@ if(typeof window!=='undefined'){
 function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
   if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
+  if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()){
+    return _renderSettledAnchorSteerRowsOnlyForMessage(message,segment,rawIdx);
+  }
   if(typeof isTransparentStream==='function'&&isTransparentStream()){
     return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);
   }
@@ -19113,12 +19283,22 @@ function clearLiveToolCards(){
   if(container){container.innerHTML='';container.style.display='none';}
 }
 function _hideLiveActivityForFinalAnswerOnly(){
-  clearLiveToolCards();
+  // Keep durable user-authored Steer rows; the selective cleanup below removes
+  // every assistant activity row while leaving those transcript boundaries.
+  clearLiveToolCards({preserveDom:true});
   if(typeof removeThinking==='function') removeThinking();
   const turn=$('liveAssistantTurn');
   const inner=_assistantTurnBlocks(turn);
   if(inner){
-    inner.querySelectorAll('.transparent-event-row,.agent-activity-thinking,.wl-reason,#liveRunStatus,.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid],[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
+    // Compact Worklog nests Steer rows inside the group that is about to be
+    // removed. Promote them to the turn block first so deleting assistant
+    // activity cannot take the user-authored boundary with its parent.
+    const deliveredSteers=Array.from(inner.querySelectorAll('[data-steer-delivery="delivered"]'));
+    deliveredSteers.forEach(row=>{
+      if(row&&row.parentElement!==inner) inner.appendChild(row);
+    });
+    if(deliveredSteers.length&&turn&&typeof turn.setAttribute==='function') turn.setAttribute('data-steer-only','1');
+    inner.querySelectorAll('.transparent-event-row,.agent-activity-thinking,.wl-reason,#liveRunStatus,.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid],[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]:not([data-steer-delivery="delivered"])').forEach(el=>el.remove());
   }
   const legacyThinking=$('thinkingRow');
   if(legacyThinking) legacyThinking.remove();

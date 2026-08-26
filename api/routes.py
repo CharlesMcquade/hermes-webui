@@ -2994,6 +2994,76 @@ def _cancelled_run_is_stale(run_entry) -> bool:
         return False
 
 
+def _orphaned_tool_tail_kind(messages) -> str | None:
+    """Return the incomplete tool-tail kind that needs a terminal assistant marker."""
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").strip().lower()
+        if role == "tool":
+            return "tool output"
+        if role == "assistant":
+            if message.get("_error") or message.get("type") == "interrupted":
+                return None
+            if (
+                message.get("tool_calls")
+                or message.get("_partial_tool_calls")
+                or message.get("finish_reason") == "tool_calls"
+            ):
+                return "a tool-call request"
+            return None
+        if role == "user":
+            return None
+    return None
+
+
+def _append_orphaned_tool_tail_interruption_marker(session, stream_id: str | None) -> bool:
+    """Seal stale transcripts whose tails end mid tool-call turn.
+
+    Server/process exits can occur after a tool result is persisted but before
+    the assistant writes the final post-tool response. Clearing active_stream_id
+    alone makes the next user turn append after ``role=tool``; providers require
+    that a tool result be followed by an assistant message. Append terminal
+    assistant markers so display and provider-facing context both stop at valid
+    boundaries, even if only one transcript copy is orphaned.
+    """
+
+    def _marker(kind: str) -> dict:
+        detail = f"the transcript ended on {kind}"
+        return {
+            "role": "assistant",
+            "content": (
+                "**Response interrupted.**\n\n"
+                "The live response stream stopped before this turn finished. "
+                f"Evidence: {detail}, so the assistant did not write a final "
+                "post-tool response before the WebUI process lost the stream. "
+                "Start a new turn to continue."
+            ),
+            "timestamp": int(time.time()),
+            "_error": True,
+            "type": "interrupted",
+            "interruption_cause": "lost_worker_bookkeeping" if stream_id else "unknown",
+            "_orphaned_tool_tail_repair": True,
+        }
+
+    repaired = False
+    messages = getattr(session, "messages", None)
+    kind = _orphaned_tool_tail_kind(messages)
+    if isinstance(messages, list) and kind:
+        messages.append(_marker(kind))
+        repaired = True
+
+    context_messages = getattr(session, "context_messages", None)
+    context_kind = _orphaned_tool_tail_kind(context_messages)
+    if isinstance(context_messages, list) and context_kind:
+        context_messages.append(_marker(context_kind))
+        repaired = True
+
+    return repaired
+
+
 def _clear_stale_stream_state(session) -> bool:
     """Clear persisted streaming flags when the in-memory stream no longer exists.
 
@@ -3159,6 +3229,7 @@ def _clear_stale_stream_state(session) -> bool:
                 return True
             if getattr(session, "active_stream_id", None) != stream_id:
                 return False
+        _append_orphaned_tool_tail_interruption_marker(session, stream_id)
         _materialize_pending_user_turn_before_error(session)
         session.active_stream_id = None
         if hasattr(session, "pending_user_message"):
@@ -3351,14 +3422,17 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     reasoning_text = ""
     messages: list[dict] = []
     tool_calls: list[dict] = []
+    delivered_steer_events: list[dict] = []
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
+    prose_segment_first_seq = 0
     fresh_segment = True
     last_ts = None
-    reasoning_first_tool_count: int | None = None
+    reasoning_segments: list[dict] = []
+    reasoning_segment_break = False
 
-    def mark_boundary() -> int:
-        nonlocal current_activity_burst_id
+    def mark_boundary(event_seq: int | None = None) -> int:
+        nonlocal current_activity_burst_id, prose_segment_first_seq
         text_end = len(assistant_text)
         if text_end <= 0:
             return current_activity_burst_id
@@ -3369,11 +3443,16 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if text_end > last_end:
             current_activity_burst_id += 1
             activity_burst_anchors.append(
-                {"id": current_activity_burst_id, "textEnd": text_end}
+                {
+                    "id": current_activity_burst_id,
+                    "textEnd": text_end,
+                    "_journal_seq": int(prose_segment_first_seq or event_seq or 0) or None,
+                }
             )
+            prose_segment_first_seq = 0
         return current_activity_burst_id
 
-    def update_completed_tool(payload: dict) -> None:
+    def update_completed_tool(payload: dict, event_seq: int) -> None:
         tool_id = _run_journal_snapshot_tool_id(payload)
         name = str(payload.get("name") or "").strip()
         for call in reversed(tool_calls):
@@ -3408,6 +3487,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "_live": True,
             "_journal_snapshot": True,
             "_journal_stream_id": stream_id,
+            "_journal_seq": event_seq or None,
         }
         tool_id = _run_journal_snapshot_tool_id(payload)
         if tool_id:
@@ -3427,33 +3507,50 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         return _compact_for_echo_compare(reasoning_text).endswith(candidate)
 
     def strip_reasoning_echo_tail(text: str) -> bool:
-        nonlocal reasoning_text, reasoning_first_tool_count
+        nonlocal reasoning_text
         next_reasoning, did_remove = _strip_compact_echo_suffix(reasoning_text, text)
         if did_remove:
             reasoning_text = next_reasoning
-            if not _compact_for_echo_compare(reasoning_text):
-                reasoning_first_tool_count = None
+            remaining = len(next_reasoning)
+            kept: list[dict] = []
+            for segment in reasoning_segments:
+                if remaining <= 0:
+                    break
+                segment_text = str(segment.get("text") or "")
+                retained = segment_text[:remaining]
+                if retained:
+                    kept.append({**segment, "text": retained})
+                remaining -= len(retained)
+            reasoning_segments[:] = kept
         return did_remove
 
     for event in events:
         event_name = str(event.get("event") or event.get("type") or "")
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        event_seq = int(event.get("seq") or 0)
         last_ts = event.get("created_at", last_ts)
         if event_name == "token":
             text = str(payload.get("text") or "")
             if text:
+                if not prose_segment_first_seq:
+                    prose_segment_first_seq = event_seq
                 assistant_text += text
                 fresh_segment = False
             continue
         if event_name == "reasoning":
             text = str(payload.get("text") or "")
-            if text and reasoning_first_tool_count is None:
-                reasoning_first_tool_count = len(tool_calls)
-            reasoning_text += text
+            if text:
+                if not reasoning_segments or reasoning_segment_break:
+                    reasoning_segments.append({"text": "", "seq": event_seq or None})
+                    reasoning_segment_break = False
+                reasoning_segments[-1]["text"] += text
+                reasoning_text += text
             continue
         if event_name == "interim_assistant":
             visible = str(payload.get("text") or "").strip()
             if visible:
+                if not prose_segment_first_seq:
+                    prose_segment_first_seq = event_seq
                 if payload.get("reasoning_echo") or reasoning_echo_tail_matches(visible):
                     strip_reasoning_echo_tail(visible)
                 if payload.get("already_streamed"):
@@ -3461,14 +3558,14 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                         assistant_text = visible
                 else:
                     assistant_text = f"{assistant_text}\n\n{visible}" if assistant_text else visible
-                mark_boundary()
+                mark_boundary(event_seq)
                 fresh_segment = True
             continue
         if event_name == "tool":
             name = str(payload.get("name") or "").strip()
             if not name or name == "clarify":
                 continue
-            boundary_id = mark_boundary()
+            boundary_id = mark_boundary(event_seq)
             tool_id = _run_journal_snapshot_tool_id(payload)
             call = {
                 "name": name,
@@ -3478,6 +3575,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "_live": True,
                 "_journal_snapshot": True,
                 "_journal_stream_id": stream_id,
+                "_journal_seq": event_seq or None,
             }
             if tool_id:
                 call["tid"] = tool_id
@@ -3491,8 +3589,27 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             fresh_segment = True
             continue
         if event_name == "tool_complete":
-            update_completed_tool(payload)
+            update_completed_tool(payload, event_seq)
             fresh_segment = True
+            continue
+        if event_name == "steer_delivered":
+            text = str(payload.get("text") or "").strip()
+            files = payload.get("files") if isinstance(payload.get("files"), list) else []
+            if text or files:
+                mark_boundary(event_seq)
+                reasoning_segment_break = True
+                delivered_steer_events.append(
+                    {
+                        "event_id": _run_journal_snapshot_event_id_for_run(
+                            event, run_id, event_seq
+                        ),
+                        "seq": event_seq or None,
+                        "created_at": event.get("created_at"),
+                        "text": text,
+                        "status": str(payload.get("status") or "delivered"),
+                        "payload": dict(payload),
+                    }
+                )
 
     if assistant_text or reasoning_text:
         message = {
@@ -3522,7 +3639,14 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             group["activity_burst_id"] = burst_id
         return group
 
-    def scene_prose_row(text: str, *, burst_id: int | None, segment_seq: int, status: str) -> dict | None:
+    def scene_prose_row(
+        text: str,
+        *,
+        burst_id: int | None,
+        segment_seq: int,
+        status: str,
+        journal_seq: int | None,
+    ) -> dict | None:
         clean = str(text or "").strip()
         if not clean:
             return None
@@ -3542,7 +3666,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "local_id": local_id,
             "run_id": run_id,
             "stream_id": stream_id,
-            "seq": None,
+            "seq": journal_seq,
             "status": status,
             "created_at": last_ts,
             "identity": {
@@ -3550,7 +3674,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "local_id": local_id,
                 "run_id": run_id,
                 "stream_id": stream_id,
-                "seq": None,
+                "seq": journal_seq,
             },
             "group": scene_group(segment_seq, burst_id),
             "text": clean,
@@ -3564,12 +3688,18 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             },
         }
 
-    def scene_thinking_row(text: str, *, status: str) -> dict | None:
+    def scene_thinking_row(
+        text: str,
+        *,
+        status: str,
+        journal_seq: int | None,
+        segment_index: int,
+    ) -> dict | None:
         clean = str(text or "").strip()
         if not clean:
             return None
         preview = " ".join(clean.split())
-        local_id = f"live-thinking:{stream_id}:1"
+        local_id = f"live-thinking:{stream_id}:{segment_index}"
         return {
             "row_id": local_id,
             "order_index": len(anchor_activity_rows),
@@ -3585,7 +3715,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "local_id": local_id,
             "run_id": run_id,
             "stream_id": stream_id,
-            "seq": None,
+            "seq": journal_seq,
             "status": status,
             "created_at": last_ts,
             "identity": {
@@ -3593,7 +3723,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "local_id": local_id,
                 "run_id": run_id,
                 "stream_id": stream_id,
-                "seq": None,
+                "seq": journal_seq,
             },
             "group": scene_group(),
             "text": clean,
@@ -3619,6 +3749,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         burst_id = int(call.get("activityBurstId") or 0) or None
         segment_seq = int(call.get("activitySegmentSeq") or burst_id or 0) or None
         status = "error" if call.get("is_error") else ("completed" if call.get("done") else "running")
+        journal_seq = int(call.get("_journal_seq") or 0) or None
         row_id = f"tool:{tool_id or name}:{fallback_order}"
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
         preview = str(call.get("preview") or "")
@@ -3662,7 +3793,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "local_id": tool_id or row_id,
             "run_id": run_id,
             "stream_id": stream_id,
-            "seq": None,
+            "seq": journal_seq,
             "status": status,
             "created_at": last_ts,
             "identity": {
@@ -3670,7 +3801,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
                 "local_id": tool_id or row_id,
                 "run_id": run_id,
                 "stream_id": stream_id,
-                "seq": None,
+                "seq": journal_seq,
             },
             "group": scene_group(segment_seq, burst_id),
             "text": snippet or preview,
@@ -3681,21 +3812,23 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         }
 
     anchor_activity_rows: list[dict] = []
-    thinking_row_inserted = False
-    tool_rows_rendered = 0
+    thinking_rows_inserted = False
 
     def append_thinking_row(*, force: bool = False) -> None:
-        nonlocal thinking_row_inserted
-        if thinking_row_inserted:
+        nonlocal thinking_rows_inserted
+        if thinking_rows_inserted:
             return
-        if not force and reasoning_first_tool_count and tool_rows_rendered < reasoning_first_tool_count:
-            return
-        row = scene_thinking_row(reasoning_text, status="running")
-        if not row:
-            return
-        row["order_index"] = len(anchor_activity_rows)
-        anchor_activity_rows.append(row)
-        thinking_row_inserted = True
+        for segment_index, segment in enumerate(reasoning_segments, start=1):
+            row = scene_thinking_row(
+                segment.get("text") or "",
+                status="running",
+                journal_seq=segment.get("seq"),
+                segment_index=segment_index,
+            )
+            if row:
+                row["order_index"] = len(anchor_activity_rows)
+                anchor_activity_rows.append(row)
+        thinking_rows_inserted = True
 
     tool_rows_by_burst: dict[int, list[tuple[int, dict]]] = {}
     ungrouped_tool_rows: list[tuple[int, dict]] = []
@@ -3728,6 +3861,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             burst_id=burst_id,
             segment_seq=segment_seq,
             status="completed",
+            journal_seq=anchor.get("_journal_seq"),
         )
         if prose:
             anchor_activity_rows.append(prose)
@@ -3736,7 +3870,6 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             row["order_index"] = len(anchor_activity_rows)
             anchor_activity_rows.append(row)
             consumed_tools.add(order)
-            tool_rows_rendered += 1
             append_thinking_row()
         text_start = max(text_start, text_end)
 
@@ -3747,6 +3880,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             burst_id=None,
             segment_seq=segment_seq,
             status="running",
+            journal_seq=prose_segment_first_seq or None,
         )
         if tail:
             anchor_activity_rows.append(tail)
@@ -3760,10 +3894,64 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             continue
         row["order_index"] = len(anchor_activity_rows)
         anchor_activity_rows.append(row)
-        tool_rows_rendered += 1
         append_thinking_row()
 
     append_thinking_row(force=True)
+
+    # Steer delivery is a durable control boundary, not assistant prose.  It
+    # must be rebuilt from the journal independently of token/tool projection so
+    # a refresh sees the same row that live SSE displayed.
+    for control in delivered_steer_events:
+        event_id = control.get("event_id")
+        event_seq = control.get("seq")
+        row_id = event_id or f"steer:{stream_id}:{event_seq or len(anchor_activity_rows)}"
+        anchor_activity_rows.append(
+            {
+                "row_id": row_id,
+                "order_index": len(anchor_activity_rows),
+                "kind": "control_boundary",
+                "role": "user",
+                "display_hint": "user_message",
+                "display_hints": {
+                    "compact_worklog": "user_message",
+                    "transparent_stream": "user_message",
+                },
+                "source_event_type": "steer_delivered",
+                "event_id": event_id,
+                "local_id": row_id,
+                "run_id": run_id,
+                "stream_id": stream_id,
+                "seq": event_seq,
+                "status": control.get("status") or "delivered",
+                "created_at": control.get("created_at"),
+                "identity": {
+                    "event_id": event_id,
+                    "local_id": row_id,
+                    "run_id": run_id,
+                    "stream_id": stream_id,
+                    "seq": event_seq,
+                },
+                "group": scene_group(),
+                "text": control.get("text") or "",
+                "thinking": None,
+                "tool_call_id": "",
+                "tool": None,
+                "payload": control.get("payload") or {},
+            }
+        )
+
+    # Aggregation builds prose, thinking, and tool rows by type. Journal seq is
+    # the cross-reload chronology authority, so stable-sort the completed rows
+    # before presentation and rebuild their contiguous order indices.
+    anchor_activity_rows.sort(
+        key=lambda row: (
+            row.get("seq")
+            if isinstance(row.get("seq"), int) and row.get("seq") > 0
+            else 2**63
+        )
+    )
+    for order_index, row in enumerate(anchor_activity_rows):
+        row["order_index"] = order_index
 
     # Keep a live anchor shell during session-switch replay even before the
     # journal has projected visible prose or tool rows from the first events.
@@ -3843,7 +4031,10 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         "tool_calls": tool_calls,
         "last_assistant_text": assistant_text,
         "last_reasoning_text": reasoning_text,
-        "activity_burst_anchors": activity_burst_anchors,
+        "activity_burst_anchors": [
+            {key: value for key, value in anchor.items() if not key.startswith("_")}
+            for anchor in activity_burst_anchors
+        ],
         "current_activity_burst_id": current_activity_burst_id,
         "current_live_segment_seq": current_live_segment_seq,
         "anchor_activity_scene": {
@@ -3915,7 +4106,8 @@ def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict
     compact_rows = []
     row_keys = (
         "row_id", "local_id", "kind", "role", "source_event_type", "status",
-        "created_at", "group", "text", "thinking", "tool_call_id", "tool",
+        "event_id", "run_id", "stream_id", "seq", "created_at", "group", "text",
+        "thinking", "tool_call_id", "tool",
     )
     for raw_row in scene.get("activity_rows") or []:
         if not isinstance(raw_row, dict):
@@ -3940,6 +4132,14 @@ def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict
             thinking = row.get("thinking")
             if isinstance(thinking, dict) and thinking.get("text") == row.get("text"):
                 row.pop("thinking", None)
+            if str(raw_row.get("source_event_type") or "") == "steer_delivered":
+                raw_payload = raw_row.get("payload") if isinstance(raw_row.get("payload"), dict) else {}
+                files = raw_payload.get("files") if isinstance(raw_payload.get("files"), list) else []
+                if files:
+                    # The compact session projection normally drops duplicated
+                    # payloads, but attachment labels exist nowhere else on a
+                    # Steer row and are part of its visible user-authored record.
+                    row["payload"] = {"files": files[:20]}
         compact_rows.append(row)
     compact_scene["activity_rows"] = compact_rows
     projected["anchor_activity_scene"] = compact_scene
@@ -12549,6 +12749,11 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path.startswith("/api/") and not _guard_request_session_visibility(handler, parsed, method="GET"):
         return True
 
+    if parsed.path == "/api/sidecar/cdp/relays":
+        from api import sidecar_cdp
+
+        return j(handler, {"ok": True, "relays": sidecar_cdp.list_relays()})
+
     # ── Insights / knowledge status ──
     if parsed.path == "/api/insights":
         return _handle_insights(handler, parsed)
@@ -14360,6 +14565,56 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         return True
+
+    if parsed.path.startswith("/api/sidecar/cdp/"):
+        from api import sidecar_cdp
+
+        try:
+            if parsed.path == "/api/sidecar/cdp/register":
+                peer = ""
+                try:
+                    peer = str(getattr(handler, "client_address", [""])[0] or "")
+                except Exception:
+                    peer = ""
+                return j(handler, sidecar_cdp.register_relay(body, peer=peer))
+            if parsed.path == "/api/sidecar/cdp/unregister":
+                return j(handler, sidecar_cdp.unregister_relay(body.get("relay_id")))
+            if parsed.path == "/api/sidecar/cdp/poll":
+                return j(
+                    handler,
+                    sidecar_cdp.poll(
+                        body.get("relay_id"),
+                        timeout_ms=body.get("timeout_ms", 25000),
+                    ),
+                )
+            if parsed.path == "/api/sidecar/cdp/respond":
+                return j(
+                    handler,
+                    sidecar_cdp.respond(
+                        relay_id=body.get("relay_id"),
+                        command_id=body.get("command_id"),
+                        ok=bool(body.get("ok")),
+                        result=body.get("result"),
+                        error=body.get("error"),
+                    ),
+                )
+            if parsed.path == "/api/sidecar/cdp/command":
+                method = str(body.get("method") or "").strip()
+                if method == "cdp.listRelays":
+                    return j(handler, {"ok": True, "relays": sidecar_cdp.list_relays()})
+                result = sidecar_cdp.send_command(
+                    method=method,
+                    params=body.get("params") or {},
+                    target=body.get("target"),
+                    timeout=body.get("timeout", 30),
+                    relay_id=body.get("relay_id"),
+                )
+                return j(handler, {"ok": True, "result": result})
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except RuntimeError as exc:
+            return j(handler, {"ok": False, "error": str(exc)})
+        return bad(handler, "unknown CDP sidecar endpoint", status=404)
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)

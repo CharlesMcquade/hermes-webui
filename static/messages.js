@@ -2183,11 +2183,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // CONNECTING EventSource can survive in page state while the server has no
     // subscriber, which leaves the live pane blank forever.
     (typeof EventSource==='undefined'||
-      existingLive.source.readyState===EventSource.OPEN||
-      (!reconnecting&&existingLive.source.readyState===EventSource.CONNECTING))
+      existingLive.source.readyState===EventSource.OPEN)
   ){
     // Phase D: restore bottom run status on reattach after the Worklog shell
-    // exists. There is no stale transport teardown in this branch.
+    // exists. A CONNECTING EventSource is intentionally not reused: after a
+    // server restart Safari/Chromium can keep a stale browser-side object while
+    // the backend has zero subscribers, leaving the live pane blank forever.
     if(reconnecting && S.activeStreamId && typeof showLiveRunStatus==='function'){
       const _startedAt=(S.session&&S.session.pending_started_at)||Date.now()/1000;
       showLiveRunStatus(activeSid,{startedAt:_startedAt});
@@ -3824,6 +3825,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     for(const row of rows){
       if(!row||typeof row!=='object') continue;
       const role=String(row.role||'');
+      // Steer is user-authored, but it still needs a persisted Anchor scene even
+      // when the rest of the turn is prose-only.
+      if(String(row.source_event_type||'')==='steer_delivered') return true;
       if(role==='tool'||role==='thinking') return true;
       if(role==='lifecycle'){
         const source=String(row.source_event_type||'');
@@ -6452,6 +6456,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         return;
       }
       _finalizeStreamEndFallback(source);
+    });
+
+    source.addEventListener('steer_delivered',e=>{
+      try{
+        const d=JSON.parse(e.data||'{}');
+        const sid=d.session_id||activeSid;
+        const txt=String(d.text||'').trim();
+        const files=Array.isArray(d.files)?d.files.filter(Boolean):[];
+        if((!txt&&!files.length)||sid!==activeSid) return;
+        _applyToAnchor('steer_delivered',d,e);
+        // Persist the live anchor snapshot so settlement and reconnect retain
+        // the user-authored row instead of reverting to a pre-Steer scene.
+        snapshotLiveTurn();
+      }catch(_){}
     });
 
     source.addEventListener('pending_steer_leftover',e=>{
