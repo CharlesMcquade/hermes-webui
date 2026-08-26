@@ -2706,11 +2706,11 @@
   .composer-mobile-context-action.ctx-high .composer-mobile-config-value{color:var(--error);}
   .composer-mobile-context-action.ctx-high .composer-mobile-context-compress{border-color:var(--error);color:var(--error);}
   .composer-content-width-wrap{position:relative;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;}
-  .composer-content-width-btn{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;padding:0;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;transition:background-color .12s,color .12s,border-color .12s,box-shadow .12s;}
+  .composer-content-width-btn{display:inline-flex;align-items:center;justify-content:center;flex:0 0 34px;width:34px;min-width:34px;height:34px;padding:0;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;transition:background-color .12s,color .12s,border-color .12s,box-shadow .12s;}
   .composer-content-width-btn:hover{background:var(--hover-bg);color:var(--text);}
   .composer-content-width-btn[aria-expanded="true"]{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
   .composer-content-width-btn:focus-visible,.composer-content-width-popup button:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
-  .content-width-icon{display:block;width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;}
+  .content-width-icon{display:block;width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;}
   .content-width-icon-line{transform-box:fill-box;transform-origin:center;}
   .composer-content-width-btn[data-content-width-mode="default"] .content-width-icon-line{transform:scaleX(.58);}
   .composer-content-width-btn[data-content-width-mode="wide"] .content-width-icon-line,.composer-content-width-btn[data-content-width-mode="full"] .content-width-icon-line{transform:scaleX(.86);}
@@ -3150,7 +3150,7 @@
     .composer-left > *{flex-shrink:0;}
     .composer-profile-wrap,
     .composer-ws-wrap{flex:0 0 auto;}
-    .composer-content-width-btn{width:44px;height:44px;}
+    .composer-content-width-btn{flex:0 0 44px;width:44px;min-width:44px;height:44px;}
     .composer-content-width-popup{right:-2px;bottom:calc(100% + 6px);}
     .composer-right{flex:0 0 auto;width:auto;justify-content:flex-end;gap:6px;min-width:0;}
     /* icon-only composer chips below 640px */
