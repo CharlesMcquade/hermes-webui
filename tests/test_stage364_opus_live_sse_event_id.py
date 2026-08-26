@@ -39,17 +39,23 @@ def test_stream_last_event_id_dict_exists_in_config():
 
 
 def test_put_writes_event_id_to_side_channel_dict():
-    """The `put()` helper must capture the event_id from the journal and
-    write it to STREAM_LAST_EVENT_ID[stream_id]."""
+    """The ordered journal publisher must advance the side-channel event id only
+    after queue publication succeeds."""
     put_def_idx = STREAMING_PY.find("def put(event, data):")
     assert put_def_idx != -1, "put(event, data) not found in api/streaming.py"
-    put_body = STREAMING_PY[put_def_idx:put_def_idx + 2500]
-    assert "journaled = run_journal.append_sse_event(event, data)" in put_body, (
-        "put() must capture append_sse_event return value"
+    next_def_idx = STREAMING_PY.find("\n    def ", put_def_idx + 1)
+    put_body = STREAMING_PY[put_def_idx:next_def_idx]
+    assert "run_journal.append_and_publish_sse_event(event, data, _publish_journaled)" in put_body, (
+        "put() must atomically journal and publish each SSE event"
     )
     assert "STREAM_LAST_EVENT_ID[stream_id]" in put_body, (
         "put() must write event_id to STREAM_LAST_EVENT_ID[stream_id] — "
         "this is the side-channel the SSE consumer reads at emit time"
+    )
+    publish_pos = put_body.index("q.put_nowait(queue_item)")
+    side_channel_pos = put_body.index("STREAM_LAST_EVENT_ID[stream_id] = event_id")
+    assert publish_pos < side_channel_pos, (
+        "side-channel id must advance only after queue publication succeeds"
     )
 
 
