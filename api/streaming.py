@@ -1134,7 +1134,9 @@ def _clean_fallback_notice(notice):
     return {k: notice.get(k, '') for k in _FALLBACK_NOTICE_KEYS}
 
 
-def _publish_fallback_notice(stream_id, notice, pending_notices=None) -> bool:
+def _publish_fallback_notice(
+    stream_id, notice, pending_notices=None, *, require_live_stream=False,
+) -> bool:
     """Production publication path for a confirmed fallback notice.
 
     This is the single gate through which the agent status callback inserts a
@@ -1150,6 +1152,12 @@ def _publish_fallback_notice(stream_id, notice, pending_notices=None) -> bool:
     """
     with STREAMS_LOCK:
         if stream_id in _STREAM_SETTLEMENT_TERMINAL:
+            return False
+        # Production status callbacks belong to a live stream. Once teardown
+        # removes that owner, reject a callback even after the terminal fence
+        # itself is retired; otherwise a delayed callback can recreate an
+        # ownerless notice after every lifecycle registry returned to baseline.
+        if require_live_stream and stream_id not in STREAMS:
             return False
         clean_notice = _clean_fallback_notice(notice)
         if clean_notice is None:
@@ -1241,6 +1249,7 @@ def _turn_final_save_commit(
     *,
     committed_generation=None,
     committed_notice=None,
+    committed_row=None,
 ):
     """Yield for a turn-finalizing ``session.save()``; commit the saved fallback generation.
 
@@ -1310,6 +1319,113 @@ def _turn_final_save_commit(
                 _retire_fallback_dead_letter_after_persist_locked(
                     stream_id, int(_saved_generation),
                 )
+        _settle_latest_fallback_notice_before_teardown(
+            stream_id,
+            session,
+            committed_row=committed_row,
+            durable_generation=_saved_generation,
+            durable_notice=_saved_notice,
+        )
+
+
+def _settle_latest_fallback_notice_before_teardown(
+    stream_id,
+    session,
+    *,
+    committed_row=None,
+    durable_generation=None,
+    durable_notice=None,
+):
+    """Persist the latest accepted normal-turn notice, then close publication.
+
+    A status callback may publish generation B while generation A is being
+    saved.  Normal completion has no cancel-side participant to inherit B, so
+    the worker must settle forward until the durable row matches the latest
+    accepted generation.  The final equality check and terminal-fence install
+    happen in one ``STREAMS_LOCK`` critical section; callbacks after that point
+    are rejected.  The loop is bounded and transfers an uncommitted generation
+    to the existing dead-letter owner instead of leaving process-map residue.
+    """
+    if stream_id is None or not isinstance(committed_row, dict):
+        # Legacy/helper callers without an exact final-row handle keep the
+        # previous ownership contract: never guess a row or mark a newer
+        # generation durable. Production terminal paths always pass the exact
+        # row they stamped.
+        return
+    saved_generation = int(durable_generation or 0)
+    saved_notice = _clean_fallback_notice(durable_notice)
+    for _attempt in range(_SETTLEMENT_MAX_ITERS_GLOBAL):
+        with STREAMS_LOCK:
+            live_notice = _STREAM_FALLBACK_NOTICES.get(stream_id)
+            live_generation = _current_notice_generation(stream_id)
+            clean_notice = _clean_fallback_notice(live_notice)
+            if clean_notice is None or live_generation <= saved_generation:
+                # Atomic no-newer-generation decision + publication fence. A
+                # callback cannot enter between these operations.
+                _STREAM_SETTLEMENT_TERMINAL.add(stream_id)
+                return
+        previous = committed_row.get("_fallbackNotice")
+        committed_row["_fallbackNotice"] = clean_notice
+        try:
+            session.save()
+        except Exception:
+            if previous is None:
+                committed_row.pop("_fallbackNotice", None)
+            else:
+                committed_row["_fallbackNotice"] = previous
+            with STREAMS_LOCK:
+                # A still newer generation may have arrived while the failed
+                # save was in flight. Transfer the latest accepted token and
+                # install the fence atomically so no generation is orphaned.
+                failed_notice = _clean_fallback_notice(
+                    _STREAM_FALLBACK_NOTICES.get(stream_id)
+                ) or clean_notice
+                failed_generation = max(
+                    int(live_generation), _current_notice_generation(stream_id),
+                )
+                _store_fallback_dead_letter_locked(
+                    stream_id,
+                    failed_notice,
+                    generation=failed_generation,
+                    owner_session_id=str(getattr(session, "session_id", "") or "") or None,
+                    owner_profile=getattr(session, "profile", None),
+                    terminal_status="failed",
+                )
+                _STREAM_SETTLEMENT_TERMINAL.add(stream_id)
+            logger.warning(
+                "Failed to settle latest fallback notice for stream %s",
+                stream_id,
+                exc_info=True,
+            )
+            return
+        saved_generation = int(live_generation)
+        saved_notice = clean_notice
+        with STREAMS_LOCK:
+            _STREAM_WORKER_SAVED[stream_id] = saved_generation
+            _retire_fallback_dead_letter_after_persist_locked(
+                stream_id, saved_generation,
+            )
+
+    # A pathological producer advanced on every save. Fence it now and leave
+    # the exact latest token with the bounded dead-letter retry owner.
+    with STREAMS_LOCK:
+        live_notice = _clean_fallback_notice(_STREAM_FALLBACK_NOTICES.get(stream_id))
+        live_generation = _current_notice_generation(stream_id)
+        if live_notice is not None and live_generation > saved_generation:
+            _store_fallback_dead_letter_locked(
+                stream_id,
+                live_notice,
+                generation=live_generation,
+                owner_session_id=str(getattr(session, "session_id", "") or "") or None,
+                owner_profile=getattr(session, "profile", None),
+                terminal_status="failed",
+            )
+        _STREAM_SETTLEMENT_TERMINAL.add(stream_id)
+    if isinstance(committed_row, dict):
+        if saved_notice is None:
+            committed_row.pop("_fallbackNotice", None)
+        else:
+            committed_row["_fallbackNotice"] = saved_notice
 
 
 def _snapshot_fallback_notice_for_commit(stream_id, notice):
@@ -1468,11 +1584,19 @@ def _retire_worker_cancelled_state_locked(stream_id: str) -> None:
         stream_id not in _STREAM_SETTLEMENT_PARTICIPANTS
         and stream_id not in _STREAM_SETTLEMENT_COMPLETED
         and stream_id not in _STREAM_CANCEL_CLAIMED
-        and stream_id not in _STREAM_SETTLEMENT_TERMINAL
     )
     if _no_counterpart_pending:
-        if _fb_entry is None or _notice_retired:
+        # Normal completion installs the publication fence before teardown.
+        # It has no cancel-side participant, so retire that fence directly
+        # instead of routing through the participant helper (which would leave
+        # a completed-worker tombstone). Failed persistence has already moved
+        # the exact token to the bounded dead-letter owner; the live map is no
+        # longer an additional owner in that case.
+        if _dl_entry is not None and not _worker_durably_saved:
+            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+        if _fb_entry is None or _notice_retired or _dl_entry is not None:
             _STREAM_NOTICE_GENERATION.pop(stream_id, None)
+        _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
         _expire_dead_letter_if_due_locked(stream_id)
         return
 
@@ -9978,6 +10102,7 @@ def _run_agent_streaming(
             # newer notice B would be deleted unsaved by the finalizers.
             _publish_fallback_notice(
                 stream_id, _notice, pending_notices=_pending_fallback_notices,
+                require_live_stream=True,
             )
             put('warning', _fallback_data)
 
@@ -12299,6 +12424,7 @@ def _run_agent_streaming(
                                 stream_id, s,
                                 committed_generation=_commit_gen,
                                 committed_notice=_commit_notice,
+                                committed_row=_error_message,
                             ):
                                 s.save()
                         except Exception:
@@ -12553,9 +12679,11 @@ def _run_agent_streaming(
                 _commit_gen, _commit_notice = _capture_fallback_notice_for_row(
                     stream_id, _pending_fallback_notices,
                 )
+                _commit_row = None
                 if s.messages:
                     for _dm in reversed(s.messages):
                         if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
+                            _commit_row = _dm
                             _dm['_turnDuration'] = round(_turn_duration_seconds, 3)
                             if _turn_tps is not None:
                                 _dm['_turnTps'] = _turn_tps
@@ -12772,6 +12900,7 @@ def _run_agent_streaming(
                         stream_id, s,
                         committed_generation=_commit_gen,
                         committed_notice=_commit_notice,
+                        committed_row=_commit_row,
                     ):
                         s.save()
                 if cancel_event.is_set():
@@ -13520,15 +13649,18 @@ def _run_agent_streaming(
                                     _commit_gen, _commit_notice = _capture_fallback_notice_for_row(
                                         stream_id, _pending_fallback_notices,
                                     )
-                                    if _commit_notice is not None:
-                                        for _dm in reversed(s.messages):
-                                            if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
+                                    _commit_row = None
+                                    for _dm in reversed(s.messages):
+                                        if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
+                                            _commit_row = _dm
+                                            if _commit_notice is not None:
                                                 _dm['_fallbackNotice'] = _commit_notice
-                                                break
+                                            break
                                     with _turn_final_save_commit(
                                         stream_id, s,
                                         committed_generation=_commit_gen,
                                         committed_notice=_commit_notice,
+                                        committed_row=_commit_row,
                                     ):
                                         s.save()
                                     _done_session_payload = redact_session_data(
@@ -13701,6 +13833,7 @@ def _run_agent_streaming(
                         stream_id, s,
                         committed_generation=_commit_gen,
                         committed_notice=_commit_notice,
+                        committed_row=_error_message,
                     ):
                         s.save()
                 except Exception:
