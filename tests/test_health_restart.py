@@ -99,6 +99,7 @@ def test_restart_active_profile_gateway_success_uses_active_profile_home(monkeyp
     assert result["message"] == "Gateway service restarted successfully"
     assert called["args"] == ["/mock/bin/hermes", "--profile", "default", "gateway", "restart"]
     assert called["env"]["HERMES_HOME"] == "/mock/hermes/home"
+    assert "_HERMES_GATEWAY" not in called["env"]
     assert gateway_restart._GATEWAY_RESTART_LOCK.locked() is False
 
 
@@ -309,3 +310,53 @@ def test_handle_health_restart_concurrency(monkeypatch):
             429,
         )
     ]
+
+
+# ── _run_gateway_lifecycle_command env scrub ──────────────────────────────────
+# The WebUI process imports gateway code (gateway/run.py sets
+# os.environ["_HERMES_GATEWAY"]="1" at module load). The gateway lifecycle
+# button hits /api/gateway/restart → _run_gateway_lifecycle_command, which must
+# scrub _HERMES_GATEWAY from the child env — otherwise the child CLI trips the
+# self-restart loop guard (hermes_cli/gateway.py:7828) and exits 1 before doing
+# anything. This is the same fix already applied to restart_active_profile_gateway
+# in gateway_restart.py:106, but the button's code path was never patched.
+
+def test_run_gateway_lifecycle_command_scrubs_hermes_gateway_env(monkeypatch):
+    """_run_gateway_lifecycle_command must not pass _HERMES_GATEWAY to the child."""
+    routes._GATEWAY_ACTION_LOCK = threading.Lock()
+    monkeypatch.setenv("_HERMES_GATEWAY", "1")
+
+    called = {}
+
+    class FakeCompletedProcess:
+        def __init__(self, args, env):
+            self.args = args
+            self.returncode = 0
+            self.stdout = "ok"
+            self.stderr = ""
+
+    def fake_run(cmd, *, cwd=None, env=None, capture_output=True, text=True, timeout=None):
+        called["cmd"] = cmd
+        called["env"] = env
+        called["cwd"] = cwd
+        return FakeCompletedProcess(cmd, env)
+
+    # Stub the config/profile lookups so the function doesn't need real state
+    import api.config as api_config
+    monkeypatch.setattr(api_config, "_AGENT_DIR", "/mock/agent", raising=False)
+    monkeypatch.setattr(api_config, "PYTHON_EXE", "/mock/python", raising=False)
+    from pathlib import Path
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default", raising=False)
+    monkeypatch.setattr(routes.subprocess, "run", fake_run)
+
+    result = routes._run_gateway_lifecycle_command("restart")
+
+    assert result.returncode == 0
+    assert "_HERMES_GATEWAY" not in called["env"], (
+        "_HERMES_GATEWAY must be scrubbed from the child env — the WebUI process "
+        "inherits it from gateway/run.py:1929 at import time, and the child CLI "
+        "trips the self-restart loop guard (hermes_cli/gateway.py:7828) if it leaks through."
+    )
+    assert called["env"].get("PYTHONUTF8") == "1"
+    assert called["env"].get("BROWSER") == "echo"

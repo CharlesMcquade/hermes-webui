@@ -97,6 +97,13 @@ def restart_active_profile_gateway(
     try:
         active_home, cli_profile = _gateway_restart_profile_context(profile)
         env = os.environ.copy()
+        # The WebUI may be launched by, embedded near, or restarted from a
+        # process tree that carries gateway-only guard markers.  Inheriting
+        # _HERMES_GATEWAY makes the child `hermes gateway restart` command trip
+        # the CLI's self-restart loop guard and exit 1, even though this helper
+        # is an external supervisor boundary.  Mirror hermes_cli.web_server's
+        # action-spawn behavior and scrub the guard for this management command.
+        env.pop("_HERMES_GATEWAY", None)
         env["HERMES_HOME"] = str(active_home)
         hermes_cmd = _resolve_hermes_command()
         cmd = [hermes_cmd]
