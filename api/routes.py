@@ -22954,7 +22954,7 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
         # active-agent-cache consumers read ACTIVE_RUNS as worker-lifecycle truth).
         with _live_config.STREAMS_LOCK:
             live_stream_ids = set(_live_config.STREAMS.keys())
-        stale_stream_ids = []
+        stale_runs = []
         with _live_config.ACTIVE_RUNS_LOCK:
             for run_stream_id, raw in list((_live_config.ACTIVE_RUNS or {}).items()):
                 stream_id = str((raw or {}).get("stream_id") or run_stream_id or "").strip()
@@ -22995,23 +22995,20 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
                 # lifecycle row. Pop by the real dict key. (Codex gate, #4492)
                 if _age_anchor and (now - _age_anchor) > ceiling:
                     if run_stream_id not in live_stream_ids and stream_id not in live_stream_ids:
-                        stale_stream_ids.append(run_stream_id)
+                        stale_runs.append((run_stream_id, stream_id))
                     continue
                 return stream_id
-            for stale_stream_id in stale_stream_ids:
-                (_live_config.ACTIVE_RUNS or {}).pop(stale_stream_id, None)
-                # The zombie run is pruned directly here (not via the normal teardown
-                # finally / unregister_active_run), so release its stream-owner entry too
-                # or STREAM_SESSION_OWNERS leaks for every reconciled zombie. (#5198 gate)
-                unregister_stream_owner(stale_stream_id)
-                # Retire settlement participant/fence state for the abandoned
-                # stream so stale-run cleanup does not leak settlement registries
-                # (gate-certifier blocker #3: stale-run participant/fence cleanup).
-                try:
-                    from api.streaming import _abandon_stale_stream_settlement
-                    _abandon_stale_stream_settlement(stale_stream_id)
-                except Exception:
-                    pass
+            for stale_run_key, _stale_stream_id in stale_runs:
+                (_live_config.ACTIVE_RUNS or {}).pop(stale_run_key, None)
+        # Retire owner and settlement state only after releasing ACTIVE_RUNS_LOCK;
+        # worker teardown takes STREAMS_LOCK before ACTIVE_RUNS_LOCK.
+        for stale_run_key, stale_stream_id in stale_runs:
+            unregister_stream_owner(stale_run_key)
+            try:
+                from api.streaming import _abandon_stale_stream_settlement
+                _abandon_stale_stream_settlement(stale_stream_id)
+            except Exception:
+                pass
     except Exception:
         return None
     return None

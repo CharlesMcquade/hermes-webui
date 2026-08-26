@@ -1134,7 +1134,7 @@ def _clean_fallback_notice(notice):
     return {k: notice.get(k, '') for k in _FALLBACK_NOTICE_KEYS}
 
 
-def _publish_fallback_notice(stream_id, notice) -> bool:
+def _publish_fallback_notice(stream_id, notice, pending_notices=None) -> bool:
     """Production publication path for a confirmed fallback notice.
 
     This is the single gate through which the agent status callback inserts a
@@ -1151,11 +1151,17 @@ def _publish_fallback_notice(stream_id, notice) -> bool:
     with STREAMS_LOCK:
         if stream_id in _STREAM_SETTLEMENT_TERMINAL:
             return False
-        _STREAM_NOTICE_GENERATION[stream_id] = _current_notice_generation(stream_id) + 1
-        clean = _clean_fallback_notice(notice)
-        if isinstance(clean, dict) and stream_id in _STREAM_CANCEL_CLAIMED:
-            clean['_cancel_claimed'] = True
-        _STREAM_FALLBACK_NOTICES[stream_id] = clean
+        clean_notice = _clean_fallback_notice(notice)
+        if clean_notice is None:
+            return False
+        generation = _current_notice_generation(stream_id) + 1
+        _STREAM_NOTICE_GENERATION[stream_id] = generation
+        map_notice = dict(clean_notice)
+        if stream_id in _STREAM_CANCEL_CLAIMED:
+            map_notice['_cancel_claimed'] = True
+        _STREAM_FALLBACK_NOTICES[stream_id] = map_notice
+        if pending_notices is not None:
+            pending_notices.append((generation, dict(clean_notice)))
         return True
 
 
@@ -1373,23 +1379,22 @@ def _capture_fallback_notice_for_row(stream_id, pending_notices):
     When the pending list is empty or the notice is invalid, returns
     ``(None, None)`` — no stamp, no commit token.
     """
-    if not pending_notices:
-        return None, None
-    _raw = pending_notices[-1]
-    clean = _clean_fallback_notice(_raw)
-    if clean is None:
-        return None, None
-    if stream_id is None:
-        return None, clean
     with STREAMS_LOCK:
-        # The generation is the AUTHORITATIVE map generation at this instant.
-        # _publish_fallback_notice sets the generation BEFORE writing the map
-        # entry, so the generation returned here corresponds to the notice we
-        # just captured — NOT a future B that may be published after we release
-        # the lock.  The caller stamps the row from `clean` (already captured)
-        # and passes `generation` to the commit wrapper, so a B published
-        # between stamp and save is never bound to this save.
+        if not pending_notices:
+            return None, None
+        token = pending_notices[-1]
+        if isinstance(token, tuple) and len(token) == 2 and isinstance(token[0], int):
+            clean = _clean_fallback_notice(token[1])
+            return (int(token[0]), clean) if clean is not None else (None, None)
+        # Compatibility for tests/callers that supply an untagged notice. The
+        # production callback always stores generation-tagged tokens atomically.
+        clean = _clean_fallback_notice(token)
+        if clean is None:
+            return None, None
+        if stream_id is None:
+            return None, clean
         return int(_current_notice_generation(stream_id)), clean
+
 
 
 def _stream_has_cancellation_state_locked(stream_id: str) -> bool:
@@ -3225,6 +3230,14 @@ def _finalize_cancelled_turn(
             session.save()
         except Exception:
             logger.debug("Failed to persist cancelled-turn active_stream_id clear (fallback)", exc_info=True)
+        else:
+            if stream_id is not None:
+                with STREAMS_LOCK:
+                    _STREAM_WORKER_SAVED[stream_id] = int(_saved_generation or 0)
+                    if _saved_generation is not None:
+                        _retire_fallback_dead_letter_after_persist_locked(
+                            stream_id, int(_saved_generation),
+                        )
 
 
 def _aiagent_import_error_detail() -> str:
@@ -9951,11 +9964,11 @@ def _run_agent_streaming(
             # Capture for session-persisted metadata. Stamped onto the turn's
             # final assistant message before s.save() so it survives
             # renderMessages() rebuilds and session switches.
-            _pending_fallback_notices.append({
+            _notice = {
                 'message': _fallback_data['message'],
                 'to_model': _fallback_data.get('to_model', ''),
                 'to_provider': _fallback_data.get('to_provider', ''),
-            })
+            }
             # Also mirror to the stream-scoped dict so cancel_stream() — which
             # runs outside this closure — can stamp the notice before its own
             # s.save() (gate-certifier blocking finding #2).  Routed through
@@ -9963,7 +9976,9 @@ def _run_agent_streaming(
             # STREAMS_LOCK and rejects post-terminal publications (the fence):
             # once cancel_stream's settlement has retired a generation, a
             # newer notice B would be deleted unsaved by the finalizers.
-            _publish_fallback_notice(stream_id, _pending_fallback_notices[-1])
+            _publish_fallback_notice(
+                stream_id, _notice, pending_notices=_pending_fallback_notices,
+            )
             put('warning', _fallback_data)
 
     # xsession wakeup misroute root fix (Option 1): pre-init so the outer
