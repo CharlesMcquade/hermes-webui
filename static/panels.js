@@ -5833,8 +5833,11 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
   dd.appendChild(searchRow);
 
   // ── Workspace list ──────────────────────────────────────────────────────
-  // Sort alphabetically by name (case-insensitive) before rendering.
-  const sorted=[...workspaces].sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  // Render in the server's stored order — the same order shown in the
+  // Workspaces settings panel (user-controlled via drag-and-drop reorder,
+  // with the default "Home" workspace first). No client-side re-sorting.
+  // Shallow copy so later in-place mutations can't touch the caller's array.
+  const sorted=[...workspaces];
   const listContainer=document.createElement('div');
   listContainer.className='ws-list-container';
   dd.appendChild(listContainer);
