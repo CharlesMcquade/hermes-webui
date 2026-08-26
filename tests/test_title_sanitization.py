@@ -5,6 +5,7 @@ from api.streaming import (
     _fallback_title_from_exchange,
     _first_exchange_snippets,
     _sanitize_generated_title,
+    _title_exchange_for_unresolved_title,
 )
 
 
@@ -25,6 +26,30 @@ class TestGeneratedTitleSanitization(unittest.TestCase):
         self.assertEqual(
             _sanitize_generated_title("**Clarifying Topic for Discussion**"),
             "Clarifying Topic for Discussion",
+        )
+
+    def test_rejects_multi_option_title_preamble(self):
+        self.assertEqual(
+            _sanitize_generated_title(
+                'Good title options: "GLM 5.3 Upgrade Vibes", '
+                '"Testing GLM 5.3 Feel", "GLM 5.3 Launch"'
+            ),
+            '',
+        )
+
+    def test_unresolved_title_uses_latest_completed_exchange_after_warmup(self):
+        messages = [
+            {"role": "user", "content": "Hello world, now you're on GLM 5.3 buddy."},
+            {"role": "assistant", "content": "It feels fast."},
+            {"role": "user", "content": "Make the workspace selector respect the configured order."},
+            {"role": "assistant", "content": "I will trace the workspace ordering path."},
+        ]
+        self.assertEqual(
+            _title_exchange_for_unresolved_title(messages),
+            (
+                "Make the workspace selector respect the configured order.",
+                "I will trace the workspace ordering path.",
+            ),
         )
 
     def test_first_exchange_skips_empty_assistant_tool_call_placeholder(self):
