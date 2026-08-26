@@ -9049,28 +9049,30 @@ def _run_agent_streaming(
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and not _success_writeback_committed and event not in ('cancel', 'apperror'):
             return
-        event_id = None
-        if run_journal is not None:
+        def _publish_journaled(journaled):
+            event_id = (journaled or {}).get('event_id') if isinstance(journaled, dict) else None
             try:
-                journaled = run_journal.append_sse_event(event, data)
-                # Carry the exact journal id for this queued frame. A global
-                # "latest event" side channel is still kept for legacy queues,
-                # but StreamChannel subscribers need the per-item id so a
-                # queued backlog cannot advance the browser cursor past an
-                # undelivered event.
-                event_id = (journaled or {}).get('event_id') if isinstance(journaled, dict) else None
+                queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
+                q.put_nowait(queue_item)
                 if event_id:
+                    # StreamChannel records the per-item id atomically with its
+                    # queue mutation. Advance the legacy side channel only after
+                    # that publication succeeds; never advertise an unseen frame.
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
-                logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
-        if event_id and hasattr(q, "note_last_event_id"):
+                logger.debug("Failed to put event to queue")
+
+        if run_journal is not None:
             try:
-                q.note_last_event_id(event_id)
+                # Journal append and queue publication share the per-run lock.
+                # Otherwise a concurrent Steer can append N+1 and queue before
+                # this already-appended N, reversing live order vs replay.
+                run_journal.append_and_publish_sse_event(event, data, _publish_journaled)
+                return
             except Exception:
-                logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
+                logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
         try:
-            queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)
-            q.put_nowait(queue_item)
+            q.put_nowait((event, data))
         except Exception:
             logger.debug("Failed to put event to queue")
 
@@ -12886,13 +12888,146 @@ def _run_agent_streaming(
 # ============================================================
 
 
+def _steer_attachment_paths(value) -> list[str]:
+    """Return bounded, single-line attachment paths for runtime guidance."""
+    if not isinstance(value, list):
+        return []
+    paths = []
+    for raw in value[:20]:
+        path = re.sub(r"[\x00-\x1f\x7f]+", " ", str(raw or "").strip()).strip()[:2048]
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _verified_steer_attachment_paths(session_id: str, value) -> list[str]:
+    """Accept only real files from this session's server-owned upload inbox."""
+    from api.upload import _session_attachment_dir
+
+    session_root = _session_attachment_dir(str(session_id)).resolve()
+    verified = []
+    for raw in _steer_attachment_paths(value):
+        candidate = Path(raw).expanduser().resolve()
+        if not candidate.is_relative_to(session_root) or not candidate.is_file():
+            raise ValueError("Steer attachment path is not a session upload")
+        verified.append(str(candidate))
+    return verified
+
+
+def _steer_display_file_names(value) -> list[str]:
+    """Return bounded, path-free attachment labels for the visible steer row."""
+    names = []
+    for path in _steer_attachment_paths(value):
+        label = re.split(r"[/\\\\]", path)[-1].strip()[:255]
+        if label:
+            names.append(label)
+    return names
+
+
+def _steer_runtime_text(user_text: str, attachment_paths) -> str:
+    """Build the model-facing Steer from one visible text + structured paths."""
+    text = str(user_text or "").strip()
+    paths = _steer_attachment_paths(attachment_paths)
+    if not paths:
+        return text
+    note = (
+        f"[Attached files for this steer: {', '.join(paths)}]\n"
+        "Use the file tools/read_file to inspect these documents if needed."
+    )
+    return f"{text}\n\n{note}" if text else note
+
+
+def _accept_and_publish_steer_event(
+    agent,
+    session_id: str,
+    stream_id: str,
+    runtime_text: str,
+    *,
+    display_text: str,
+    files=None,
+):
+    """Accept, durably journal, and publish one ordered Steer event."""
+    created_at = time.time()
+    payload = {
+        "session_id": str(session_id),
+        "stream_id": str(stream_id),
+        # Attachment steers append an internal read_file hint to ``runtime_text``;
+        # that belongs in model context, not in the visible transcript.
+        "text": str(display_text),
+        "files": _steer_display_file_names(files),
+        "status": "delivered",
+        "created_at": created_at,
+    }
+    with STREAMS_LOCK:
+        stream = STREAMS.get(str(stream_id))
+    writer = RunJournalWriter(str(session_id), str(stream_id))
+
+    def publish(journaled):
+        event_id = journaled.get("event_id")
+        payload["created_at"] = journaled.get("created_at", created_at)
+        if stream is None or not callable(getattr(stream, "put_nowait", None)):
+            raise RuntimeError("active stream channel unavailable during steer publication")
+        item = (
+            ("steer_delivered", payload, event_id)
+            if event_id
+            else ("steer_delivered", payload)
+        )
+        stream.put_nowait(item)
+        if event_id:
+            STREAM_LAST_EVENT_ID[str(stream_id)] = str(event_id)
+
+    accepted, journaled, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered",
+        payload,
+        lambda: agent.steer(runtime_text),
+        publish=publish,
+    )
+    outcome = {
+        "accepted": bool(accepted),
+        "fallback": None,
+        "durable": False,
+        "published": False,
+        "event": journaled if isinstance(journaled, dict) else None,
+        "payload": payload,
+    }
+    if reason == "terminal":
+        outcome["fallback"] = "stream_dead"
+        return outcome
+    if reason == "journal_malformed":
+        outcome["fallback"] = "steer_error"
+        return outcome
+    if reason == "persistence_error" or (error is not None and journaled is None):
+        logger.warning(
+            "Failed to persist accepted steer for session=%s stream=%s",
+            session_id,
+            stream_id,
+            exc_info=(type(error), error, error.__traceback__) if error is not None else None,
+        )
+        outcome["fallback"] = "persistence_error"
+        return outcome
+    if not accepted or not isinstance(journaled, dict):
+        return outcome
+
+    outcome["durable"] = True
+    if reason == "publication_error":
+        logger.warning(
+            "Failed to broadcast durable steer for session=%s stream=%s",
+            session_id,
+            stream_id,
+            exc_info=(type(error), error, error.__traceback__) if error is not None else None,
+        )
+        outcome["fallback"] = "publication_error"
+        return outcome
+    outcome["published"] = True
+    return outcome
+
+
 def _handle_chat_steer(handler, body: dict) -> bool:
     """Inject a /steer payload into the active agent for a session.
 
     Mirrors the CLI's `/steer <text>` command (cli.py:6140-6155):
-      - Look up the cached AIAgent for the session (PR #1051's
-        SESSION_AGENT_CACHE).
-      - Verify a stream is currently active for this session.
+      - Resolve the agent owned by the session's exact active stream.
+      - Verify the stream is currently active for this session.
       - Call agent.steer(text) — thread-safe, stashes text in
         _pending_steer for application at the next tool-result boundary.
 
@@ -12908,73 +13043,39 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     Steer is active-run guidance, not implicit permission to Queue, Interrupt,
     or Stop-and-send.
 
-    Returns 200 with {"accepted": bool, "fallback": str|None,
-    "stream_id": str|None}.
+    Returns 200 with the legacy accepted/fallback/stream_id fields plus explicit
+    durable/published state and the canonical journal envelope when accepted.
     """
     from api.helpers import j, bad
     from api import config as _cfg
 
     sid = str((body or {}).get("session_id", "") or "").strip()
-    text = str((body or {}).get("text", "") or "").strip()
+    structured_input = "user_text" in (body or {}) or "attachment_paths" in (body or {})
+    if structured_input:
+        display_text = str((body or {}).get("user_text") or "").strip()
+        try:
+            attachment_paths = _verified_steer_attachment_paths(
+                sid,
+                (body or {}).get("attachment_paths"),
+            )
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+        text = _steer_runtime_text(display_text, attachment_paths)
+        display_files = _steer_display_file_names(attachment_paths)
+    else:
+        # Legacy clients send one authoritative text string. Ignore any separate
+        # display_text so the transcript can never hide different runtime input.
+        text = str((body or {}).get("text", "") or "").strip()
+        display_text = text
+        display_files = _steer_display_file_names((body or {}).get("files"))
     if not sid:
         return bad(handler, "session_id required")
     if not text:
         return bad(handler, "text required")
 
-    evicted_cached_entry = None
-    with _cfg.SESSION_AGENT_CACHE_LOCK:
-        cached = _cfg.SESSION_AGENT_CACHE.get(sid)
-        if cached:
-            agent = cached[0]
-            if not _cached_agent_matches_session(agent, sid):
-                evicted_cached_entry = _cfg.SESSION_AGENT_CACHE.pop(sid, None)
-                logger.warning(
-                    '[webui] Evicted cached agent before steer due to mismatched session identity: cache_key=%s agent_session_id=%s',
-                    sid,
-                    _cached_agent_session_identity(agent),
-                )
-                cached = None
-    if evicted_cached_entry is not None:
-        try:
-            _close_cached_agent_entry_at_session_boundary(sid, evicted_cached_entry)
-        except Exception:
-            logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
-    if not cached:
-        try:
-            s = get_session(sid)
-            active_stream_id = getattr(s, "active_stream_id", None) or None
-        except KeyError:
-            active_stream_id = None
-        if active_stream_id:
-            with _cfg.STREAMS_LOCK:
-                stream_alive = active_stream_id in _cfg.STREAMS
-            if stream_alive:
-                try:
-                    with _cfg.ACTIVE_RUNS_LOCK:
-                        active_run = dict((_cfg.ACTIVE_RUNS or {}).get(str(active_stream_id)) or {})
-                    if active_run.get("backend") == "gateway":
-                        return j(handler, {"accepted": False, "fallback": "gateway_steer_queued",
-                                           "stream_id": active_stream_id})
-                except Exception:
-                    logger.warning(
-                        "Gateway ownership lookup failed before steer fallback for session=%s stream_id=%s",
-                        sid,
-                        active_stream_id,
-                        exc_info=True,
-                    )
-        # No active local agent for this session — caller surfaces a steer failure
-        # without cancelling the active run.
-        return j(handler, {"accepted": False, "fallback": "no_cached_agent",
-                           "stream_id": None})
-    agent = cached[0]
-    if not hasattr(agent, "steer"):
-        # Older hermes-agent that pre-dates the steer() method
-        return j(handler, {"accepted": False, "fallback": "agent_lacks_steer",
-                           "stream_id": None})
-
-    # Verify the agent is currently running. Use the session's
-    # active_stream_id rather than calling load_session_locked() which
-    # would block on the streaming thread's lock.
+    # Resolve the exact agent owned by the session's current stream. The
+    # session-level cache survives between turns, so using it directly can steer
+    # a retired run while journaling the delivery under a newer stream id.
     try:
         s = get_session(sid)
     except KeyError:
@@ -12986,20 +13087,76 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                            "stream_id": None})
     with _cfg.STREAMS_LOCK:
         stream_alive = active_stream_id in _cfg.STREAMS
+        agent = _cfg.AGENT_INSTANCES.get(str(active_stream_id))
     if not stream_alive:
-        # Active stream id is stale — stream has ended; caller falls back
         return j(handler, {"accepted": False, "fallback": "stream_dead",
+                           "stream_id": None})
+    if agent is None:
+        try:
+            with _cfg.ACTIVE_RUNS_LOCK:
+                active_run = dict((_cfg.ACTIVE_RUNS or {}).get(str(active_stream_id)) or {})
+            if active_run.get("backend") == "gateway":
+                return j(handler, {"accepted": False, "fallback": "gateway_steer_queued",
+                                   "stream_id": active_stream_id})
+        except Exception:
+            logger.warning(
+                "Gateway ownership lookup failed before steer fallback for session=%s stream_id=%s",
+                sid,
+                active_stream_id,
+                exc_info=True,
+            )
+        # Fail closed when the stream exists but has not registered its exact
+        # local agent yet. A session-cache fallback cannot prove run ownership.
+        return j(handler, {"accepted": False, "fallback": "no_cached_agent",
+                           "stream_id": None})
+    if not _cached_agent_matches_session(agent, sid):
+        logger.warning(
+            "Refused steer for mismatched active-run agent: session_id=%s stream_id=%s agent_session_id=%s",
+            sid,
+            active_stream_id,
+            _cached_agent_session_identity(agent),
+        )
+        return j(handler, {"accepted": False, "fallback": "no_cached_agent",
+                           "stream_id": None})
+    if not hasattr(agent, "steer"):
+        return j(handler, {"accepted": False, "fallback": "agent_lacks_steer",
                            "stream_id": None})
 
     try:
-        accepted = bool(agent.steer(text))
+        outcome = _accept_and_publish_steer_event(
+            agent,
+            sid,
+            active_stream_id,
+            text,
+            display_text=display_text,
+            files=display_files,
+        )
     except Exception as exc:
         logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
         return j(handler, {"accepted": False, "fallback": "steer_error",
                            "stream_id": active_stream_id})
 
-    return j(handler, {"accepted": accepted, "fallback": None,
-                       "stream_id": active_stream_id})
+    accepted = bool(outcome.get("accepted"))
+    response = {"accepted": accepted, "fallback": outcome.get("fallback"),
+                "stream_id": active_stream_id}
+    if accepted:
+        response["durable"] = bool(outcome.get("durable"))
+        response["published"] = bool(outcome.get("published"))
+        journaled = outcome.get("event")
+        if isinstance(journaled, dict):
+            response["steer_event"] = {
+                "version": journaled.get("version", 1),
+                "type": "steer_delivered",
+                "event": "steer_delivered",
+                "event_id": journaled.get("event_id"),
+                "seq": journaled.get("seq"),
+                "run_id": journaled.get("run_id"),
+                "session_id": journaled.get("session_id", sid),
+                "stream_id": active_stream_id,
+                "created_at": journaled.get("created_at"),
+                "payload": dict(outcome.get("payload") or {}),
+            }
+    return j(handler, response)
 
 
 def cancel_stream(stream_id: str) -> bool:
