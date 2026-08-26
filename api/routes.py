@@ -23004,6 +23004,14 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
                 # finally / unregister_active_run), so release its stream-owner entry too
                 # or STREAM_SESSION_OWNERS leaks for every reconciled zombie. (#5198 gate)
                 unregister_stream_owner(stale_stream_id)
+                # Retire settlement participant/fence state for the abandoned
+                # stream so stale-run cleanup does not leak settlement registries
+                # (gate-certifier blocker #3: stale-run participant/fence cleanup).
+                try:
+                    from api.streaming import _abandon_stale_stream_settlement
+                    _abandon_stale_stream_settlement(stale_stream_id)
+                except Exception:
+                    pass
     except Exception:
         return None
     return None

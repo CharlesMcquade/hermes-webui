@@ -1187,6 +1187,47 @@ def _retire_worker_cancelled_state(stream_id: str) -> None:
         _retire_worker_cancelled_state_locked(stream_id)
 
 
+def _abandon_stale_stream_settlement(stream_id: str) -> None:
+    """Bounded abandonment helper for stale active run/owner cleanup.
+
+    Called by the stale-run reapers
+    (``api.routes._active_stream_blocks_chat_start``'s zombie reconciliation
+    and ``api.background_process._active_run_ids_for_session``'s stale-cancel
+    cleanup) when they drop a stale active run / stream-owner entry.  Both
+    reapers previously removed the stale run/owner WITHOUT retiring settlement
+    participant/fence state, leaking ``_STREAM_SETTLEMENT_PARTICIPANTS``,
+    ``_STREAM_SETTLEMENT_TERMINAL``, ``_STREAM_SETTLEMENT_COMPLETED``, notice
+    generations, dead-letters, and live notices for the abandoned stream
+    (gate-certifier blocker #3: stale-run participant/fence cleanup).
+
+    This helper routes BOTH reapers through one bounded abandonment path that
+    unconditionally retires every settlement registry the stream may have
+    populated.  Unlike ``_retire_worker_cancelled_state_locked`` (which has
+    conditional compare-and-retire logic for the normal/cancel participant
+    paths), this helper is called when the stream is being ABANDONED — no
+    worker or cancel participant will ever complete settlement, so every
+    registry entry must be cleared unconditionally.  It never stamps or saves.
+    """
+    if not stream_id:
+        return
+    try:
+        with STREAMS_LOCK:
+            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+            _STREAM_FALLBACK_DEAD_LETTER.pop(stream_id, None)
+            _STREAM_SETTLEMENT_PARTICIPANTS.pop(stream_id, None)
+            _STREAM_SETTLEMENT_COMPLETED.pop(stream_id, None)
+            _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
+            _STREAM_CANCEL_CLAIMED.discard(stream_id)
+            _STREAM_WORKER_SAVED.pop(stream_id, None)
+            _STREAM_NOTICE_GENERATION.pop(stream_id, None)
+    except Exception:
+        logger.debug(
+            "Failed to abandon stale stream settlement for %s",
+            stream_id,
+            exc_info=True,
+        )
+
+
 @contextlib.contextmanager
 def _turn_final_save_commit(
     stream_id,
@@ -1310,6 +1351,45 @@ def _snapshot_fallback_notice_for_commit(stream_id, notice):
             return int(current_gen), clean
         # Nothing live in the map: use the generation at the stamp point.
         return int(current_gen), clean
+
+
+def _capture_fallback_notice_for_row(stream_id, pending_notices):
+    """Capture ONE immutable ``(generation, clean_notice)`` token for row stamping.
+
+    This is the single atomic point that binds the notice content stamped on
+    the durable row to the generation token passed into
+    ``_turn_final_save_commit()``.  The prior code read
+    ``_pending_fallback_notices[-1]`` once for the row stamp and again for the
+    commit snapshot — a status callback could publish a newer notice B between
+    those two reads, producing a false ``row=A / durable=B`` authority chain
+    (gate-certifier blocker: mutable row/commit token schedule).
+
+    This helper reads the pending notice ONCE under ``STREAMS_LOCK``, captures
+    the authoritative map generation at that instant, and returns the clean
+    notice + generation together.  The caller MUST stamp the row from the
+    returned ``clean_notice`` (NOT from ``pending_notices[-1]``) and pass the
+    returned ``generation`` into ``_turn_final_save_commit(committed_generation=...)``.
+
+    When the pending list is empty or the notice is invalid, returns
+    ``(None, None)`` — no stamp, no commit token.
+    """
+    if not pending_notices:
+        return None, None
+    _raw = pending_notices[-1]
+    clean = _clean_fallback_notice(_raw)
+    if clean is None:
+        return None, None
+    if stream_id is None:
+        return None, clean
+    with STREAMS_LOCK:
+        # The generation is the AUTHORITATIVE map generation at this instant.
+        # _publish_fallback_notice sets the generation BEFORE writing the map
+        # entry, so the generation returned here corresponds to the notice we
+        # just captured — NOT a future B that may be published after we release
+        # the lock.  The caller stamps the row from `clean` (already captured)
+        # and passes `generation` to the commit wrapper, so a B published
+        # between stamp and save is never bound to this save.
+        return int(_current_notice_generation(stream_id)), clean
 
 
 def _stream_has_cancellation_state_locked(stream_id: str) -> bool:
@@ -3100,6 +3180,16 @@ def _finalize_cancelled_turn(
     # neither registry contains it (gate-certifier blocker: rereading mutable
     # registries in _persist_cancelled_turn can return None during that gap).
     _notice_snapshot = (_saved_generation, _saved_notice) if _saved_notice is not None else None
+
+    # ONE authoritative durable transition: clear active_stream_id BEFORE the
+    # save so marker/notice persistence, active_stream_id=None, and generation
+    # accounting all commit in a single session.save().  The prior code saved
+    # the marker/notice first, recorded _STREAM_WORKER_SAVED, then cleared
+    # active_stream_id in a SEPARATE swallowed second save — a first-success /
+    # second-failure split left active_stream_id cleared in-memory but NOT
+    # durable, and a successor could be admitted against stale durable state
+    # (gate-certifier blocker #4: split cancelled-turn save/accounting).
+    session.active_stream_id = None
     _persist_cancelled_turn(session, message=message, stream_id=stream_id,
                            notice_snapshot=_notice_snapshot)
     try:
@@ -3125,16 +3215,16 @@ def _finalize_cancelled_turn(
                         owner_profile=owner_profile,
                         terminal_status='failed',
                     )
-    finally:
-        # Clear active_stream_id on EVERY path — including first-save failure.
-        # If the first save() above raised, the in-memory session retained
-        # active_stream_id pointing at an unregistered stream_id, leaving the
-        # sidebar stuck in "streaming" state (greptile P1).
-        session.active_stream_id = None
+        # The first save failed — active_stream_id was already cleared
+        # in-memory above but did NOT reach durable storage.  Retry the save
+        # so the cleared active_stream_id is persisted and the sidebar does
+        # not stay stuck in "streaming" state (greptile P1).  This is a
+        # fallback for the exception path only; the happy path's single save
+        # already committed marker + notice + active_stream_id=None together.
         try:
             session.save()
         except Exception:
-            logger.debug("Failed to persist cancelled-turn active_stream_id clear", exc_info=True)
+            logger.debug("Failed to persist cancelled-turn active_stream_id clear (fallback)", exc_info=True)
 
 
 def _aiagent_import_error_detail() -> str:
@@ -12176,18 +12266,20 @@ def _run_agent_streaming(
                         # (greptile P1: error saves drop notices). Every s.save()
                         # path that finalizes an assistant turn must flush
                         # _pending_fallback_notices.
-                        if _pending_fallback_notices:
-                            _error_message['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
+                        #
+                        # Capture ONE immutable (generation, clean_notice) token
+                        # under STREAMS_LOCK and stamp the row from THAT notice.
+                        # The prior code read _pending_fallback_notices[-1] once
+                        # for the stamp and again for the commit snapshot — a B
+                        # published between those reads produced row=A/durable=B
+                        # (gate-certifier blocker: mutable row/commit token).
+                        _commit_gen, _commit_notice = _capture_fallback_notice_for_row(
+                            stream_id, _pending_fallback_notices,
+                        )
+                        if _commit_notice is not None:
+                            _error_message['_fallbackNotice'] = _commit_notice
                         s.messages.append(_error_message)
                         try:
-                            # Bind the durable-generation token to the notice
-                            # captured for THIS row-stamp — never re-infer it
-                            # from the global map at wrapper entry (a B
-                            # published between stamp and save must stay
-                            # unsaved; only the stamped A is durable).
-                            _commit_gen, _commit_notice = _snapshot_fallback_notice_for_commit(
-                                stream_id, _pending_fallback_notices[-1] if _pending_fallback_notices else None,
-                            )
                             with _turn_final_save_commit(
                                 stream_id, s,
                                 committed_generation=_commit_gen,
@@ -12435,6 +12527,17 @@ def _run_agent_streaming(
                     _history = list(getattr(s, 'gateway_routing_history', None) or [])
                     _history.append(_gateway_routing)
                     s.gateway_routing_history = _history[-50:]
+                # Capture ONE immutable (generation, clean_notice) token under
+                # STREAMS_LOCK BEFORE stamping the row.  The pre-save metadata
+                # below (compressor/context-length work) is a wide window in
+                # which the status callback can publish a NEWER notice B —
+                # reading the pending list a second time for the commit token
+                # would bind B (never stamped, never saved) as durable and let
+                # teardown retire it unsaved (gate-certifier blocker: mutable
+                # row/commit token schedule).
+                _commit_gen, _commit_notice = _capture_fallback_notice_for_row(
+                    stream_id, _pending_fallback_notices,
+                )
                 if s.messages:
                     for _dm in reversed(s.messages):
                         if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
@@ -12451,23 +12554,13 @@ def _run_agent_streaming(
                             # Persist fallback notices on the turn's final
                             # assistant message so they survive renderMessages()
                             # rebuilds, session switches, and page reloads.
-                            if _pending_fallback_notices:
-                                _dm['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
+                            # The row is stamped from the immutable token captured
+                            # above — never from a second read of the mutable
+                            # pending list (gate-certifier blocker: mutable
+                            # row/commit token schedule produced row=A/durable=B).
+                            if _commit_notice is not None:
+                                _dm['_fallbackNotice'] = _commit_notice
                             break
-                # Capture the exact (generation, notice) pair being stamped on
-                # the terminal row, lock-atomically at the stamp point.  The
-                # pre-save metadata below (compressor/context-length work) is a
-                # wide window in which the status callback can publish a NEWER
-                # notice B into the map — re-inferring the durable generation
-                # at wrapper entry would then record B (never stamped, never
-                # saved) as durable and let teardown retire it unsaved
-                # (gate-certifier blocker: stamp→wrapper generation drift).
-                _commit_gen = None
-                _commit_notice = None
-                if _pending_fallback_notices:
-                    _commit_gen, _commit_notice = _snapshot_fallback_notice_for_commit(
-                        stream_id, _pending_fallback_notices[-1],
-                    )
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
                 # s.save() for the same reason as the reasoning trace above.
@@ -13405,18 +13498,18 @@ def _run_agent_streaming(
                                     # own save block that returns before the normal
                                     # pre-save metadata block runs, so flush
                                     # _pending_fallback_notices here too.
-                                    if _pending_fallback_notices:
+                                    # Capture ONE immutable token and stamp
+                                    # from it — no second read of the mutable
+                                    # pending list (gate-certifier blocker:
+                                    # mutable row/commit token schedule).
+                                    _commit_gen, _commit_notice = _capture_fallback_notice_for_row(
+                                        stream_id, _pending_fallback_notices,
+                                    )
+                                    if _commit_notice is not None:
                                         for _dm in reversed(s.messages):
                                             if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
-                                                _dm['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
+                                                _dm['_fallbackNotice'] = _commit_notice
                                                 break
-                                    # Bind the durable token to the notice stamped on
-                                    # THIS row — a B published between stamp and save
-                                    # must stay unsaved (see gate-certifier blocker on
-                                    # stamp→wrapper generation drift).
-                                    _commit_gen, _commit_notice = _snapshot_fallback_notice_for_commit(
-                                        stream_id, _pending_fallback_notices[-1] if _pending_fallback_notices else None,
-                                    )
                                     with _turn_final_save_commit(
                                         stream_id, s,
                                         committed_generation=_commit_gen,
@@ -13579,15 +13672,16 @@ def _run_agent_streaming(
                 # they survive session switches / page reloads (greptile P1:
                 # error saves drop notices). Every s.save() path that finalizes
                 # an assistant turn must flush _pending_fallback_notices.
-                if _pending_fallback_notices:
-                    _error_message['_fallbackNotice'] = _clean_fallback_notice(_pending_fallback_notices[-1])
+                # Capture ONE immutable token and stamp from it — no second
+                # read of the mutable pending list (gate-certifier blocker:
+                # mutable row/commit token schedule).
+                _commit_gen, _commit_notice = _capture_fallback_notice_for_row(
+                    stream_id, _pending_fallback_notices,
+                )
+                if _commit_notice is not None:
+                    _error_message['_fallbackNotice'] = _commit_notice
                 s.messages.append(_error_message)
                 try:
-                    # Bind the durable token to the notice stamped on THIS row —
-                    # a B published between stamp and save must stay unsaved.
-                    _commit_gen, _commit_notice = _snapshot_fallback_notice_for_commit(
-                        stream_id, _pending_fallback_notices[-1] if _pending_fallback_notices else None,
-                    )
                     with _turn_final_save_commit(
                         stream_id, s,
                         committed_generation=_commit_gen,
