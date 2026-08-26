@@ -88,6 +88,7 @@ def test_restart_active_profile_gateway_success_uses_active_profile_home(monkeyp
             env=env,
         )
 
+    monkeypatch.setenv("_HERMES_GATEWAY", "1")
     monkeypatch.setattr(gateway_restart, "get_active_hermes_home", lambda: "/mock/hermes/home")
     monkeypatch.setattr(gateway_restart.shutil, "which", lambda cmd: "/mock/bin/hermes")
     monkeypatch.setattr(gateway_restart.subprocess, "Popen", fake_popen)
