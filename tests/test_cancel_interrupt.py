@@ -1941,15 +1941,16 @@ class TestCancelInterrupt:
         save_can_finish.set()
         assert worker_done.wait(timeout=5), "worker finalize did not complete"
 
-        # The worker's finalize path calls save() at least once for turn
-        # persistence and then again to clear active_stream_id.  Both calls
-        # must have happened; B must have been published EXACTLY once.
-        # EXACT save count: _finalize_cancelled_turn saves once for turn
-        # persistence and exactly once more to clear active_stream_id — assert
-        # the precise count, not a lower bound (a silent third save would
-        # invalidate every snapshot-based durable claim below).
-        assert len(_save_snapshots) == 2, (
-            f"expected exactly 2 saves in _finalize_cancelled_turn, got "
+        # The worker's finalize path now commits marker/notice AND
+        # active_stream_id=None in a SINGLE session.save() (gate-certifier
+        # blocker #4: one authoritative durable transition).  B must have been
+        # published EXACTLY once.
+        # EXACT save count: _finalize_cancelled_turn saves exactly once on the
+        # happy path — assert the precise count, not a lower bound (a silent
+        # second save would invalidate every snapshot-based durable claim
+        # below and re-introduce the split save/accounting defect).
+        assert len(_save_snapshots) == 1, (
+            f"expected exactly 1 save in _finalize_cancelled_turn, got "
             f"{len(_save_snapshots)}"
         )
         assert _published_once[0] is True, (
@@ -2029,11 +2030,11 @@ class TestCancelInterrupt:
 
         Exercises the real production seam factored out of the four
         stamp→_turn_final_save_commit call sites
-        (_snapshot_fallback_notice_for_commit): publish A, bind the
-        (generation, notice) pair at the stamp point, then publish B in the
-        stamp→wrapper gap (the window the normal terminal path exposes between
-        the _dm['_fallbackNotice'] stamp and the compressor-work → s.save()
-        wrapper entry).  The wrapper runs with the SNAPSHOTTED pair, so:
+        (_capture_fallback_notice_for_row): publish A, capture the
+        (generation, notice) pair atomically under STREAMS_LOCK, then publish B
+        in the stamp→wrapper gap (the window the normal terminal path exposes
+        between the _dm['_fallbackNotice'] stamp and the compressor-work →
+        s.save() wrapper entry).  The wrapper runs with the CAPTURED pair, so:
 
         - _STREAM_WORKER_SAVED must record A's generation only,
         - B's exact map object must remain live and unretired,
@@ -2053,7 +2054,7 @@ class TestCancelInterrupt:
             _STREAM_NOTICE_GENERATION, _STREAM_SETTLEMENT_PARTICIPANTS,
             _STREAM_SETTLEMENT_COMPLETED,
             _publish_fallback_notice, _current_notice_generation,
-            _snapshot_fallback_notice_for_commit, _turn_final_save_commit,
+            _capture_fallback_notice_for_row, _turn_final_save_commit,
             _retire_worker_cancelled_state,
         )
 
@@ -2066,11 +2067,13 @@ class TestCancelInterrupt:
             gen_A = _current_notice_generation(stream_id)
             assert gen_A == 1
 
-            # ROW-STAMP POINT: the production stamp site reads
-            # _pending_fallback_notices[-1] == A and binds the (gen, notice)
-            # pair lock-atomically.
-            commit_gen, commit_notice = _snapshot_fallback_notice_for_commit(
-                stream_id, dict(_notice_A),
+            # ROW-STAMP POINT: the production stamp site captures the
+            # (gen, notice) pair atomically via _capture_fallback_notice_for_row.
+            # This reads the pending list ONCE under STREAMS_LOCK and returns
+            # the clean notice + authoritative generation together.
+            _pending = [dict(_notice_A)]
+            commit_gen, commit_notice = _capture_fallback_notice_for_row(
+                stream_id, _pending,
             )
             assert (commit_gen, commit_notice["message"]) == (1, "seam A")
 
@@ -2082,7 +2085,7 @@ class TestCancelInterrupt:
             assert _current_notice_generation(stream_id) == 2
             b_obj = _STREAM_FALLBACK_NOTICES[stream_id]
 
-            # WRAPPER ENTRY + SAVE: runs with the snapshotted pair (A),
+            # WRAPPER ENTRY + SAVE: runs with the captured pair (A),
             # NEVER rereading the map.
             ws = Mock()
             ws.session_id = "sess_seam_AB"
@@ -2120,6 +2123,85 @@ class TestCancelInterrupt:
             assert _STREAM_WORKER_SAVED.get(stream_id) != 2, (
                 "B was marked durable — it was never stamped or saved"
             )
+        finally:
+            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+            _STREAM_WORKER_SAVED.pop(stream_id, None)
+            _STREAM_SETTLEMENT_PARTICIPANTS.pop(stream_id, None)
+            _STREAM_SETTLEMENT_COMPLETED.pop(stream_id, None)
+            _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
+            _STREAM_NOTICE_GENERATION.pop(stream_id, None)
+            _STREAM_CANCEL_CLAIMED.discard(stream_id)
+
+    def test_stamp_to_wrapper_same_content_AB_identifies_by_generation(self):
+        """Same-content A/B case: when B has IDENTICAL message/to_model/to_provider
+        as A, content equality cannot distinguish the generations.  The immutable
+        generation token captured at row-stamp time is the ONLY authority.
+
+        Publish A (gen=1), capture the token, publish B (gen=2) with identical
+        content.  The wrapper must still record gen=1 as durable (the stamped
+        row's generation), NOT gen=2 — even though _clean_fallback_notice(A)
+        == _clean_fallback_notice(B).  Retirement must preserve the gen=2 map
+        object by identity, proving the generation token (not content) is the
+        authority.
+
+        (gate-certifier blocker: "content equality cannot identify a generation.")
+        """
+        from unittest.mock import Mock
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_WORKER_SAVED,
+            _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_TERMINAL,
+            _STREAM_NOTICE_GENERATION, _STREAM_SETTLEMENT_PARTICIPANTS,
+            _STREAM_SETTLEMENT_COMPLETED,
+            _publish_fallback_notice, _current_notice_generation,
+            _capture_fallback_notice_for_row, _turn_final_save_commit,
+            _retire_worker_cancelled_state,
+        )
+
+        stream_id = "seam_same_content_AB"
+        _notice = {"message": "identical", "to_model": "mSame", "to_provider": "pSame"}
+        try:
+            # Publish A (gen=1).
+            assert _publish_fallback_notice(stream_id, dict(_notice)) is True
+            assert _current_notice_generation(stream_id) == 1
+
+            # Capture the token for the row stamp.
+            _pending = [dict(_notice)]
+            commit_gen, commit_notice = _capture_fallback_notice_for_row(
+                stream_id, _pending,
+            )
+            assert commit_gen == 1
+
+            # Publish B (gen=2) with IDENTICAL content.
+            assert _publish_fallback_notice(stream_id, dict(_notice)) is True
+            assert _current_notice_generation(stream_id) == 2
+            b_obj = _STREAM_FALLBACK_NOTICES[stream_id]
+
+            # Save with the captured gen=1 token.
+            ws = Mock()
+            ws.session_id = "sess_same_content"
+            ws.profile = None
+            ws.save = lambda: None
+            with _turn_final_save_commit(
+                stream_id, ws,
+                committed_generation=commit_gen,
+                committed_notice=commit_notice,
+            ):
+                ws.save()
+
+            # Only gen=1 is durable — NOT gen=2, even though content is identical.
+            assert _STREAM_WORKER_SAVED.get(stream_id) == 1, (
+                f"wrapper recorded gen {_STREAM_WORKER_SAVED.get(stream_id)} "
+                f"as durable — must be 1 even when A and B have identical content"
+            )
+            # The gen=2 B object survives by identity.
+            assert _STREAM_FALLBACK_NOTICES[stream_id] is b_obj
+            assert _current_notice_generation(stream_id) == 2
+
+            # Retirement preserves B.
+            _retire_worker_cancelled_state(stream_id)
+            assert _STREAM_FALLBACK_NOTICES.get(stream_id) is b_obj
+            assert _current_notice_generation(stream_id) == 2
+            assert _STREAM_WORKER_SAVED.get(stream_id) != 2
         finally:
             _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
             _STREAM_WORKER_SAVED.pop(stream_id, None)
@@ -2746,3 +2828,188 @@ class TestCancelInterrupt:
 
         # Prior turn must NOT be mutated.
         assert "_fallbackNotice" not in _prior
+
+    def test_finalize_cancelled_turn_single_save_commits_marker_notice_and_clear(self):
+        """First-save SUCCESS: marker/notice persistence, active_stream_id=None,
+        and generation accounting all commit in ONE session.save().
+
+        Captures a deep-copy snapshot of session state at each save call and
+        proves the FIRST save contains ALL THREE: the cancel marker, the
+        fallback notice, AND active_stream_id=None.  _STREAM_WORKER_SAVED is
+        recorded only after that single save succeeds.  No second save is
+        needed on the happy path.
+
+        (gate-certifier blocker #4: split cancelled-turn save/accounting —
+        the prior code saved marker/notice first, then cleared
+        active_stream_id in a SEPARATE swallowed second save.)
+        """
+        import copy
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_WORKER_SAVED,
+            _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_TERMINAL,
+            _STREAM_NOTICE_GENERATION, _STREAM_SETTLEMENT_PARTICIPANTS,
+            _STREAM_SETTLEMENT_COMPLETED,
+            _finalize_cancelled_turn,
+        )
+
+        stream_id = "single_save_commit"
+        session_id = "sess_single_save"
+        _notice = {"message": "fb-single", "to_model": "m1", "to_provider": "p1"}
+        _publish_test_notice(stream_id, _notice)
+
+        _save_snapshots = []
+
+        def _save_with_snapshot():
+            _save_snapshots.append({
+                'messages': copy.deepcopy(ws.messages),
+                'active_stream_id': ws.active_stream_id,
+            })
+
+        ws = Mock()
+        ws.session_id = session_id
+        ws.active_stream_id = stream_id
+        ws.pending_user_message = "q"
+        ws.pending_attachments = []
+        ws.pending_started_at = 1.0
+        ws.pending_user_source = None
+        ws.profile = None
+        ws.messages = [{"role": "assistant", "content": "Prior.", "timestamp": 1}]
+        ws.save = Mock(side_effect=_save_with_snapshot)
+
+        from api import models, config
+        models.SESSIONS[session_id] = ws
+        config.register_session_writeback_owner(session_id, stream_id)
+
+        _finalize_cancelled_turn(ws, stream_id=stream_id)
+
+        # Exactly ONE save on the happy path (no second save needed).
+        assert len(_save_snapshots) == 1, (
+            f"expected 1 save on happy path, got {len(_save_snapshots)} — "
+            f"the single authoritative transition must not need a second save"
+        )
+
+        # The single snapshot contains marker + notice + active_stream_id=None.
+        snap = _save_snapshots[0]
+        assert snap['active_stream_id'] is None, (
+            "active_stream_id was not None in the single save — the clear "
+            "must commit TOGETHER with the marker/notice, not separately"
+        )
+        _cancel_rows = [
+            m for m in snap['messages']
+            if isinstance(m, dict) and m.get('_fallbackNotice')
+        ]
+        assert len(_cancel_rows) >= 1, (
+            "no row with _fallbackNotice in the persisted snapshot — "
+            "marker/notice did not commit in the single save"
+        )
+        assert _cancel_rows[-1]['_fallbackNotice']['message'] == _notice['message']
+
+        # Generation accounting recorded only after the save succeeded.
+        assert stream_id in _STREAM_WORKER_SAVED
+        assert _STREAM_WORKER_SAVED[stream_id] == 1  # gen=1 from _publish_test_notice
+
+        # Cleanup.
+        models.SESSIONS.pop(session_id, None)
+        config.clear_session_writeback_owner_if_owned(session_id, stream_id)
+        _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+        _STREAM_WORKER_SAVED.pop(stream_id, None)
+        _STREAM_SETTLEMENT_PARTICIPANTS.pop(stream_id, None)
+        _STREAM_SETTLEMENT_COMPLETED.pop(stream_id, None)
+        _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
+        _STREAM_NOTICE_GENERATION.pop(stream_id, None)
+        _STREAM_CANCEL_CLAIMED.discard(stream_id)
+
+    def test_finalize_cancelled_turn_first_failure_fallback_save_persists_clear(self):
+        """First-save FAILURE: the save raises, so _STREAM_WORKER_SAVED is NOT
+        recorded and the notice goes to dead-letter.  The fallback save (in
+        the exception handler) must persist active_stream_id=None so the
+        sidebar does not stay stuck in "streaming" state.
+
+        Captures deep-copy snapshots at each save call and proves:
+        - the FIRST save attempt raised (no snapshot from it),
+        - the FALLBACK save persisted active_stream_id=None,
+        - _STREAM_WORKER_SAVED is empty (the marker/notice save failed),
+        - the notice is in _STREAM_FALLBACK_DEAD_LETTER.
+
+        (gate-certifier blocker #4: first-failure→second-success pin.)
+        """
+        import copy
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_WORKER_SAVED,
+            _STREAM_FALLBACK_DEAD_LETTER,
+            _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_TERMINAL,
+            _STREAM_NOTICE_GENERATION, _STREAM_SETTLEMENT_PARTICIPANTS,
+            _STREAM_SETTLEMENT_COMPLETED,
+            _finalize_cancelled_turn,
+        )
+
+        stream_id = "first_fail_fallback"
+        session_id = "sess_first_fail"
+        _notice = {"message": "fb-fail", "to_model": "m2", "to_provider": "p2"}
+        _publish_test_notice(stream_id, _notice)
+
+        _save_snapshots = []
+        _save_count = [0]
+
+        def _save_with_snapshot():
+            _save_count[0] += 1
+            if _save_count[0] == 1:
+                raise RuntimeError("first save fails")
+            _save_snapshots.append({
+                'messages': copy.deepcopy(ws.messages),
+                'active_stream_id': ws.active_stream_id,
+            })
+
+        ws = Mock()
+        ws.session_id = session_id
+        ws.active_stream_id = stream_id
+        ws.pending_user_message = "q"
+        ws.pending_attachments = []
+        ws.pending_started_at = 1.0
+        ws.pending_user_source = None
+        ws.profile = None
+        ws.messages = [{"role": "assistant", "content": "Prior.", "timestamp": 1}]
+        ws.save = Mock(side_effect=_save_with_snapshot)
+
+        from api import models, config
+        models.SESSIONS[session_id] = ws
+        config.register_session_writeback_owner(session_id, stream_id)
+
+        _finalize_cancelled_turn(ws, stream_id=stream_id)
+
+        # The first save failed; the fallback save ran.
+        assert _save_count[0] == 2, (
+            f"expected 2 save attempts (first fail + fallback), got {_save_count[0]}"
+        )
+        assert len(_save_snapshots) == 1, (
+            f"expected 1 snapshot from the fallback save, got {len(_save_snapshots)}"
+        )
+
+        # The fallback save persisted active_stream_id=None.
+        snap = _save_snapshots[0]
+        assert snap['active_stream_id'] is None, (
+            "fallback save did not persist active_stream_id=None — "
+            "sidebar stays stuck in streaming state after first-save failure"
+        )
+
+        # _STREAM_WORKER_SAVED is NOT recorded (the marker/notice save failed).
+        assert stream_id not in _STREAM_WORKER_SAVED, (
+            "worker marked stream saved after a FAILED first save"
+        )
+
+        # The notice is in the dead-letter (not silently lost).
+        assert stream_id in _STREAM_FALLBACK_DEAD_LETTER, (
+            "notice was not transferred to dead-letter after first-save failure"
+        )
+
+        # Cleanup.
+        models.SESSIONS.pop(session_id, None)
+        config.clear_session_writeback_owner_if_owned(session_id, stream_id)
+        _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+        _STREAM_WORKER_SAVED.pop(stream_id, None)
+        _STREAM_FALLBACK_DEAD_LETTER.pop(stream_id, None)
+        _STREAM_SETTLEMENT_PARTICIPANTS.pop(stream_id, None)
+        _STREAM_SETTLEMENT_COMPLETED.pop(stream_id, None)
+        _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
+        _STREAM_NOTICE_GENERATION.pop(stream_id, None)
+        _STREAM_CANCEL_CLAIMED.discard(stream_id)
