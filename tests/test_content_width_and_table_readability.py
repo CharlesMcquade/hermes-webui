@@ -29,6 +29,16 @@ def test_composer_width_picker_has_one_active_control_and_three_options():
     assert 'localStorage.getItem(\'hermes-content-width\')' in html
 
 
+def test_width_picker_is_anchored_to_the_left_composer_controls():
+    html = read_static("index.html")
+    left_start = html.index('<div class="composer-left">')
+    right_start = html.index('<div class="composer-right">')
+    picker_start = html.index('<div class="composer-content-width-wrap"')
+    assert left_start < picker_start < right_start
+    assert 'class="icon-btn composer-content-width-btn has-tooltip"' in html
+    assert 'flex:0 0 34px' in read_static("style.css")
+
+
 def test_width_picker_applies_immediately_and_persists_through_appearance_autosave():
     boot = read_static("boot.js")
     panels = read_static("panels.js")
