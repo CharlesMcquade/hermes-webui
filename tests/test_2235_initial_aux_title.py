@@ -189,6 +189,116 @@ class TestInitialAuxTitleSucceeds(unittest.TestCase):
         self.assertEqual(s.title, 'Python Sort Function')
 
 
+    @patch('api.streaming._aux_title_configured', return_value=True)
+    @patch('api.streaming._generate_llm_session_title_via_aux')
+    @patch('api.streaming.get_session')
+    @patch('api.streaming.SESSIONS', {})
+    @patch('api.streaming.LOCK', threading.Lock())
+    def test_persisted_title_option_menu_self_heals(
+        self, mock_get_session, mock_aux_title, mock_configured,
+    ):
+        """Old menu-style titles are invalid too, so the normal self-heal reaches them."""
+        from api.streaming import _run_background_title_update
+
+        user_text = 'Make the workspace selector respect the configured order.'
+        assistant_text = 'I will trace the workspace ordering path.'
+        s, provisional = _make_provisional_session(user_text, assistant_text)
+        s.title = 'Good title options: "GLM 5.3 Upgrade Vibes", "Testing GLM 5.3 Feel"'
+        s.llm_title_generated = True
+        mock_get_session.return_value = s
+        mock_aux_title.return_value = ('Respect Workspace Order', 'llm_aux', 'Respect Workspace Order')
+        events = []
+
+        _run_background_title_update(
+            session_id=s.session_id,
+            user_text=user_text,
+            assistant_text=assistant_text,
+            placeholder_title=provisional,
+            put_event=lambda event_type, data: events.append((event_type, data)),
+            agent=None,
+        )
+
+        self.assertEqual(s.title, 'Respect Workspace Order')
+        self.assertTrue(s.llm_title_generated)
+        mock_aux_title.assert_called_once_with(user_text, assistant_text)
+        self.assertEqual(
+            [data['title'] for event, data in events if event == 'title'],
+            ['Respect Workspace Order'],
+        )
+
+
+    @patch('api.streaming._aux_title_configured', return_value=True)
+    @patch('api.streaming._generate_llm_session_title_via_aux')
+    @patch('api.streaming.get_session')
+    @patch('api.streaming.SESSIONS', {})
+    @patch('api.streaming.LOCK', threading.Lock())
+    def test_invalid_model_title_stays_unresolved_for_next_exchange(
+        self, mock_get_session, mock_aux_title, mock_configured,
+    ):
+        """A rejected title response must not turn a warm-up fallback into final metadata."""
+        from api.streaming import _run_background_title_update
+
+        user_text = "Hello world, now you're on GLM 5.3 buddy."
+        assistant_text = "It feels fast."
+        s, provisional = _make_provisional_session(user_text, assistant_text)
+        mock_get_session.return_value = s
+        mock_aux_title.return_value = (
+            None,
+            'llm_invalid_aux',
+            'Good title options: "GLM 5.3 Upgrade Vibes", "Testing GLM 5.3 Feel"',
+        )
+        events = []
+
+        _run_background_title_update(
+            session_id=s.session_id,
+            user_text=user_text,
+            assistant_text=assistant_text,
+            placeholder_title=provisional,
+            put_event=lambda event_type, data: events.append((event_type, data)),
+            agent=None,
+        )
+
+        self.assertEqual(s.title, provisional)
+        self.assertFalse(s.llm_title_generated)
+        self.assertFalse([data for event, data in events if event == 'title'])
+        status_events = [data for event, data in events if event == 'title_status']
+        self.assertEqual(status_events[0]['reason'], 'llm_invalid_aux')
+
+
+    @patch('api.streaming._aux_title_configured', return_value=True)
+    @patch('api.streaming._generate_llm_session_title_for_agent')
+    @patch('api.streaming._generate_llm_session_title_via_aux')
+    @patch('api.streaming.get_session')
+    @patch('api.streaming.SESSIONS', {})
+    @patch('api.streaming.LOCK', threading.Lock())
+    def test_rejected_primary_title_blocks_warmup_fallback_when_backup_errors(
+        self, mock_get_session, mock_aux_title, mock_agent_title, mock_configured,
+    ):
+        """A backup transport error must not erase evidence that the primary output was malformed."""
+        from api.streaming import _run_background_title_update
+
+        user_text = "Hello world, now you're on GLM 5.3 buddy."
+        assistant_text = "It feels fast."
+        s, provisional = _make_provisional_session(user_text, assistant_text)
+        mock_get_session.return_value = s
+        mock_aux_title.return_value = (None, 'llm_invalid_aux', 'Good title options: "One", "Two"')
+        mock_agent_title.return_value = (None, 'llm_error', '')
+        events = []
+
+        _run_background_title_update(
+            session_id=s.session_id,
+            user_text=user_text,
+            assistant_text=assistant_text,
+            placeholder_title=provisional,
+            put_event=lambda event_type, data: events.append((event_type, data)),
+            agent=MagicMock(),
+        )
+
+        self.assertEqual(s.title, provisional)
+        self.assertFalse(s.llm_title_generated)
+        self.assertFalse([data for event, data in events if event == 'title'])
+
+
 class TestUnconfiguredAuxPreservesFallback(unittest.TestCase):
     """When no aux title_generation config is set, the existing
     agent/local fallback behaviour must still run."""
