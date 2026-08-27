@@ -820,6 +820,7 @@ def _is_transient_fallback_warning(kind: str, message: str) -> bool:
             or 'falling back' in m
             or 'fallback activated' in m
             or 'trying fallback' in m
+            or 'model fallback:' in m
         )
     )
 
