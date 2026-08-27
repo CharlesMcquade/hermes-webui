@@ -578,25 +578,34 @@ def test_fallback_lifecycle_message_predicate_matches_agent_emitters():
     # _emit_warning → status_callback("warn", ...), not ("lifecycle", ...).
     # The matcher must accept the warn kind for fallback-phrased texts or the
     # successful-fallback notice is silently dropped by the WebUI bridge.
-    assert _is_fallback_lifecycle_message(
-        "warn",
-        "Fallback activated: GLM-5.3-Flash-512K → gpt-5.6-sol (copilot)",
-    )
-    assert _is_fallback_lifecycle_message(
-        "warn",
-        "Rate limited — switching to fallback provider...",
-    )
-    # chat_completion_helpers emits "⚠️ Model fallback: <old> via <prov>
-    # unavailable (<reason>); using <new> via <prov>." on live fallbacks —
-    # captured verbatim from a dead-provider probe of the real agent.
+    # Current agent CONFIRMED post-switch notice (dead-provider probe, verbatim):
+    # kind='warn' via _emit_warning, names the NEW model. #6405's matcher was
+    # written against the legacy "Switched to fallback model:" lifecycle shape;
+    # the agent's provider-transition rework (Aug 2026) changed the emission.
     assert _is_fallback_lifecycle_message(
         "warn",
         "⚠️ Model fallback: dead-model-test via custom:vllm-dead-test unavailable "
         "(provider overloaded); using gpt-5.6-sol via copilot.",
     )
+    # Legacy agent shape retained for older agents.
     assert _is_fallback_lifecycle_message(
         "lifecycle",
-        "⚠️ Model fallback: a via b unavailable (x); using c via d.",
+        "Switched to fallback model: m1 via p1 → m2 via p2",
+    )
+    assert _is_fallback_lifecycle_message(
+        "warn",
+        "Model fallback: a via b unavailable (x); using c via d.",
+    )
+    # Confirmed-only contract: transient pre-switch chatter ("switching to",
+    # "trying fallback") must NOT become a persistent notice — the PR gates
+    # those through _is_transient_fallback_warning instead.
+    assert not _is_fallback_lifecycle_message(
+        "warn",
+        "Fallback activated: GLM-5.3-Flash-512K → gpt-5.6-sol (copilot)",
+    )
+    assert not _is_fallback_lifecycle_message(
+        "warn",
+        "Rate limited — switching to fallback provider...",
     )
     # warn kind is still phrase-gated: unrelated degraded-path warnings
     # (auxiliary failures, compression blocks) must not surface as fallbacks.
