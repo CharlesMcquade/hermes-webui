@@ -57,6 +57,9 @@ def test_width_picker_is_keyboard_and_outside_click_usable():
     assert "event.key==='ArrowRight'||event.key==='ArrowDown'" in boot
     assert "event.key==='ArrowLeft'||event.key==='ArrowUp'" in boot
     assert "if(!wrap.contains(event.target)) _setContentWidthPickerOpen(false)" in boot
+    assert "function _positionContentWidthPicker()" in boot
+    assert "popup.style.left=`${Math.round(left)}px`" in boot
+    assert "position:fixed" in read_static("style.css")
 
 
 def test_markdown_tables_use_a_scroll_surface_and_readable_wrapping():
