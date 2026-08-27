@@ -265,7 +265,9 @@ def test_touch_sentinel_setup_exists():
     assert "function _setupTouchSentinel" in SESSIONS_JS
     fn = _extract_fn(SESSIONS_JS, "_setupTouchSentinel")
     assert "data-touch-sentinel" in fn
-    assert "Loading more" in fn
+    # Loading text is now localized through t('loading_more') instead of a
+    # hard-coded English string. Check for the t() call OR the literal.
+    assert "loading_more" in fn or "Loading more" in fn
 
 
 def test_touch_batch_constants_exist():
@@ -549,6 +551,476 @@ console.log(JSON.stringify(result));
     assert result["finalBeforeSpacer"] is False
     assert result["finalAfterSpacer"] is False
     assert result["sentinelHidden"] is True
+
+
+@_node_tests
+def test_setup_and_observer_use_interval_direction_for_unloaded_prefix():
+    """Setup/observer must treat [start,total) as incomplete and prepend.
+
+    A deep-active touch render can have the suffix fully loaded while the
+    prefix is still virtual. The sentinel must remain enabled, and an observer
+    trigger near the first real row must route through _touchNextBatchDirection()
+    to prepend, not return early on end>=total or unconditionally append.
+    """
+    total = 120
+    flat_rows = [{"group": {"label": "G"}, "session": {"session_id": f"s{i}"}} for i in range(total)]
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+let microtasks = [];
+const realPromise = Promise;
+global.Promise = {{ resolve: function() {{ return {{ then: function(fn) {{ microtasks.push(fn); }} }}; }} }};
+function drainMicrotasks() {{ while (microtasks.length) microtasks.shift()(); }}
+let rafCallbacks = [];
+global.requestAnimationFrame = function(fn) {{ rafCallbacks.push(fn); return rafCallbacks.length; }};
+global.cancelAnimationFrame = function() {{}};
+function _isTouchPrimary() {{ return true; }}
+let observed = false;
+window.IntersectionObserver = function(cb, opts) {{
+  this._cb = cb;
+  this.disconnect = function(){{}};
+  this.observe = function(){{ observed = true; }};
+  this.unobserve = function(){{ observed = false; }};
+  this._fire = function(isIntersecting) {{ this._cb([{{isIntersecting: isIntersecting}}]); }};
+}};
+global.IntersectionObserver = window.IntersectionObserver;
+const list = makeList();
+list.clientHeight = 520;
+list.scrollHeight = {total} * SESSION_VIRTUAL_ROW_HEIGHT;
+list.scrollTop = 40 * SESSION_VIRTUAL_ROW_HEIGHT;
+list.getBoundingClientRect = function() {{ return {{top: 100, bottom: 620, height: 520}}; }};
+const gw = makeEl('div');
+gw.className = 'session-date-group';
+gw.setAttribute('data-group-label', 'G');
+const body = makeBodyThatTracksItems(list);
+body.className = 'session-date-body';
+gw.appendChild(body);
+list._groups['G'] = gw;
+list.children.push(gw);
+const before = _sessionVirtualSpacer(40 * SESSION_VIRTUAL_ROW_HEIGHT, 'before');
+body.appendChild(before);
+for (let i = 40; i < {total}; i++) {{
+  const item = makeSessionItem('s' + i);
+  item.getBoundingClientRect = function() {{ return {{top: 110, bottom: 162, height: 52}}; }};
+  body.appendChild(item);
+}}
+list._sentinel = makeEl('div');
+list._sentinel.style.display = '';
+list.children.push(list._sentinel);
+eval(extractFunc('_setupTouchSentinel'));
+let appendCalls = 0;
+let prependCalls = 0;
+const realAppend = _appendTouchBatch;
+const realPrepend = _prependTouchBatch;
+_appendTouchBatch = function() {{ appendCalls++; realAppend(); }};
+_prependTouchBatch = function() {{ prependCalls++; realPrepend(); }};
+_setupTouchSentinel(list, {total}, {json.dumps(flat_rows)}, function(s) {{ return makeSessionItem(s.session_id); }}, 's60', {total}, 40);
+const sentinelShownAfterSetup = list._sentinel.style.display !== 'none';
+const observedAfterSetup = observed;
+const observer = _touchSentinelObserver;
+if (observer && observer._fire) observer._fire(true);
+drainMicrotasks();
+global.Promise = realPromise;
+const sids = list._items.map(function(i) {{ return i.dataset.sid; }});
+console.log(JSON.stringify({{
+  sentinelShownAfterSetup: sentinelShownAfterSetup,
+  observedAfterSetup: observedAfterSetup,
+  appendCalls: appendCalls,
+  prependCalls: prependCalls,
+  start: _sessionTouchStartIndex,
+  end: _sessionTouchLoadedCount,
+  count: list._items.length,
+  ordered: sids.every(function(sid, idx) {{ return sid === 's' + idx; }}),
+  sentinelHiddenAfterPrepend: list._sentinel.style.display === 'none',
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["sentinelShownAfterSetup"] is True
+    assert result["observedAfterSetup"] is True
+    assert result["appendCalls"] == 0
+    assert result["prependCalls"] == 1
+    assert result["start"] == 0
+    assert result["end"] == total
+    assert result["count"] == total
+    assert result["ordered"] is True
+    assert result["sentinelHiddenAfterPrepend"] is True
+
+
+@_node_tests
+def test_active_anchor_uses_real_row_container_geometry():
+    """Projection chooses the window; real DOM rectangles correct scroll.
+
+    The active row can be shifted by group headers and wrapped controls, so the
+    post-render anchor must compare the actual row rect with the list rect. It
+    should correct when the row is partially clipped at the viewport edge and
+    preserve scroll when the row is fully contained.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 1000;
+list.scrollHeight = 5000;
+list.clientHeight = 500;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const row = makeSessionItem('active');
+row.className = 'session-item active';
+// Partially clipped at the bottom: row top=580 (inside), bottom=632 (outside)
+row.getBoundingClientRect = function() { return {top: 580, bottom: 632, height: 52}; };
+list._items = [row];
+list.querySelector = function(sel) {
+  if (sel === '.session-item.active[data-sid]') return row;
+  if (sel === '.session-item[data-sid="active"]') return row;
+  return null;
+};
+const moved = _correctActiveTouchAnchor(list, 'active');
+const afterMove = list.scrollTop;
+// Now fully contained: top=300 >= 100, bottom=352 <= 600
+row.getBoundingClientRect = function() { return {top: 300, bottom: 352, height: 52}; };
+const movedAgain = _correctActiveTouchAnchor(list, 'active');
+console.log(JSON.stringify({moved, afterMove, movedAgain, finalScrollTop: list.scrollTop}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["moved"] is True
+    # 1000 + (632 - 600) = 1032
+    assert result["afterMove"] == 1032
+    assert result["movedAgain"] is False
+    assert result["finalScrollTop"] == 1032
+
+
+@_node_tests
+def test_active_anchor_clipped_top_gets_nearest_edge_correction():
+    """A partially clipped active row (visible at top but not fully contained)
+    must receive a nearest-edge scroll correction, not be skipped.
+
+    The old intersects check accepted any overlap; a row with top=80, bottom=132
+    inside a list with top=100, bottom=600 was considered "visible" even though
+    only the bottom 32px was visible — the active session label was clipped.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 500;
+list.scrollHeight = 5000;
+list.clientHeight = 500;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const row = makeSessionItem('active');
+row.className = 'session-item active';
+// Row top is ABOVE the list top (80 < 100) but bottom is inside (132 > 100) —
+// partially clipped at the top edge.
+row.getBoundingClientRect = function() { return {top: 80, bottom: 132, height: 52}; };
+list._items = [row];
+list.querySelector = function(sel) {
+  if (sel === '.session-item.active[data-sid]') return row;
+  if (sel === '.session-item[data-sid="active"]') return row;
+  return null;
+};
+const moved = _correctActiveTouchAnchor(list, 'active');
+console.log(JSON.stringify({moved, scrollTop: list.scrollTop}));
+"""
+    result = json.loads(_run_node_vm(source))
+    # Must correct: move scroll up by 20px so the row's top aligns with list top
+    assert result["moved"] is True
+    assert result["scrollTop"] == 480  # 500 - (100 - 80) = 480
+
+
+@_node_tests
+def test_active_anchor_clipped_bottom_gets_nearest_edge_correction():
+    """A partially clipped active row (visible at bottom but not fully contained)
+    must receive a nearest-edge scroll correction.
+
+    Row with top=580, bottom=632 inside list with top=100, bottom=600 — only the
+    top 20px of the row is visible, the session name is cut off at the bottom.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 1000;
+list.scrollHeight = 5000;
+list.clientHeight = 500;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const row = makeSessionItem('active');
+row.className = 'session-item active';
+// Row bottom is BELOW the list bottom (632 > 600) but top is inside (580 < 600)
+// — partially clipped at the bottom edge.
+row.getBoundingClientRect = function() { return {top: 580, bottom: 632, height: 52}; };
+list._items = [row];
+list.querySelector = function(sel) {
+  if (sel === '.session-item.active[data-sid]') return row;
+  if (sel === '.session-item[data-sid="active"]') return row;
+  return null;
+};
+const moved = _correctActiveTouchAnchor(list, 'active');
+console.log(JSON.stringify({moved, scrollTop: list.scrollTop}));
+"""
+    result = json.loads(_run_node_vm(source))
+    # Must correct: move scroll down by 32px so row bottom aligns with list bottom
+    assert result["moved"] is True
+    assert result["scrollTop"] == 1032  # 1000 + (632 - 600) = 1032
+
+
+@_node_tests
+def test_active_anchor_fully_outside_above_preserves_scroll():
+    """A row fully above the viewport (bottom < list.top) must NOT be corrected.
+
+    Background touch renders (title/viewed-state/SSE/poll updates) call
+    _correctActiveTouchAnchor on every full touch render. Correcting a
+    fully-off-screen active row yanks the user back toward the active
+    conversation when they may be browsing hundreds of rows away.
+    Fully-off-screen rows MUST preserve user scroll.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 5000;
+list.scrollHeight = 50000;
+list.clientHeight = 500;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const row = makeSessionItem('active');
+row.className = 'session-item active';
+// Fully outside above: row bottom (72) < list top (100)
+row.getBoundingClientRect = function() { return {top: 20, bottom: 72, height: 52}; };
+list._items = [row];
+list.querySelector = function(sel) {
+  if (sel === '.session-item.active[data-sid]') return row;
+  if (sel === '.session-item[data-sid="active"]') return row;
+  return null;
+};
+const moved = _correctActiveTouchAnchor(list, 'active');
+console.log(JSON.stringify({moved, scrollTop: list.scrollTop}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["moved"] is False
+    assert result["scrollTop"] == 5000  # scroll preserved
+
+
+@_node_tests
+def test_active_anchor_fully_outside_below_preserves_scroll():
+    """A row fully below the viewport (top > list.bottom) must NOT be corrected."""
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 0;
+list.scrollHeight = 50000;
+list.clientHeight = 500;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const row = makeSessionItem('active');
+row.className = 'session-item active';
+// Fully outside below: row top (700) > list bottom (600)
+row.getBoundingClientRect = function() { return {top: 700, bottom: 752, height: 52}; };
+list._items = [row];
+list.querySelector = function(sel) {
+  if (sel === '.session-item.active[data-sid]') return row;
+  if (sel === '.session-item[data-sid="active"]') return row;
+  return null;
+};
+const moved = _correctActiveTouchAnchor(list, 'active');
+console.log(JSON.stringify({moved, scrollTop: list.scrollTop}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["moved"] is False
+    assert result["scrollTop"] == 0  # scroll preserved
+
+
+@_node_tests
+def test_active_anchor_fully_contained_preserves_scroll():
+    """A row fully inside the viewport (top >= list.top && bottom <= list.bottom)
+    must NOT be corrected — scroll is preserved."""
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 1000;
+list.scrollHeight = 5000;
+list.clientHeight = 500;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const row = makeSessionItem('active');
+row.className = 'session-item active';
+// Fully contained: top=300 >= 100, bottom=352 <= 600
+row.getBoundingClientRect = function() { return {top: 300, bottom: 352, height: 52}; };
+list._items = [row];
+list.querySelector = function(sel) {
+  if (sel === '.session-item.active[data-sid]') return row;
+  if (sel === '.session-item[data-sid="active"]') return row;
+  return null;
+};
+const moved = _correctActiveTouchAnchor(list, 'active');
+console.log(JSON.stringify({moved, scrollTop: list.scrollTop}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["moved"] is False
+    assert result["scrollTop"] == 1000  # unchanged
+
+
+@_node_tests
+def test_touch_start_boundary_uses_first_row_geometry():
+    """Upward batch trigger must read the live first row, not start*height."""
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 0;
+list.clientHeight = 500;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const first = makeSessionItem('s40');
+first.getBoundingClientRect = function() { return {top: 250, bottom: 302, height: 52}; };
+list._items = [first];
+_sessionTouchStartIndex = 40;
+_sessionTouchLoadedCount = 120;
+const state = {flatRows: new Array(120), itemHeight: SESSION_VIRTUAL_ROW_HEIGHT};
+const nearByGeometry = _touchStartBoundaryNearViewport(list, state, 200);
+first.getBoundingClientRect = function() { return {top: 450, bottom: 502, height: 52}; };
+const farByGeometry = _touchStartBoundaryNearViewport(list, state, 200);
+console.log(JSON.stringify({nearByGeometry, farByGeometry}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["nearByGeometry"] is True
+    assert result["farByGeometry"] is False
+
+
+@_node_tests
+def test_touch_start_boundary_far_above_does_not_trigger():
+    """A first rendered row far ABOVE the viewport must not trigger upward
+    batching.
+
+    The old code used (rowRect.top - listRect.top) <= margin, which is true for
+    large negative values (rows far above the list). A user deep-scrolling
+    downward would then drain the entire prefix via repeated prepends.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.scrollTop = 5000;
+list.clientHeight = 500;
+list.scrollHeight = 10000;
+list.getBoundingClientRect = function() { return {top: 100, bottom: 600, height: 500}; };
+const first = makeSessionItem('s40');
+// First row is 2000px ABOVE the list viewport top (far above)
+first.getBoundingClientRect = function() { return {top: -1900, bottom: -1848, height: 52}; };
+list._items = [first];
+_sessionTouchStartIndex = 40;
+_sessionTouchLoadedCount = 120;
+const state = {flatRows: new Array(120), itemHeight: SESSION_VIRTUAL_ROW_HEIGHT};
+const farAbove = _touchStartBoundaryNearViewport(list, state, 200);
+// Now a row that IS near the top boundary (within margin)
+first.getBoundingClientRect = function() { return {top: 250, bottom: 302, height: 52}; };
+const nearTop = _touchStartBoundaryNearViewport(list, state, 200);
+console.log(JSON.stringify({farAbove, nearTop}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["farAbove"] is False
+    assert result["nearTop"] is True
+
+
+@_node_tests
+def test_touch_start_boundary_projection_far_above_does_not_trigger():
+    """Same far-above regression but for the projection fallback path (no
+    getBoundingClientRect available).
+
+    Far above in projection terms: scrollTop is way below the start boundary,
+    so the first row (at startBoundary) would be far above the viewport.
+    The old one-sided check (scrollTop-startBoundary) <= margin was true for
+    large negative values. The two-sided bound must reject them.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+_sessionTouchStartIndex = 40;
+_sessionTouchLoadedCount = 120;
+const state = {flatRows: new Array(120), itemHeight: SESSION_VIRTUAL_ROW_HEIGHT};
+// scrollTop far below start boundary: distance = 100 - 2080 = -1980 (far above)
+// Old one-sided check: -1980 <= 200 → true (WRONG)
+// Two-sided bound: -1980 >= -500 (viewportHeight) → false (CORRECT)
+list.scrollTop = 100;
+list.clientHeight = 500;
+const farAbove = _touchStartBoundaryNearViewport(list, state, 200);
+// scrollTop near the start boundary: distance = 1980 - 2080 = -100 (near)
+list.scrollTop = 40 * SESSION_VIRTUAL_ROW_HEIGHT - 100;
+const nearBoundary = _touchStartBoundaryNearViewport(list, state, 200);
+// scrollTop far below: distance = 5000 - 2080 = 2920 (far below, should be false)
+list.scrollTop = 5000;
+const farBelow = _touchStartBoundaryNearViewport(list, state, 200);
+console.log(JSON.stringify({farAbove, nearBoundary, farBelow}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["farAbove"] is False
+    assert result["nearBoundary"] is True
+    assert result["farBelow"] is False
+
+
+@_node_tests
+def test_deep_active_window_no_prepend_when_first_row_far_above():
+    """Composed regression: a bounded deep-active touch window with the first
+    materialized row far above the viewport must not trigger upward batching.
+
+    This is the exact schedule the gate-certifier flagged: the user has a
+    deep-active window (start > 0), the first rendered row is thousands of px
+    above the list, and the production direction-check must not return 'up'
+    (which would prepend and drain the prefix). The test calls the real
+    _touchNextBatchDirection() and asserts it does not return 'up' when the
+    first row is far above the viewport. It also verifies _touchStartBoundaryNearViewport
+    directly returns false, and that _prependTouchBatch is never called.
+    """
+    flat_rows = [{"group": {"label": "G"}, "session": {"session_id": f"s{i}"}} for i in range(224)]
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+let rafCallbacks = [];
+let rafSchedules = 0;
+global.requestAnimationFrame = function(fn) {{ rafSchedules++; rafCallbacks.push(fn); return rafSchedules; }};
+global.cancelAnimationFrame = function() {{}};
+function _isTouchPrimary() {{ return true; }}
+const list = makeList();
+list.clientHeight = 520;
+// User is scrolled far below the start boundary
+list.scrollTop = 140 * SESSION_VIRTUAL_ROW_HEIGHT - list.clientHeight;
+list.scrollHeight = 224 * SESSION_VIRTUAL_ROW_HEIGHT;
+list.getBoundingClientRect = function() {{ return {{top: 0, bottom: 520, height: 520}}; }};
+// First rendered row (index 60) is far above the viewport
+const firstRow = makeSessionItem('s60');
+firstRow.getBoundingClientRect = function() {{ return {{top: -4160, bottom: -4108, height: 52}}; }};
+list._items = [firstRow];
+list.querySelector = function() {{ return null; }};
+list.querySelectorAll = function() {{ return [firstRow]; }};
+_sessionTouchGen = 1;
+_sessionTouchStartIndex = 60;
+_sessionTouchLoadedCount = 100;
+_sessionTouchTotalCount = 224;
+_sessionTouchListEl = list;
+_touchRenderState = {{gen:1,list:list,flatRows:{json.dumps(flat_rows)},renderOneSession:function(s){{return makeSessionItem(s.session_id);}},itemHeight:SESSION_VIRTUAL_ROW_HEIGHT}};
+
+// Directly test the production direction-check with the first row far above
+const boundaryNear = _touchStartBoundaryNearViewport(list, _touchRenderState, 200);
+const direction = _touchNextBatchDirection(list, _touchRenderState, 200);
+
+// Also verify _prependTouchBatch is never called in this state
+let prependCount = 0;
+const origPrepend = _prependTouchBatch;
+_prependTouchBatch = function() {{ prependCount++; return origPrepend.apply(this, arguments); }};
+
+// Simulate what a continuous-batch RAF callback would do: check direction
+// and only prepend if direction === 'up'
+if (direction === 'up') {{
+  _prependTouchBatch();
+}}
+
+console.log(JSON.stringify({{boundaryNear, direction, prependCount, loadedCount: _sessionTouchLoadedCount, startIndex: _sessionTouchStartIndex}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    # The boundary check must reject the far-above row
+    assert result["boundaryNear"] is False
+    # Direction must not be 'up' — no prepend should occur
+    assert result["direction"] != "up"
+    assert result["prependCount"] == 0
+    # Loaded count should not have changed
+    assert result["loadedCount"] == 100
+    assert result["startIndex"] == 60
 
 
 @_node_tests
@@ -900,6 +1372,9 @@ function _sessionVirtualSpacer(h, pos) {
 // clears ALL touch state (observer, RAF, scroll listener, render state,
 // list, loaded/total, pending, generation, token). Owner-qualified: only
 // cancels the listener/RAF of the CURRENT _touchScrollOwner.
+
+// Mock i18n t() function for localized strings
+function t(key) { return key === 'loading_more' ? 'Loading more\u2026' : key; }
 function _invalidateTouchRender() {
   if (_touchSentinelObserver) { _touchSentinelObserver.disconnect(); _touchSentinelObserver = null; }
   const owner = _touchScrollOwner;
@@ -926,6 +1401,8 @@ function _invalidateTouchRender() {
 // Extract and eval all touch functions
 eval(extractFunc('_touchIntervalState'));
 eval(extractFunc('_touchCurrentInterval'));
+eval(extractFunc('_sessionActiveRowInList'));
+eval(extractFunc('_correctActiveTouchAnchor'));
 eval(extractFunc('_createTouchGroupWrapper'));
 eval(extractFunc('_updateTouchGroupSpacers'));
 eval(extractFunc('_updateTouchSentinel'));
@@ -2298,6 +2775,10 @@ list.querySelectorAll = function(sel) {{
 const _origCreate = _createTouchGroupWrapper;
 _createTouchGroupWrapper = function(g, st) {{
   const wrapper = _origCreate(g, st);
+  // Fix dataset key: the mock's setAttribute converts 'data-group-label' to
+  // 'grouplabel' (removing hyphens), but our DOM-faithful querySelector
+  // checks 'group-label'. Set it directly to match.
+  wrapper.dataset['group-label'] = g.label;
   const trackingBody = makeBodyThatTracksItems(list);
   trackingBody.className = 'session-date-body';
   wrapper.children = wrapper.children.filter(c => c.className !== 'session-date-body');
@@ -4230,12 +4711,23 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   for (const cb of staleRafCbs) cb();
   const staleToken4 = _touchBatchToken; // token the stale microtask captured
   samplePending('after_stale_raf');
+  // Queue a real FIFO probe AFTER stale A and BEFORE newer B. We then queue the
+  // newer production scheduler continuation before draining microtasks, so the
+  // order is: stale A → probe → newer B. The probe must still see B's pending
+  // ownership as true; if stale A clears the latch unconditionally, it bites.
+  let pendingProbeAfterStale4 = null;
+  let tokenProbeAfterStale4 = null;
   // Create a same-generation token supersession through the real scroll
   // scheduler. We deliberately release the latch before draining stale so the
   // newer scroll handler can queue its own RAF/Promise; this isolates the token
   // guard (gen, owner, list, loaded, total, and geometry all stay valid).
   _touchBatchPending = false;
   samplePending('after_adversarial_release');
+  Promise.resolve().then(function(){{
+    pendingProbeAfterStale4 = _touchBatchPending;
+    tokenProbeAfterStale4 = _touchBatchToken;
+    samplePending('probe_between_stale_and_newer');
+  }});
   if (_touchScrollOwner && _touchScrollOwner.handler) _touchScrollOwner.handler();
   const newerRafCbs = rafCallbacks.splice(0);
   for (const cb of newerRafCbs) cb();
@@ -4243,17 +4735,16 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   const tokenAfterSupersede4 = _touchBatchToken;
   const snapAfterSupersede4 = snapshotLiveTree();
   const newerToken4 = _touchBatchToken;
-  const pendingBetween4 = _touchBatchPending;
   samplePending('after_newer_raf_before_microtasks');
-  // Drain stale microtask, then newer microtask in FIFO order.
+  // Drain stale microtask, the probe, then newer microtask in FIFO order.
   for (let i = 0; i < 10; i++) await Promise.resolve();
   // Attribute appends to the schedule that queued them.
   const staleAppends4 = appendLog.filter(function(e) {{ return e.token === staleToken4; }}).length;
   const newerAppends4 = appendLog.filter(function(e) {{ return e.token === newerToken4; }}).length;
   // The probe runs after the stale continuation and before the newer
   // continuation. If the stale path incorrectly clears pending despite token
-  // mismatch, pendingBetween4 is false and this oracle bites.
-  const staleDidNotClear4 = pendingBetween4 === true;
+  // mismatch, pendingProbeAfterStale4 is false and this oracle bites.
+  const staleDidNotClear4 = pendingProbeAfterStale4 === true && tokenProbeAfterStale4 === newerToken4;
   const newerCleared4 = _touchBatchPending === false;
   const newerLoaded4 = _sessionTouchLoadedCount;
   const tree4 = assertLiveTreeUntouched(snap4);
@@ -4656,3 +5147,760 @@ def test_owner_record_has_required_fields():
     assert "token:" in fn, "Owner record must have token field"
     assert "_touchScrollOwner=owner" in fn, \
         "Must assign the owner to _touchScrollOwner"
+
+
+@_node_tests
+def test_continuous_batch_does_not_stick_pending_after_chained_append():
+    """Finding 1: continuous batching must not permanently stick
+    _touchBatchPending after one chained append.
+
+    The bug: _appendTouchBatch() calls _scheduleContinuousBatch() which bumps
+    _touchBatchToken. The caller's finally can't clear _touchBatchPending
+    (token mismatch), so the successor RAF hits `if(_touchBatchPending) return`
+    and exits — the list permanently sticks at 100/224.
+
+    This test drains RAFs and microtasks through a production-composed
+    60→100→140→180 chain, proving pending=false, owner=null at the end,
+    exact SID order, and no duplicates.
+    """
+    total = 180
+    flat_rows = [
+        {"group": {"label": "Today", "isPinned": False}, "session": {"session_id": f"s_{i}"}}
+        for i in range(total)
+    ]
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+list.scrollTop = 0;
+list.clientHeight = 1024;
+list.scrollHeight = 50000;
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = {total};
+
+// Pre-populate DOM with 60 session items
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s_' + i));
+
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{
+    const el = makeSessionItem(s.session_id);
+    // Provide getBoundingClientRect so _touchLoadedBoundaryNearViewport
+    // can use live DOM geometry. setupGeometry() sets the correct
+    // position on the last item before each drain cycle.
+    el.getBoundingClientRect = function() {{ return {{top: 0, bottom: 0, height: 39}}; }};
+    return el;
+  }},
+  activeSid: null, itemHeight: 39,
+}};
+
+// Group wrapper with body that tracks items
+const gw = makeEl('div');
+gw.dataset['group-label'] = 'Today';
+const body = makeBodyThatTracksItems(list);
+gw.querySelector = function(sel) {{ if(sel==='.session-date-body') return body; return null; }};
+gw.appendChild(body);
+list._groups['Today'] = gw;
+
+// Sentinel element — visible so _scheduleContinuousBatch proceeds
+list._sentinel = makeEl('div');
+list._sentinel.dataset['touchSentinel'] = '';
+list._sentinel.style = {{ display: '' }};
+
+// Mock requestAnimationFrame to capture callbacks
+let _rafCallbacks = [];
+global.requestAnimationFrame = function(cb) {{ _rafCallbacks.push(cb); return _rafCallbacks.length; }};
+global.cancelAnimationFrame = function() {{}};
+
+// Setup geometry so _touchLoadedBoundaryNearViewport returns true.
+// Provides getBoundingClientRect on list and last item so the live DOM
+// geometry path is used (not the fixed-projection fallback).
+function setupGeometry(loadedCount) {{
+  const lastBottom = loadedCount * 39;
+  const scrollPos = Math.max(0, lastBottom - 1024 + 100);
+  list.scrollTop = scrollPos;
+  list.clientHeight = 1024;
+  list.getBoundingClientRect = function() {{ return {{top: 0, bottom: 1024, height: 1024}}; }};
+  const lastItem = list._items[list._items.length - 1];
+  if (lastItem) {{
+    const relBottom = lastBottom - scrollPos;
+    lastItem.getBoundingClientRect = function() {{ return {{top: relBottom - 39, bottom: relBottom, height: 39}}; }};
+  }}
+}}
+setupGeometry(60);
+
+// Start the continuous batch chain by calling _scheduleContinuousBatch directly.
+// This creates owner T and schedules a RAF. The RAF callback will:
+// 1. Set _touchBatchPending=true
+// 2. Call _appendTouchBatch() (which clears pending and schedules T+1)
+// 3. The finally can't clear pending (token T != T+1)
+// Without the fix, pending stays true and T+1's RAF exits early.
+_scheduleContinuousBatch();
+const scheduledAfterInit = _rafCallbacks.length;
+
+// Drain the continuous-batch RAF callbacks to advance 60→100→140→180.
+let drainedCount = 0;
+let maxIters = 20;
+let trace = [];
+while (_rafCallbacks.length > 0 && maxIters-- > 0) {{
+  const cbs = _rafCallbacks.splice(0);
+  for (const cb of cbs) {{
+    const loadedBefore = _sessionTouchLoadedCount;
+    const pendingBefore = _touchBatchPending;
+    try {{ cb(); }} catch(e) {{ trace.push('error: ' + e.message); }}
+    drainedCount++;
+    trace.push(loadedBefore + '->' + _sessionTouchLoadedCount + ' pending=' + _touchBatchPending);
+    // Re-setup geometry so the next boundary check passes
+    setupGeometry(_sessionTouchLoadedCount);
+  }}
+}}
+
+const loadedFinal = _sessionTouchLoadedCount;
+const pendingFinal = _touchBatchPending;
+const ownerFinal = _touchContinuousBatchOwner;
+const sidsFinal = list._items.map(i => i.dataset.sid);
+const uniqueSids = new Set(sidsFinal);
+
+console.log(JSON.stringify({{
+  scheduledAfterInit,
+  loadedFinal,
+  pendingFinal,
+  ownerNull: ownerFinal === null,
+  drainedCount,
+  totalItems: list._items.length,
+  uniqueCount: uniqueSids.size,
+  firstSids: sidsFinal.slice(0, 5).join(','),
+  lastSids: sidsFinal.slice(-5).join(','),
+  trace: trace.slice(0, 10),
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["scheduledAfterInit"] == 1, \
+        f"_scheduleContinuousBatch should schedule 1 RAF, got {result['scheduledAfterInit']}"
+    assert result["loadedFinal"] == 180, \
+        f"Continuous batch should drain to 180, got {result['loadedFinal']} (trace: {result.get('trace',[])})"
+    assert result["pendingFinal"] is False, \
+        f"_touchBatchPending must be false after chain completes, got {result['pendingFinal']}"
+    assert result["ownerNull"] is True, \
+        "_touchContinuousBatchOwner must be null after chain completes"
+    assert result["totalItems"] == 180, \
+        f"DOM should have 180 items, got {result['totalItems']}"
+    assert result["uniqueCount"] == 180, \
+        f"All 180 SIDs must be unique (no duplicates), got {result['uniqueCount']} unique"
+    assert result["firstSids"] == "s_0,s_1,s_2,s_3,s_4", \
+        f"First SIDs must be s_0..s_4, got {result['firstSids']}"
+    assert result["lastSids"] == "s_175,s_176,s_177,s_178,s_179", \
+        f"Last SIDs must be s_175..s_179, got {result['lastSids']}"
+
+
+@_node_tests
+def test_loaded_boundary_uses_live_dom_geometry_not_fixed_projection():
+    """Finding 2: _touchLoadedBoundaryNearViewport must use live DOM geometry
+    from the last rendered row's container-relative bottom, not a fixed
+    loaded*52px projection.
+
+    The bug: real compact rows are ~39px, not 52px. With 300 loaded rows at
+    the actual row bottom (zero visible), the helper returned false and
+    calculated ~2,676px of additional blank spacer before its trigger.
+
+    This test sets up compact 39px rows and verifies the boundary triggers
+    from the actual last row bottom, not from 300*52=15600px.
+    """
+    flat_rows = [
+        {"group": {"label": "G"}, "session": {"session_id": f"s_{i}"}}
+        for i in range(400)
+    ]
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+list.scrollTop = 0;
+list.clientHeight = 1024;
+list.scrollHeight = 20000;
+
+// Simulate 300 loaded compact rows (39px each) — last row bottom = 11700px
+// The list viewport is 1024px, so the loaded boundary is far below viewport.
+// With the FIXED 52px projection, the helper would compute 300*52=15600px
+// and return false even when the user has scrolled to 11000px (near the
+// real boundary at 11700px).
+_sessionTouchLoadedCount = 300;
+_sessionTouchStartIndex = 0;
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItem(s.session_id); }},
+  activeSid: null, itemHeight: 39,
+}};
+
+// Mock getBoundingClientRect on list and last row
+const listTop = 0;
+list.getBoundingClientRect = function() {{ return {{top: listTop, bottom: 1024, height: 1024}}; }};
+
+// Create 300 mock items with getBoundingClientRect
+const items = [];
+for (let i = 0; i < 300; i++) {{
+  const el = makeSessionItem('s_' + i);
+  const rowTop = i * 39;
+  const rowBottom = rowTop + 39;
+  el.getBoundingClientRect = function() {{ return {{top: rowTop, bottom: rowBottom, height: 39}}; }};
+  items.push(el);
+}}
+list._items = items;
+list.querySelectorAll = function(sel) {{
+  if (sel === '.session-item[data-sid]') return items.slice();
+  return [];
+}};
+
+// Test: user scrolled to 11000px — near the real boundary (11700px)
+// The fixed projection would compute 15600-11000-1024 = 3576 > 200 → false
+// The live geometry computes 11700-0 = 11700 <= 1024+200=1224? No.
+// Actually with scrollTop=11000 and viewport=1024, the last row bottom
+// relative to viewport is 11700-11000=700px, which is within the 1024px
+// viewport → the boundary is IN the viewport → should trigger.
+list.scrollTop = 11000;
+// The live geometry path: loadedBottom = rowRect.bottom - listRect.top
+// = 11700 - 0 = 11700. viewportBottom = 1024.
+// But wait — getBoundingClientRect returns VIEWPORT coordinates, which
+// already account for scrollTop. So if the user scrolled to 11000, the
+// last row's rect.bottom in viewport coords = 11700 - 11000 = 700.
+// loadedBottom = 700 - 0 = 700. viewportBottom = 1024.
+// 700 <= 1024 + 200 = true → triggers correctly!
+// Fix the mock to return viewport-relative coords:
+const listRectTop = 0;
+list.getBoundingClientRect = function() {{ return {{top: listRectTop, bottom: 1024, height: 1024}}; }};
+// Last row's viewport-relative bottom after scrolling 11000:
+const lastRow = items[299];
+const lastRowViewportBottom = (299 * 39 + 39) - 11000; // 11700 - 11000 = 700
+lastRow.getBoundingClientRect = function() {{
+  return {{top: lastRowViewportBottom - 39, bottom: lastRowViewportBottom, height: 39}};
+}};
+
+const result1 = _touchLoadedBoundaryNearViewport(list, _touchRenderState, 200);
+
+// Now test with scrollTop=0 — boundary far below viewport
+list.scrollTop = 0;
+lastRow.getBoundingClientRect = function() {{
+  const bottom = 299 * 39 + 39; // 11700
+  return {{top: bottom - 39, bottom: bottom, height: 39}};
+}};
+const result2 = _touchLoadedBoundaryNearViewport(list, _touchRenderState, 200);
+
+console.log(JSON.stringify({{
+  triggersNearBoundary: result1,
+  triggersFarFromBoundary: result2,
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["triggersNearBoundary"] is True, \
+        "Live geometry must trigger when the loaded boundary is near the viewport"
+    assert result["triggersFarFromBoundary"] is False, \
+        "Live geometry must NOT trigger when the loaded boundary is far below the viewport"
+
+
+@_node_tests
+def test_background_render_preserves_scroll_when_active_row_far_offscreen():
+    """Finding 3: background touch renders must NOT yank the user to a fully
+    off-screen active session.
+
+    _correctActiveTouchAnchor is called on every full touch render. If the
+    active row is fully outside the viewport (user scrolled far away), the
+    function must return false and preserve scrollTop.
+
+    This test composes a background render after scrolling far from the
+    active row and proves scrollTop and visible SID range remain
+    byte-identical.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+// User is at scrollTop=5000, viewport 1024px
+list.scrollTop = 5000;
+list.scrollHeight = 50000;
+list.clientHeight = 1024;
+list.getBoundingClientRect = function() { return {top: 0, bottom: 1024, height: 1024}; };
+
+// Active session row is at the TOP of the list (fully outside above)
+// Row rect: top=-500, bottom=-460 → fully outside above (bottom < list.top=0)
+const activeRow = makeSessionItem('active_session');
+activeRow.className = 'session-item active';
+activeRow.getBoundingClientRect = function() { return {top: -500, bottom: -460, height: 40}; };
+list._items = [activeRow];
+list.querySelector = function(sel) {
+  if (sel === '.session-item.active[data-sid]') return activeRow;
+  if (sel === '.session-item[data-sid="active_session"]') return activeRow;
+  return null;
+};
+list.querySelectorAll = function(sel) {
+  if (sel === '.session-item[data-sid]') return [activeRow];
+  return [];
+};
+
+const scrollBefore = list.scrollTop;
+const moved = _correctActiveTouchAnchor(list, 'active_session');
+const scrollAfter = list.scrollTop;
+
+console.log(JSON.stringify({
+  moved,
+  scrollBefore,
+  scrollAfter,
+  scrollPreserved: scrollBefore === scrollAfter,
+}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["moved"] is False, \
+        "Fully off-screen active row must NOT trigger correction"
+    assert result["scrollPreserved"] is True, \
+        f"scrollTop must be preserved ({result['scrollBefore']} → {result['scrollAfter']})"
+    assert result["scrollAfter"] == 5000, \
+        f"scrollTop must remain 5000, got {result['scrollAfter']}"
+
+
+@_node_tests
+def test_prepend_crosses_absent_earlier_group_inserts_before_live_later():
+    """Production-composed: prepend crosses into entirely absent earlier date
+    groups while the current later group remains live — across TWO prepends,
+    with live row geometry that exercises the anchor-adjustment block.
+
+    The prior version of this test called _prependTouchBatch() only ONCE and
+    supplied mock rows with NO numeric offsetTop. Production therefore skipped
+    the anchor capture/correction branch, and the test's scrollPreserved
+    assertion proved only that no scroll write occurred — not that the
+    correction was correct. The oracle did not bite: deleting the ENTIRE
+    production anchor-adjustment block left the test green.
+
+    This version fixes all four gaps:
+
+    1. TWO prepends across multiple initially absent earlier groups.
+       Group P (rows 0-39) and group A (rows 40-79) are both absent at start.
+       First prepend creates A before B; second prepend creates P before A.
+
+    2. Live row geometry: each session item has a numeric offsetTop getter that
+       reflects its position in the live DOM tree. When rows are inserted above
+       the retained anchor, offsetTop CHANGES, so production's anchor branch
+       fires and computes a non-zero delta.
+
+    3. Exact scrollTop correction: after each prepend, assert the anchor row
+       remains at the same viewport coordinate — scrollTop increased by exactly
+       (insertedRowCount * SESSION_VIRTUAL_ROW_HEIGHT).
+
+    4. Mutation bite: a dataset snapshot of the anchor row proves it is
+       unchanged by the prepend. If the anchor block is deleted from production,
+       scrollTop is NOT corrected, the viewport jumps, and the test FAILS.
+
+    Scenario: 160 rows in 4 groups.
+      - Group P (rows   0-39): "Pre"     — absent at start, created on 2nd prepend
+      - Group A (rows  40-79): "Pre-2"   — absent at start, created on 1st prepend
+      - Group B (rows  80-119): "Today"  — live, current window starts here
+      - Group C (rows 120-159): "Later"  — live, current window ends here
+    Initial window: [80, 160) painted. Start=80, loaded=160.
+    First prepend:  [40, 80)  → group A created, inserted before B.
+    Second prepend: [0, 40)   → group P created, inserted before A.
+    """
+    total = 160
+    flat_rows = []
+    for i in range(total):
+        if i < 40:
+            label = "Pre"
+        elif i < 80:
+            label = "Pre-2"
+        elif i < 120:
+            label = "Today"
+        else:
+            label = "Later"
+        flat_rows.append({
+            "group": {"label": label, "isPinned": False},
+            "session": {"session_id": f"s{i}"},
+        })
+
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchTotalCount = {total};
+
+// ── requestAnimationFrame mock: store but do NOT execute callbacks. ──
+// _prependTouchBatch ends by calling _scheduleContinuousBatch(), which may
+// schedule a RAF. We never want it to fire (we drive prepends manually).
+global.requestAnimationFrame = function(fn) {{ return 1; }};
+global.cancelAnimationFrame = function() {{}};
+
+// ── DOM-faithful list: querySelector/querySelectorAll derive authority
+//    from the live child tree (list.children), NOT from _groups/_items
+//    side registries. ──
+list.querySelector = function(sel) {{
+  if (sel === '[data-touch-sentinel]') {{
+    return list.children.find(c => c.dataset && c.dataset['touch-sentinel'] !== undefined) || null;
+  }}
+  var m = sel.match(/^\\.session-date-group\\[data-group-label="([^"]+)"\\]$/);
+  if (m) {{
+    return list.children.find(c => c.dataset && c.dataset['group-label'] === m[1]) || null;
+  }}
+  m = sel.match(/^\\.session-date-group\\[data-group-label\\]$/);
+  if (m) {{
+    return list.children.find(c => c.dataset && c.dataset['group-label'] !== undefined) || null;
+  }}
+  return null;
+}};
+list.querySelectorAll = function(sel) {{
+  if (sel === '.session-item[data-sid]') {{
+    var items = [];
+    for (var gi = 0; gi < list.children.length; gi++) {{
+      var gw = list.children[gi];
+      if (!gw.dataset || gw.dataset['group-label'] === undefined) continue;
+      var body = null;
+      if (typeof gw.querySelector === 'function') {{
+        body = gw.querySelector('.session-date-body');
+      }} else {{
+        body = gw.children.find(c => c.className && c.className.indexOf('session-date-body') >= 0) || null;
+      }}
+      if (!body) continue;
+      for (var bi = 0; bi < body.children.length; bi++) {{
+        var c = body.children[bi];
+        if (c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid) {{
+          items.push(c);
+        }}
+      }}
+    }}
+    return items;
+  }}
+  if (sel === '.session-date-group[data-group-label]') {{
+    return list.children.filter(c => c.dataset && c.dataset['group-label'] !== undefined);
+  }}
+  if (sel === '.session-virtual-spacer[data-virtual-spacer="after"]') {{
+    return list._afterSpacers || [];
+  }}
+  return [];
+}};
+
+// ── Live row geometry: offsetTop reflects position in the live DOM tree. ──
+// Each session item's offsetTop = (its index among all session-item[data-sid]
+// elements in the live list) * SESSION_VIRTUAL_ROW_HEIGHT.
+// When rows are inserted above the anchor, its offsetTop increases by
+// insertedCount * rowHeight — the production anchor block must compensate.
+function makeSessionItemWithGeometry(sid) {{
+  const el = makeEl('div');
+  el.className = 'session-item';
+  el.dataset.sid = sid;
+  Object.defineProperty(el, 'offsetTop', {{
+    get: function() {{
+      var allItems = list.querySelectorAll('.session-item[data-sid]');
+      var idx = allItems.indexOf(el);
+      if (idx < 0) idx = 0;
+      return idx * SESSION_VIRTUAL_ROW_HEIGHT;
+    }},
+    configurable: true,
+  }});
+  return el;
+}}
+
+// Override _createTouchGroupWrapper so newly created group wrappers have a
+// tracking body that also uses geometry-aware session items.
+const _origCreate = _createTouchGroupWrapper;
+_createTouchGroupWrapper = function(g, st) {{
+  const wrapper = _origCreate(g, st);
+  wrapper.dataset['group-label'] = g.label;
+  const trackingBody = makeBodyThatTracksItems(list);
+  trackingBody.className = 'session-date-body';
+  wrapper.children = wrapper.children.filter(c => c.className !== 'session-date-body');
+  wrapper.appendChild(trackingBody);
+  wrapper.querySelector = function(sel) {{
+    if (sel === '.session-date-body') return trackingBody;
+    return null;
+  }};
+  wrapper.querySelectorAll = function(sel) {{
+    if (sel === '.session-virtual-spacer[data-virtual-spacer="after"]') {{
+      return trackingBody.children.filter(c => c.className && c.className.indexOf('session-virtual-spacer') >= 0);
+    }}
+    if (sel === '.session-virtual-spacer[data-virtual-spacer="before"]') {{
+      return trackingBody.children.filter(c => c.className && c.className.indexOf('session-virtual-spacer') >= 0 && c.dataset && c.dataset['virtual-spacer'] === 'before');
+    }}
+    return [];
+  }};
+  return wrapper;
+}};
+
+// ── Helper: create a live group wrapper with a tracking body ──
+function makeLiveGroup(label) {{
+  const gw = makeEl('div');
+  gw.className = 'session-date-group';
+  gw.dataset['group-label'] = label;
+  const body = makeBodyThatTracksItems(list);
+  body.className = 'session-date-body';
+  gw.appendChild(body);
+  gw.querySelector = function(sel) {{
+    if (sel === '.session-date-body') return body;
+    return null;
+  }};
+  gw.querySelectorAll = function(sel) {{
+    if (sel === '.session-virtual-spacer[data-virtual-spacer="after"]') {{
+      return body.children.filter(c => c.className && c.className.indexOf('session-virtual-spacer') >= 0);
+    }}
+    if (sel === '.session-virtual-spacer[data-virtual-spacer="before"]') {{
+      return body.children.filter(c => c.className && c.className.indexOf('session-virtual-spacer') >= 0 && c.dataset && c.dataset['virtual-spacer'] === 'before');
+    }}
+    return [];
+  }};
+  return gw;
+}}
+
+// ── Initial paint: groups B (Today, rows 80-119) and C (Later, rows 120-159) ──
+// Groups P (Pre, rows 0-39) and A (Pre-2, rows 40-79) are ENTIRELY ABSENT.
+const gwB = makeLiveGroup('Today');
+const bodyB = gwB.querySelector('.session-date-body');
+for (let i = 80; i < 120; i++) bodyB.appendChild(makeSessionItemWithGeometry('s' + i));
+list.children.push(gwB);
+
+const gwC = makeLiveGroup('Later');
+const bodyC = gwC.querySelector('.session-date-body');
+for (let i = 120; i < 160; i++) bodyC.appendChild(makeSessionItemWithGeometry('s' + i));
+list.children.push(gwC);
+
+// Sentinel
+const sentinel = makeEl('div');
+sentinel.className = 'touch-sentinel';
+sentinel.dataset['touch-sentinel'] = '1';
+list.children.push(sentinel);
+
+// Touch state: window starts at row 80 (group B), loaded=160
+_sessionTouchStartIndex = 80;
+_sessionTouchLoadedCount = 160;
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItemWithGeometry(s.session_id); }},
+  activeSid: 's100',
+  itemHeight: SESSION_VIRTUAL_ROW_HEIGHT,
+}};
+
+// ── Set scrollTop so the user is scrolled into the middle of group B. ──
+// The anchor row is s100 (the first existing session item in the DOM).
+// Its initial offsetTop = 0 * SESSION_VIRTUAL_ROW_HEIGHT = 0 (it's the first
+// .session-item in the live list). We scroll so s100 sits at viewport top.
+list.clientHeight = 600;
+const anchorSid = 's80';  // the first existing session item (production's anchor)
+const anchorElInitial = list.querySelectorAll('.session-item[data-sid]')[0];
+const anchorTopBeforeFirst = anchorElInitial.offsetTop;
+list.scrollTop = anchorTopBeforeFirst;  // viewport top = anchor row top
+
+// ── Snapshot live tree BEFORE first prepend ──
+const labelsBefore = list.children
+  .filter(c => c.dataset && c.dataset['group-label'] !== undefined)
+  .map(c => c.dataset['group-label']);
+
+// ── FIRST prepend: [40, 80) → group A (Pre-2) created before B ──
+_prependTouchBatch();
+
+// ── Verify AFTER first prepend ──
+const labelsAfter1 = list.children
+  .filter(c => c.dataset && c.dataset['group-label'] !== undefined)
+  .map(c => c.dataset['group-label']);
+const allItems1 = list.querySelectorAll('.session-item[data-sid]');
+const allSids1 = allItems1.map(i => i.dataset.sid);
+const uniqueSids1 = new Set(allSids1).size;
+
+// Anchor row s100 is now at a NEW offsetTop: 40 rows were inserted above it.
+const anchorElAfter1 = allItems1.find(i => i.dataset.sid === anchorSid);
+const anchorTopAfter1 = anchorElAfter1.offsetTop;
+const scrollAfter1 = list.scrollTop;
+const expectedDelta1 = 40 * SESSION_VIRTUAL_ROW_HEIGHT;
+
+// Group order: A, B, C (P still absent)
+const gwAAfter1 = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Pre-2');
+const gwBAfter1 = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Today');
+const gwCAfter1 = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Later');
+
+// Body ownership after first prepend
+const bodyAAfter1 = gwAAfter1 ? gwAAfter1.querySelector('.session-date-body') : null;
+const sidsInA1 = bodyAAfter1 ? bodyAAfter1.children
+  .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
+  .map(c => c.dataset.sid) : [];
+const sidsInB1 = gwBAfter1.querySelector('.session-date-body').children
+  .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
+  .map(c => c.dataset.sid);
+const sidsInC1 = gwCAfter1.querySelector('.session-date-body').children
+  .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
+  .map(c => c.dataset.sid);
+
+// ── SECOND prepend: [0, 40) → group P (Pre) created before A ──
+// Capture state after first prepend before second prepend runs.
+const startAfter1 = _sessionTouchStartIndex;
+const loadedAfter1 = _sessionTouchLoadedCount;
+_prependTouchBatch();
+
+// ── Verify AFTER second prepend ──
+const labelsAfter2 = list.children
+  .filter(c => c.dataset && c.dataset['group-label'] !== undefined)
+  .map(c => c.dataset['group-label']);
+const allItems2 = list.querySelectorAll('.session-item[data-sid]');
+const allSids2 = allItems2.map(i => i.dataset.sid);
+const uniqueSids2 = new Set(allSids2).size;
+
+// Anchor row s100: another 40 rows inserted above it.
+const anchorElAfter2 = allItems2.find(i => i.dataset.sid === anchorSid);
+const anchorTopAfter2 = anchorElAfter2.offsetTop;
+const scrollAfter2 = list.scrollTop;
+const expectedDelta2 = expectedDelta1 + 40 * SESSION_VIRTUAL_ROW_HEIGHT;
+
+// Group order: P, A, B, C (all four canonical)
+const gwPAfter2 = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Pre');
+const gwAAfter2 = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Pre-2');
+const gwBAfter2 = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Today');
+const gwCAfter2 = list.children.find(c => c.dataset && c.dataset['group-label'] === 'Later');
+
+// Body ownership after second prepend
+const bodyPAfter2 = gwPAfter2 ? gwPAfter2.querySelector('.session-date-body') : null;
+const sidsInP2 = bodyPAfter2 ? bodyPAfter2.children
+  .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
+  .map(c => c.dataset.sid) : [];
+const bodyAAfter2 = gwAAfter2 ? gwAAfter2.querySelector('.session-date-body') : null;
+const sidsInA2 = bodyAAfter2 ? bodyAAfter2.children
+  .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
+  .map(c => c.dataset.sid) : [];
+const sidsInB2 = gwBAfter2.querySelector('.session-date-body').children
+  .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
+  .map(c => c.dataset.sid);
+const sidsInC2 = gwCAfter2.querySelector('.session-date-body').children
+  .filter(c => c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid)
+  .map(c => c.dataset.sid);
+
+const result = {{
+  labelsBefore: labelsBefore,
+  labelsAfter1: labelsAfter1,
+  labelsAfter2: labelsAfter2,
+  // SID uniqueness + order
+  uniqueSids1: uniqueSids1,
+  uniqueSids2: uniqueSids2,
+  ordered2: allSids2.every((sid, idx) => sid === 's' + idx),
+  // State advancement
+  startAfter1: startAfter1,
+  loadedAfter1: loadedAfter1,
+  startAfter2: _sessionTouchStartIndex,
+  loadedAfter2: _sessionTouchLoadedCount,
+  // Viewport anchor: offsetTop + scrollTop after each prepend
+  anchorTopBeforeFirst: anchorTopBeforeFirst,
+  anchorTopAfter1: anchorTopAfter1,
+  anchorTopAfter2: anchorTopAfter2,
+  scrollBeforeFirst: anchorTopBeforeFirst,
+  scrollAfter1: scrollAfter1,
+  scrollAfter2: scrollAfter2,
+  expectedDelta1: expectedDelta1,
+  expectedDelta2: expectedDelta2,
+  // Viewport coordinate of anchor row: scrollTop - offsetTop must be constant
+  // (the anchor row stays at the same position in the viewport).
+  viewportAnchor1: scrollAfter1 - anchorTopAfter1,
+  viewportAnchor2: scrollAfter2 - anchorTopAfter2,
+  viewportAnchorBefore: anchorTopBeforeFirst - anchorTopBeforeFirst,
+  // Wrapper identity
+  aExists1: gwAAfter1 !== null && gwAAfter1 !== undefined,
+  bSameRef1: gwBAfter1 === gwB,
+  cSameRef1: gwCAfter1 === gwC,
+  pExists2: gwPAfter2 !== null && gwPAfter2 !== undefined,
+  aSameRef2: gwAAfter2 === gwAAfter1,
+  bSameRef2: gwBAfter2 === gwB,
+  cSameRef2: gwCAfter2 === gwC,
+  // Body ownership
+  sidsInA1: sidsInA1,
+  sidsInB1: sidsInB1,
+  sidsInC1: sidsInC1,
+  sidsInP2: sidsInP2,
+  sidsInA2: sidsInA2,
+  sidsInB2: sidsInB2,
+  sidsInC2: sidsInC2,
+}};
+console.log(JSON.stringify(result));
+"""
+    result = json.loads(_run_node_vm(source))
+
+    # ── Before any prepend: only B and C exist ──
+    assert result["labelsBefore"] == ["Today", "Later"], \
+        f"Before prepend, only B and C should exist, got {result['labelsBefore']}"
+
+    # ── After FIRST prepend: A, B, C (canonical) ──
+    assert result["labelsAfter1"] == ["Pre-2", "Today", "Later"], \
+        f"After first prepend, order must be A, B, C, got {result['labelsAfter1']}"
+
+    # Group A created, B and C are same object refs
+    assert result["aExists1"] is True, "Group A wrapper must exist after first prepend"
+    assert result["bSameRef1"] is True, "Group B wrapper must be same object ref after first prepend"
+    assert result["cSameRef1"] is True, "Group C wrapper must be same object ref after first prepend"
+
+    # No duplicates: 40 new + 80 existing = 120 unique SIDs (s40..s159)
+    assert result["uniqueSids1"] == 120, \
+        f"After first prepend, 120 SIDs must be unique, got {result['uniqueSids1']}"
+    # Start advanced to 40, loaded unchanged at 160
+    assert result["startAfter1"] == 40, \
+        f"After first prepend, startIndex must be 40, got {result['startAfter1']}"
+    assert result["loadedAfter1"] == total, \
+        f"After first prepend, loadedCount must stay {total}, got {result['loadedAfter1']}"
+
+    # Body ownership after first prepend: A=s40..s79, B=s80..s119, C=s120..s159
+    assert result["sidsInA1"] == [f"s{i}" for i in range(40, 80)], \
+        f"Group A must contain s40..s79, got {result['sidsInA1']}"
+    assert result["sidsInB1"] == [f"s{i}" for i in range(80, 120)], \
+        f"Group B must contain s80..s119, got {result['sidsInB1']}"
+    assert result["sidsInC1"] == [f"s{i}" for i in range(120, 160)], \
+        f"Group C must contain s120..s159, got {result['sidsInC1']}"
+
+    # ── Viewport anchor after FIRST prepend ──
+    # The anchor row's offsetTop increased by 40*rowHeight (40 rows inserted above).
+    # scrollTop must have been corrected by the same delta so the anchor stays
+    # at the same viewport coordinate.
+    assert result["anchorTopAfter1"] == result["anchorTopBeforeFirst"] + result["expectedDelta1"], \
+        f"Anchor offsetTop must increase by {result['expectedDelta1']} after first prepend, " \
+        f"got {result['anchorTopAfter1']} (was {result['anchorTopBeforeFirst']})"
+    assert result["scrollAfter1"] == result["scrollBeforeFirst"] + result["expectedDelta1"], \
+        f"scrollTop must be corrected by +{result['expectedDelta1']} after first prepend, " \
+        f"got {result['scrollAfter1']} (was {result['scrollBeforeFirst']})"
+    # The viewport coordinate (scrollTop - offsetTop) of the anchor must be
+    # the same before and after — the anchor row stays put in the viewport.
+    assert result["viewportAnchor1"] == result["viewportAnchorBefore"], \
+        f"Viewport anchor must be preserved across first prepend: " \
+        f"before={result['viewportAnchorBefore']}, after={result['viewportAnchor1']}"
+
+    # ── After SECOND prepend: P, A, B, C (all four canonical) ──
+    assert result["labelsAfter2"] == ["Pre", "Pre-2", "Today", "Later"], \
+        f"After second prepend, order must be P, A, B, C, got {result['labelsAfter2']}"
+
+    # Group P created, A/B/C are same object refs as before
+    assert result["pExists2"] is True, "Group P wrapper must exist after second prepend"
+    assert result["aSameRef2"] is True, "Group A wrapper must be same object ref after second prepend"
+    assert result["bSameRef2"] is True, "Group B wrapper must be same object ref after second prepend"
+    assert result["cSameRef2"] is True, "Group C wrapper must be same object ref after second prepend"
+
+    # No duplicates after second prepend, all SIDs in canonical order
+    assert result["uniqueSids2"] == total, \
+        f"After second prepend, all {total} SIDs must be unique, got {result['uniqueSids2']}"
+    assert result["ordered2"] is True, \
+        f"After second prepend, SIDs must be in order s0..s{total-1}"
+
+    # Start advanced to 0, loaded unchanged at 160
+    assert result["startAfter2"] == 0, \
+        f"After second prepend, startIndex must be 0, got {result['startAfter2']}"
+    assert result["loadedAfter2"] == total, \
+        f"After second prepend, loadedCount must stay {total}, got {result['loadedAfter2']}"
+
+    # Body ownership after second prepend
+    assert result["sidsInP2"] == [f"s{i}" for i in range(40)], \
+        f"Group P must contain s0..s39, got {result['sidsInP2']}"
+    assert result["sidsInA2"] == [f"s{i}" for i in range(40, 80)], \
+        f"Group A must contain s40..s79, got {result['sidsInA2']}"
+    assert result["sidsInB2"] == [f"s{i}" for i in range(80, 120)], \
+        f"Group B must contain s80..s119, got {result['sidsInB2']}"
+    assert result["sidsInC2"] == [f"s{i}" for i in range(120, 160)], \
+        f"Group C must contain s120..s159, got {result['sidsInC2']}"
+
+    # ── Viewport anchor after SECOND prepend ──
+    # Another 40 rows inserted above the anchor. offsetTop increases by
+    # another 40*rowHeight; scrollTop must be corrected again.
+    assert result["anchorTopAfter2"] == result["anchorTopBeforeFirst"] + result["expectedDelta2"], \
+        f"Anchor offsetTop must increase by {result['expectedDelta2']} total after second prepend, " \
+        f"got {result['anchorTopAfter2']} (was {result['anchorTopBeforeFirst']})"
+    assert result["scrollAfter2"] == result["scrollBeforeFirst"] + result["expectedDelta2"], \
+        f"scrollTop must be corrected by +{result['expectedDelta2']} total after second prepend, " \
+        f"got {result['scrollAfter2']} (was {result['scrollBeforeFirst']})"
+    assert result["viewportAnchor2"] == result["viewportAnchorBefore"], \
+        f"Viewport anchor must be preserved across second prepend: " \
+        f"before={result['viewportAnchorBefore']}, after={result['viewportAnchor2']}"

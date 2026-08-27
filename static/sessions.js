@@ -5007,15 +5007,7 @@ function _openSessionActionMenu(session, anchorEl){
       ICONS.stop,
       async()=>{
         closeSessionActionMenu();
-        const result = await cancelSessionStream(session);
-        // Structured/tri-state cancellation status: when persistence_failed is
-        // true, cancelSessionStream already showed the incomplete-persistence
-        // warning toast.  Suppress both the generic success and generic
-        // failure toasts so the warning remains the final visible result
-        // (gate-certifier blocker #2: sidebar Stop overwrites persistence
-        // warning with success).
-        if(result && result.persistence_failed) return;
-        if(result && result.cancelled) showToast(t('stream_stopped'));
+        if(await cancelSessionStream(session)) showToast(t('stream_stopped'));
         else showToast(t('cancel_failed'),null,'error');
       }
     ));
@@ -5447,8 +5439,20 @@ function _correctActiveTouchAnchor(list, activeSid){
   const rowRect=row.getBoundingClientRect();
   const listRect=list.getBoundingClientRect();
   if(!rowRect||!listRect) return false;
-  const intersects=rowRect.bottom>listRect.top&&rowRect.top<listRect.bottom;
-  if(intersects) return false;
+  // Preserve scroll when the active row is FULLY contained in the list
+  // viewport. A partially clipped row (visible at the top or bottom edge but
+  // not fully visible) receives a nearest-edge correction — otherwise the
+  // user sees a half-row and cannot tell which session is active.
+  const fullyContained=rowRect.top>=listRect.top&&rowRect.bottom<=listRect.bottom;
+  if(fullyContained) return false;
+  // A row FULLY OUTSIDE the viewport must NOT be corrected. Background touch
+  // renders (title/viewed-state/SSE/poll updates) call this on every full
+  // render; correcting a fully-off-screen active row yanks the user back
+  // toward the active conversation when they may be browsing hundreds of rows
+  // away. Only viewport-INTERSECTING partially clipped rows get correction.
+  const fullyOutsideAbove=rowRect.bottom<=listRect.top;
+  const fullyOutsideBelow=rowRect.top>=listRect.bottom;
+  if(fullyOutsideAbove||fullyOutsideBelow) return false;
   const current=Math.max(0, Number(list.scrollTop)||0);
   const maxScroll=Math.max(0, (Number(list.scrollHeight)||0)-(Number(list.clientHeight)||0));
   let next=current;
@@ -5565,16 +5569,34 @@ function _touchLoadedBoundaryNearViewport(list, state, lookahead){
   const total=state.flatRows&&state.flatRows.length||0;
   const loaded=Math.min(total, Math.max(0, Number(_sessionTouchLoadedCount)||0));
   if(loaded>=total) return false;
-  const itemHeight=Math.max(1, Number(state.itemHeight)||SESSION_VIRTUAL_ROW_HEIGHT);
   const viewportHeight=Math.max(0, Number(list.clientHeight)||0);
   const scrollTop=Math.max(0, Number(list.scrollTop)||0);
   const margin=Math.max(0, Number(lookahead)||200);
-  // Trigger from the loaded-content boundary, not from the full virtual
-  // scrollHeight. The per-group spacers intentionally preserve the total
-  // scrollbar size; using scrollHeight therefore waits until the user is near
-  // the END of a 10K-row list before loading row 101. The loaded boundary is
-  // the first still-virtual row, so scrolling near it backfills before blank
-  // group bodies can sit in the viewport.
+  // Use live DOM geometry from the last rendered row's container-relative
+  // bottom, not a fixed loaded*rowHeight projection. Real compact one-line
+  // rows from the changed stylesheet are ~39px, not the 52px constant. The
+  // fixed projection understated the loaded boundary, producing multi-screen
+  // blank gaps (the helper returned false when zero rows were visible and
+  // calculated ~2,676px of additional blank spacer before its trigger).
+  // Fall back to projection only when getBoundingClientRect is unavailable
+  // (e.g. Node test harness without a layout engine).
+  const existingItems=list.querySelectorAll&&list.querySelectorAll('.session-item[data-sid]');
+  const lastRow=existingItems&&existingItems[existingItems.length-1];
+  if(lastRow&&typeof lastRow.getBoundingClientRect==='function'&&typeof list.getBoundingClientRect==='function'){
+    const rowRect=lastRow.getBoundingClientRect();
+    const listRect=list.getBoundingClientRect();
+    if(rowRect&&listRect){
+      // The loaded boundary is the bottom of the last rendered row, relative
+      // to the list container. The viewport bottom is listRect.height.
+      // Trigger when the loaded boundary is within `margin` of the viewport
+      // bottom (or already above it — rows scrolled past).
+      const loadedBottom=rowRect.bottom-listRect.top;
+      const viewportBottom=listRect.height;
+      return loadedBottom<=viewportBottom+margin;
+    }
+  }
+  // Projection fallback: use the stored itemHeight (or 52px default).
+  const itemHeight=Math.max(1, Number(state.itemHeight)||SESSION_VIRTUAL_ROW_HEIGHT);
   const loadedBoundary=loaded*itemHeight;
   return (loadedBoundary-scrollTop-viewportHeight)<=margin;
 }
@@ -5593,7 +5615,13 @@ function _touchStartBoundaryNearViewport(list, state, lookahead){
       // Use real container coordinates, not start*rowHeight projection: group
       // headers, controls, density, and wrapped titles can all shift the first
       // rendered row away from the projected virtual row boundary.
-      return (rowRect.top-listRect.top)<=margin;
+      // Two-sided bounded distance: the first row must be NEAR the top edge of
+      // the list viewport (within `margin` below it) to trigger an upward
+      // prepend. A row far ABOVE the viewport (large negative distance) must NOT
+      // trigger — otherwise the user deep-scrolling downward would drain the
+      // entire prefix via repeated prepends.
+      const distance=rowRect.top-listRect.top;
+      return distance<=margin && distance>=-(listRect.height||0);
     }
   }
   // The first rendered row lives after the before-spacer height. When the
@@ -5603,7 +5631,12 @@ function _touchStartBoundaryNearViewport(list, state, lookahead){
   const itemHeight=Math.max(1, Number(state.itemHeight)||SESSION_VIRTUAL_ROW_HEIGHT);
   const scrollTop=Math.max(0, Number(list.scrollTop)||0);
   const startBoundary=start*itemHeight;
-  return (scrollTop-startBoundary)<=margin;
+  const distance=scrollTop-startBoundary;
+  const viewportHeight=Math.max(0, Number(list.clientHeight)||0);
+  // Two-sided bound: true only when the viewport is near the start boundary
+  // (within `margin` above or below it). Far below (large positive distance)
+  // or far above (large negative) must not trigger.
+  return distance<=margin && distance>=-viewportHeight;
 }
 
 function _touchNextBatchDirection(list, state, lookahead){
@@ -5784,6 +5817,14 @@ function _appendTouchBatch(){
   // 60→100→140→… completion without requiring the user to leave/re-enter the
   // sentinel zone. The microtask is generation-guarded so a profile switch
   // or invalidation aborts it cleanly.
+  //
+  // CRITICAL: clear _touchBatchPending BEFORE scheduling the successor.
+  // _scheduleContinuousBatch() bumps _touchBatchToken to create a new owner.
+  // If pending is still true when the caller's finally runs, the token
+  // mismatch (caller's token < new owner's token) prevents the finally from
+  // clearing pending — the successor RAF then hits `if(_touchBatchPending)
+  // return` and exits, permanently sticking the list at the current count.
+  _touchBatchPending=false;
   _scheduleContinuousBatch();
 }
 
@@ -5844,26 +5885,127 @@ function _prependTouchBatch(){
     return;
   }
   const commitTargets=[];
+  const newWrappers=[];
   for(const label of groupOrder){
-    const wrapper=list.querySelector('.session-date-group[data-group-label="'+CSS.escape(label)+'"]');
-    if(!wrapper) return;
+    let wrapper=list.querySelector('.session-date-group[data-group-label="'+CSS.escape(label)+'"]');
+    let isNew=false;
+    if(!wrapper){
+      // Group doesn't exist in DOM yet — create it detached, same as the
+      // append path. The prepend path resolves a bounded deep-active window
+      // that may start at an offset (e.g. row 488 of 1000); earlier groups
+      // whose rows are all in [targetStart, oldStart) need new wrappers.
+      // Without this, the prepend silently returns and the user scrolling
+      // upward sees a permanent blank gap instead of canonical rows.
+      const rowForMeta=state.flatRows.find(r=>r&&r.group&&r.group.label===label);
+      const groupMeta=rowForMeta?rowForMeta.group:{label:label};
+      wrapper=_createTouchGroupWrapper(groupMeta, state);
+      isNew=true;
+      newWrappers.push(wrapper);
+    }
     const body=wrapper.querySelector('.session-date-body');
-    if(!body) return;
+    if(!body) return; // missing body — abort without advancing state
     const beforeSpacer=body.querySelector('.session-virtual-spacer[data-virtual-spacer="before"]');
-    commitTargets.push({body:body, beforeSpacer:beforeSpacer, label:label});
+    commitTargets.push({wrapper:wrapper, body:body, beforeSpacer:beforeSpacer, label:label, isNew:isNew});
+  }
+  // Phase 2: attach newly created wrappers to the live DOM in canonical order.
+  //
+  // The prepend interval is [targetStart, oldStart). commitTargets only
+  // contains groups whose rows fall inside that interval — it does NOT contain
+  // the already-rendered group at oldStart. When the prepend interval consists
+  // entirely of absent earlier groups (all isNew) and the current window
+  // begins in an already-live later group B, the old forward search through
+  // commitTargets found no non-new successor and fell through to the sentinel
+  // branch — which inserts AFTER B, producing live order B, A instead of the
+  // canonical A, B.
+  //
+  // Fix: derive the insertion position from the full canonical group order /
+  // live DOM. The canonical successor to every prepend-interval group is the
+  // group containing row oldStart (the first row of the current live window).
+  // If that group's wrapper already exists in the DOM, insert ALL new wrappers
+  // before it in canonical order. This handles the common boundary case where
+  // the prepend crosses into entirely absent earlier date groups while the
+  // current later group remains live.
+  // Find the first live (already-rendered) wrapper that is a canonical
+  // successor to every group in the prepend interval. Walk flatRows forward
+  // from oldStart to identify the label of the group at the window start,
+  // then look it up in the live DOM.
+  let liveSuccessor=null;
+  if(newWrappers.length>0){
+    const successorRow=state.flatRows[oldStart];
+    if(successorRow&&successorRow.group){
+      const successorLabel=successorRow.group.label;
+      // Only treat it as a successor if it is NOT itself in the prepend
+      // interval (i.e. its wrapper was not just created).
+      const inPrependInterval=commitTargets.some(function(t){return t.label===successorLabel;});
+      if(!inPrependInterval){
+        liveSuccessor=list.querySelector('.session-date-group[data-group-label="'+CSS.escape(successorLabel)+'"]');
+      }
+    }
+  }
+  for(let gi=0; gi<commitTargets.length; gi++){
+    const target=commitTargets[gi];
+    if(!target.isNew) continue;
+    let insertBeforeEl=null;
+    // First, try the forward search within commitTargets (handles the case
+    // where a mix of new and existing groups are in the prepend interval).
+    for(let gj=gi+1; gj<commitTargets.length; gj++){
+      if(!commitTargets[gj].isNew){
+        insertBeforeEl=commitTargets[gj].wrapper;
+        break;
+      }
+    }
+    // If no non-new successor within commitTargets, use the live successor
+    // derived from the full canonical group order (the group at oldStart).
+    if(!insertBeforeEl) insertBeforeEl=liveSuccessor;
+    if(!insertBeforeEl){
+      // No live successor at all (prepend reaches the very first group) —
+      // insert before the sentinel, or at the list start.
+      const sentinel=list.querySelector('[data-touch-sentinel]');
+      if(sentinel) list.insertBefore(target.wrapper, sentinel);
+      else list.appendChild(target.wrapper);
+    }else{
+      list.insertBefore(target.wrapper, insertBeforeEl);
+    }
   }
   // Attach in canonical increasing row order. In each group, rows before the
   // current window belong immediately after the before-spacer (or at body start
   // if no spacer remains), before any already-rendered session rows.
+  //
+  // Anchor preservation: with overflow-anchor:none, swapping a before-spacer
+  // for real rows shifts the content above the viewport without the browser
+  // adjusting scrollTop — the user's visible rows jump. Capture the first
+  // existing session row's offsetTop before commit and adjust scrollTop by
+  // the measured delta after commit so the user's viewport stays anchored.
+  let anchorEl=null, anchorTopBefore=0;
+  const firstExisting=existingItems[0];
+  if(firstExisting&&typeof firstExisting.offsetTop==='number'){
+    anchorEl=firstExisting;
+    anchorTopBefore=firstExisting.offsetTop;
+  }
   for(const target of commitTargets){
     const firstSession=target.body.querySelector('.session-item[data-sid]');
     const insertBeforeEl=firstSession||target.body.querySelector('.session-virtual-spacer[data-virtual-spacer="after"]')||null;
     if(insertBeforeEl) target.body.insertBefore(fragmentsByGroup[target.label], insertBeforeEl);
     else target.body.appendChild(fragmentsByGroup[target.label]);
   }
+  // Adjust scrollTop to preserve the user's viewport anchor after the prepend
+  // shrank the before-spacer and inserted real rows above the viewport.
+  if(anchorEl&&typeof anchorEl.offsetTop==='number'){
+    const anchorTopAfter=anchorEl.offsetTop;
+    const delta=anchorTopAfter-anchorTopBefore;
+    if(delta!==0){
+      const currentScroll=Math.max(0, Number(list.scrollTop)||0);
+      list.scrollTop=Math.max(0, currentScroll+delta);
+    }
+  }
   _sessionTouchStartIndex=targetStart;
   _updateTouchGroupSpacers(list, state, targetStart, oldLoaded);
   _updateTouchSentinel(list, total, targetStart, oldLoaded);
+  // Clear pending BEFORE scheduling the successor (same fix as append —
+  // _scheduleContinuousBatch bumps _touchBatchToken, so if pending is still
+  // true when the caller's finally runs, the token mismatch prevents cleanup
+  // and the list sticks permanently).
+  _touchBatchPending=false;
   _scheduleContinuousBatch();
 }
 
@@ -5927,7 +6069,7 @@ function _updateTouchSentinel(list, total, startIndex, endIndex){
     if(_touchSentinelObserver) _touchSentinelObserver.unobserve(sentinel);
   }else{
     sentinel.style.display='';
-    sentinel.textContent='Loading more\u2026';
+    sentinel.textContent=t('loading_more');
     if(_touchSentinelObserver) _touchSentinelObserver.observe(sentinel);
   }
 }
@@ -6065,7 +6207,6 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
     sentinel=document.createElement('div');
     sentinel.setAttribute('data-touch-sentinel','');
     sentinel.className='session-touch-sentinel';
-    sentinel.style.cssText='padding:12px 8px;text-align:center;color:var(--muted);font-size:12px;';
     list.appendChild(sentinel);
   }
   const interval=_touchIntervalState(total, _sessionTouchStartIndex, _sessionTouchLoadedCount);
@@ -6073,7 +6214,7 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
     sentinel.style.display='none';
   }else{
     sentinel.style.display='';
-    sentinel.textContent='Loading more\u2026';
+    sentinel.textContent=t('loading_more');
   }
   _ensureTouchSentinelObserver(list);
   if(!interval.complete&&_touchSentinelObserver) _touchSentinelObserver.observe(sentinel);
