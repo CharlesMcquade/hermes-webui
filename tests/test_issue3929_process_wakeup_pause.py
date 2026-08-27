@@ -8,6 +8,7 @@ import queue
 import hashlib
 import sys
 import threading
+import time
 import types
 from unittest import mock
 
@@ -2454,6 +2455,14 @@ def test_streaming_no_pause_post_save_cancel_after_success_commit_emits_done(tmp
     ]
     queued_events = [item[0] for item in list(stream_queue.queue)]
     assert "done" in queued_events
+    # The PR's unresolved-title recovery picks this session's latest completed
+    # exchange ("hello" / "Stream reply"), so the background title thread now
+    # runs and owns stream_end (emitted in its finally block, after the aux
+    # title attempt). Wait for it instead of sampling the queue synchronously.
+    deadline = time.monotonic() + 10.0
+    while "stream_end" not in queued_events and time.monotonic() < deadline:
+        threading.Event().wait(0.05)
+        queued_events = [item[0] for item in list(stream_queue.queue)]
     assert "stream_end" in queued_events
     assert "cancel" not in queued_events
 
