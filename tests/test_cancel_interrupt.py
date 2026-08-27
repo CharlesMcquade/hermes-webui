@@ -2636,6 +2636,206 @@ class TestCancelInterrupt:
         for iteration in range(3):
             _run_iteration(iteration)
 
+    def test_normal_settlement_save_failure_leaves_single_dead_letter_owner(self):
+        """Certifier re-gate at df67b51248cf, required regression 1.
+
+        Production schedule: A is durable, B is accepted during A's final
+        save, and ONLY B's follow-up settlement save fails.  The settle loop
+        transfers exact B to the bounded dead-letter.  Production-order
+        worker teardown must then leave B owned SOLELY by the dead-letter —
+        the live map must not retain a second copy of the same token — and
+        every other lifecycle registry must return to baseline WITHOUT any
+        fixture cleanup.
+        """
+        from unittest.mock import Mock
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_WORKER_SAVED,
+            _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_TERMINAL,
+            _STREAM_NOTICE_GENERATION, _STREAM_SETTLEMENT_PARTICIPANTS,
+            _STREAM_SETTLEMENT_COMPLETED, _STREAM_FALLBACK_DEAD_LETTER,
+            _publish_fallback_notice, _current_notice_generation,
+            _retire_worker_cancelled_state, _turn_final_save_commit,
+            _clean_fallback_notice,
+        )
+
+        stream_id = "normal_settle_save_fail"
+        session_id = "sess_normal_settle_save_fail"
+        STREAMS[stream_id] = {"session_id": session_id}
+
+        notice_a = {"message": "notice A", "to_model": "mA", "to_provider": "pA"}
+        notice_b = {"message": "notice B", "to_model": "mB", "to_provider": "pB"}
+        assert _publish_fallback_notice(stream_id, dict(notice_a), require_live_stream=True) is True
+        gen_a = _current_notice_generation(stream_id)
+        assert gen_a == 1
+
+        ws = Mock()
+        ws.session_id = session_id
+        ws.profile = None
+        ws.active_stream_id = stream_id
+        ws.messages = [{"role": "assistant", "content": "a"}]
+        ws.messages[-1]['_fallbackNotice'] = _clean_fallback_notice(notice_a)
+
+        save_calls = {'n': 0}
+
+        def _save():
+            save_calls['n'] += 1
+            if save_calls['n'] == 1:
+                # B published through the production gate while A's save is
+                # in flight — identical schedule to the passing success-path
+                # oracle test_normal_fallback_turn_settles_latest_generation_before_teardown.
+                assert _publish_fallback_notice(
+                    stream_id, dict(notice_b), require_live_stream=True,
+                ) is True
+                assert _current_notice_generation(stream_id) == 2
+            else:
+                raise OSError("simulated disk failure on B's follow-up save")
+
+        ws.save = Mock(side_effect=_save)
+
+        with _turn_final_save_commit(
+            stream_id, ws,
+            committed_generation=gen_a,
+            committed_notice=_clean_fallback_notice(notice_a),
+            committed_row=ws.messages[-1],
+        ):
+            try:
+                ws.save()
+            except OSError:
+                pass
+
+        # Settlement transferred the uncommitted B to the bounded dead-letter.
+        dl_entry = _STREAM_FALLBACK_DEAD_LETTER.get(stream_id)
+        assert dl_entry is not None, "failed save did not transfer B to dead-letter"
+        assert dl_entry['notice'] == _clean_fallback_notice(notice_b)
+        assert dl_entry['generation'] == 2
+
+        # Production-order worker teardown (no fixture cleanup before it).
+        STREAMS.pop(stream_id, None)
+        _retire_worker_cancelled_state(stream_id)
+
+        # B must now be owned SOLELY by the dead-letter — no live duplicate.
+        assert stream_id not in _STREAM_FALLBACK_NOTICES, (
+            "live map still owns B while dead-letter owns the exact same "
+            "token: duplicate/contradictory ownership"
+        )
+        assert _STREAM_FALLBACK_DEAD_LETTER.get(stream_id) is dl_entry, (
+            "dead-letter owner must be preserved for retry/deadline ownership"
+        )
+        assert stream_id not in _STREAM_WORKER_SAVED
+        assert stream_id not in _STREAM_CANCEL_CLAIMED
+        assert stream_id not in _STREAM_SETTLEMENT_PARTICIPANTS
+        assert stream_id not in _STREAM_SETTLEMENT_COMPLETED
+        assert stream_id not in _STREAM_NOTICE_GENERATION
+        # The terminal fence was already installed by the failed settle loop;
+        # teardown retires it as the last live participant.
+        assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
+        assert stream_id in _STREAM_FALLBACK_DEAD_LETTER
+
+        _STREAM_FALLBACK_DEAD_LETTER.pop(stream_id, None)
+
+    def test_normal_settlement_exhaustion_leaves_single_dead_letter_owner(self):
+        """Certifier re-gate at df67b51248cf, required regression 2.
+
+        Same normal-worker final-save schedule, but save #2 publishes a newer
+        generation on EVERY call so the bounded settle loop exhausts.
+        Exhaustion transfers the live token to the dead-letter; teardown must
+        retire the live map duplicate (dead-letter owns the current
+        generation) while preserving the dead-letter, and every other
+        lifecycle registry must return to baseline WITHOUT fixture cleanup.
+        """
+        from unittest.mock import Mock
+        from api.streaming import (
+            _STREAM_FALLBACK_NOTICES, _STREAM_WORKER_SAVED,
+            _STREAM_CANCEL_CLAIMED, _STREAM_SETTLEMENT_TERMINAL,
+            _STREAM_NOTICE_GENERATION, _STREAM_SETTLEMENT_PARTICIPANTS,
+            _STREAM_SETTLEMENT_COMPLETED, _STREAM_FALLBACK_DEAD_LETTER,
+            _publish_fallback_notice, _current_notice_generation,
+            _retire_worker_cancelled_state, _turn_final_save_commit,
+            _clean_fallback_notice, _SETTLEMENT_MAX_ITERS_GLOBAL,
+        )
+
+        stream_id = "normal_settle_exhaust"
+        session_id = "sess_normal_settle_exhaust"
+        STREAMS[stream_id] = {"session_id": session_id}
+
+        notice_a = {"message": "notice A", "to_model": "mA", "to_provider": "pA"}
+        assert _publish_fallback_notice(stream_id, dict(notice_a), require_live_stream=True) is True
+        gen_a = _current_notice_generation(stream_id)
+        assert gen_a == 1
+
+        ws = Mock()
+        ws.session_id = session_id
+        ws.profile = None
+        ws.active_stream_id = stream_id
+        ws.messages = [{"role": "assistant", "content": "a"}]
+        ws.messages[-1]['_fallbackNotice'] = _clean_fallback_notice(notice_a)
+
+        save_calls = {'n': 0}
+
+        def _save():
+            save_calls['n'] += 1
+            if save_calls['n'] == 1:
+                # B published through the production gate while A's save is
+                # in flight — identical schedule to the passing success-path
+                # oracle test_normal_fallback_turn_settles_latest_generation_before_teardown.
+                assert _publish_fallback_notice(
+                    stream_id, dict(notice_b), require_live_stream=True,
+                ) is True
+                assert _current_notice_generation(stream_id) == 2
+            else:
+                # Pathological producer: publish a newer generation on every
+                # follow-up save so the bounded loop never converges.  The
+                # terminal fence is only installed on the no-newer-generation
+                # exit, so the gate stays open during the loop — same shape
+                # as the cancel-side exhaustion oracle.
+                _publish_fallback_notice(stream_id, {
+                    "message": f"notice gen{save_calls['n'] + 2}",
+                    "to_model": "mX", "to_provider": "pX",
+                }, require_live_stream=True)
+
+        notice_b = {"message": "notice B", "to_model": "mB", "to_provider": "pB"}
+        ws.save = Mock(side_effect=_save)
+
+        with _turn_final_save_commit(
+            stream_id, ws,
+            committed_generation=gen_a,
+            committed_notice=_clean_fallback_notice(notice_a),
+            committed_row=ws.messages[-1],
+        ):
+            ws.save()
+
+        assert save_calls['n'] >= _SETTLEMENT_MAX_ITERS_GLOBAL, (
+            f"settle loop ran {save_calls['n']} times, expected >= the bounded "
+            f"{_SETTLEMENT_MAX_ITERS_GLOBAL}"
+        )
+        dl_entry = _STREAM_FALLBACK_DEAD_LETTER.get(stream_id)
+        assert dl_entry is not None, "exhaustion did not transfer the live token to dead-letter"
+        # The dead-letter owns the LATEST published token at exhaustion time.
+        assert dl_entry['notice']['to_model'] == 'mX'
+        assert dl_entry['notice']['message'].startswith('notice gen')
+        latest_gen = _current_notice_generation(stream_id)
+        assert dl_entry['generation'] == latest_gen
+
+        # Production-order worker teardown (no fixture cleanup before it).
+        STREAMS.pop(stream_id, None)
+        _retire_worker_cancelled_state(stream_id)
+
+        assert stream_id not in _STREAM_FALLBACK_NOTICES, (
+            "live map still owns the current generation while dead-letter "
+            "owns the exact same token: duplicate ownership"
+        )
+        assert _STREAM_FALLBACK_DEAD_LETTER.get(stream_id) is dl_entry, (
+            "dead-letter owner must be preserved for retry/deadline ownership"
+        )
+        assert stream_id not in _STREAM_WORKER_SAVED
+        assert stream_id not in _STREAM_CANCEL_CLAIMED
+        assert stream_id not in _STREAM_SETTLEMENT_PARTICIPANTS
+        assert stream_id not in _STREAM_SETTLEMENT_COMPLETED
+        assert stream_id not in _STREAM_SETTLEMENT_TERMINAL
+        assert stream_id not in _STREAM_NOTICE_GENERATION
+
+        _STREAM_FALLBACK_DEAD_LETTER.pop(stream_id, None)
+
     def test_no_notice_first_save_atomic_fence_install_blocks_or_persists_B(self):
         """Barrier-controlled regression for gate-certifier blocker #1:
         non-atomic no-notice recheck + terminal-fence install.
