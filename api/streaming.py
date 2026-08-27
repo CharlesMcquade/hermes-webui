@@ -4707,9 +4707,12 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
         # Read the canonical in-memory session while deciding whether this
         # automatic pass may run. A manual rename can race the background LLM
         # request, so the later write path rebinds under the same lock too.
+        # get_session() itself acquires the global session LOCK in its cache
+        # resolver, so it must run OUTSIDE the explicit critical section
+        # (plain non-reentrant threading.Lock); rebind under LOCK after it.
         try:
+            s = get_session(session_id)
             with LOCK:
-                s = get_session(session_id)
                 cached_session = SESSIONS.get(session_id)
                 if cached_session is not None and getattr(cached_session, 'session_id', None) == session_id:
                     s = cached_session
