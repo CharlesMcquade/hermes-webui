@@ -579,6 +579,18 @@ def test_fallback_lifecycle_message_predicate_matches_agent_emitters():
         "warn",
         "Rate limited — switching to fallback provider...",
     )
+    # chat_completion_helpers emits "⚠️ Model fallback: <old> via <prov>
+    # unavailable (<reason>); using <new> via <prov>." on live fallbacks —
+    # captured verbatim from a dead-provider probe of the real agent.
+    assert _is_fallback_lifecycle_message(
+        "warn",
+        "⚠️ Model fallback: dead-model-test via custom:vllm-dead-test unavailable "
+        "(provider overloaded); using gpt-5.6-sol via copilot.",
+    )
+    assert _is_fallback_lifecycle_message(
+        "lifecycle",
+        "⚠️ Model fallback: a via b unavailable (x); using c via d.",
+    )
     # warn kind is still phrase-gated: unrelated degraded-path warnings
     # (auxiliary failures, compression blocks) must not surface as fallbacks.
     assert not _is_fallback_lifecycle_message(

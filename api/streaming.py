@@ -670,6 +670,10 @@ def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
     # one-shot switch notice to _emit_warning → status_callback("warn", ...).
     # Accept both kinds so a successful provider fallback still surfaces; the
     # phrase gate below keeps unrelated degraded-path warnings filtered out.
+    # The chat_completion_helpers notice text is
+    # "⚠️ Model fallback: <model> via <provider> unavailable (<reason>);
+    # using <model> via <provider>." — match its "model fallback" shape too
+    # (verified via live dead-provider probe; the earlier phrase list missed it).
     return (
         k in ('lifecycle', 'warn')
         and (
@@ -678,6 +682,7 @@ def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
             or 'falling back' in m
             or 'fallback activated' in m
             or 'trying fallback' in m
+            or 'model fallback:' in m
         )
     )
 
