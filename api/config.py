@@ -9635,6 +9635,7 @@ _SETTINGS_DEFAULTS = {
     "show_busy_placeholder_hint": False,  # opt-in busy composer placeholder hint
     "hide_empty_state_suggestions": False,  # hide the default new-chat suggestion buttons
     "hide_empty_state_panel": False,  # hide the complete new-chat welcome panel
+    "show_fallback_notices": True,  # show persistent inline fallback notices in the chat stream; togglable via settings
     "new_chat_on_workspace_switch": False,  # #5473 opt-in: switching to a DIFFERENT workspace starts a new chat (leaving the current conversation on its original workspace) instead of mutating the current session's workspace in place. Default OFF preserves the shipped in-place-switch behavior.
     "virtualize_transcript": True,  # Virtualize long (>80 msg) transcripts for smoother scrolling. Default ON (#4346 Phase B resolved the scroll-up flicker root cause). Users can opt out via Settings. The #4343 force-off migration has been retired — existing users who explicitly disabled it keep their stored False; new users default to True.
     "virtualize_transcript_optin": False,  # Legacy #4343 migration marker — retained for backward compatibility but no longer enforced. Was used to distinguish explicit opt-ins from stale pre-flip True values; the force-off migration in load_settings has been removed.
@@ -10031,6 +10032,7 @@ _SETTINGS_BOOL_KEYS = {
     "hide_composer_status",
     "hide_composer_context",
     "hide_composer_bg_badge",
+    "show_fallback_notices",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")
