@@ -604,5 +604,143 @@ class TestAuxTitleStatusDiagnostics(unittest.TestCase):
         mock_aux_title.assert_not_called()
 
 
+class TestEligibilitySnapshotLockComposition(unittest.TestCase):
+    """The initial eligibility snapshot must not call get_session() while
+    holding the global session LOCK.
+
+    LOCK is a plain non-reentrant threading.Lock and the production
+    get_session() resolver acquires it internally, so nesting the two
+    deadlocks the background title thread on every real call. These tests
+    run the update on a worker thread with a bounded wait so a regression
+    fails the test instead of hanging the suite.
+    """
+
+    TIMEOUT = 15
+
+    def _run_update_in_thread(self, update_fn, **kwargs):
+        done = threading.Event()
+        error = []
+
+        def run():
+            try:
+                update_fn(**kwargs)
+            except BaseException as exc:  # surfaced on the main thread below
+                error.append(exc)
+            finally:
+                done.set()
+
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        completed = done.wait(timeout=self.TIMEOUT)
+        worker.join(timeout=1)
+        return completed, error
+
+
+    @patch('api.streaming._generate_llm_session_title_via_aux')
+    @patch('api.streaming._aux_title_configured', return_value=True)
+    @patch('api.streaming.SESSIONS', {})
+    @patch('api.streaming.LOCK', threading.Lock())
+    def test_title_thread_survives_loader_that_acquires_the_session_lock(
+        self, mock_configured, mock_aux_title,
+    ):
+        """A loader mirroring production get_session() (which acquires the
+        global session LOCK) must not deadlock the eligibility snapshot."""
+        import api.streaming as streaming_mod
+        from api.streaming import _run_background_title_update
+
+        user_text = 'Explain the nested lock hazard.'
+        assistant_text = 'The resolver re-enters the same lock.'
+        s, provisional = _make_provisional_session(user_text, assistant_text)
+        session_lock = streaming_mod.LOCK  # the patched non-reentrant lock
+
+        def loader_acquires_session_lock(session_id):
+            # Mirror the production resolver: acquire the same global
+            # session LOCK before returning the canonical session.
+            with session_lock:
+                return s
+
+        mock_aux_title.return_value = ('Nested Lock Explained', 'llm_aux', 'Nested Lock Explained')
+
+        events = []
+        with patch.object(streaming_mod, 'get_session', side_effect=loader_acquires_session_lock):
+            completed, error = self._run_update_in_thread(
+                _run_background_title_update,
+                session_id=s.session_id,
+                user_text=user_text,
+                assistant_text=assistant_text,
+                placeholder_title=provisional,
+                put_event=lambda event_type, data: events.append((event_type, data)),
+                agent=None,
+            )
+
+        self.assertTrue(
+            completed,
+            'background title update deadlocked: eligibility snapshot held the '
+            'session LOCK while get_session() re-acquired it',
+        )
+        self.assertFalse(error, f'worker raised: {error!r}')
+        title_events = [d for e, d in events if e == 'title']
+        self.assertEqual([d['title'] for d in title_events], ['Nested Lock Explained'])
+        self.assertEqual(s.title, 'Nested Lock Explained')
+
+
+    def test_real_cached_session_resolver_reaches_eligibility_snapshot(self):
+        """End-to-end with the real get_session() resolver: a cached session
+        must resolve (and rebind under LOCK) without deadlocking, and the
+        generated title must be persisted."""
+        import api.models as models_mod
+        import api.streaming as streaming_mod
+        from api.streaming import _run_background_title_update
+
+        user_text = 'Compose a limerick about race conditions.'
+        assistant_text = 'A thread grabbed a lock it would request again...'
+        s, provisional = _make_provisional_session(user_text, assistant_text)
+        # Real Session objects carry these; set them so the resolver's
+        # disk-lag/scene fast paths see plain values instead of mocks.
+        s.active_stream_id = None
+        s.pending_user_message = None
+        s.anchor_activity_scenes = {}
+        s.manual_title = False
+
+        shared_lock = threading.Lock()
+        from collections import OrderedDict
+        # OrderedDict: the resolver's LRU promote path calls move_to_end().
+        real_cache = OrderedDict({s.session_id: s})
+        events = []
+
+        with \
+            patch.object(streaming_mod, 'LOCK', shared_lock), \
+            patch.object(models_mod, 'LOCK', shared_lock), \
+            patch.object(models_mod, 'SESSIONS', real_cache), \
+            patch.object(streaming_mod, 'SESSIONS', {}), \
+            patch.object(streaming_mod, '_aux_title_configured', return_value=True), \
+            patch.object(
+                streaming_mod,
+                '_generate_llm_session_title_via_aux',
+                return_value=('Limerick About Races', 'llm_aux', 'Limerick About Races'),
+            ):
+            completed, error = self._run_update_in_thread(
+                _run_background_title_update,
+                session_id=s.session_id,
+                user_text=user_text,
+                assistant_text=assistant_text,
+                placeholder_title=provisional,
+                put_event=lambda event_type, data: events.append((event_type, data)),
+                agent=None,
+            )
+
+        self.assertTrue(
+            completed,
+            'background title update deadlocked through the real session resolver',
+        )
+        self.assertFalse(error, f'worker raised: {error!r}')
+        self.assertEqual(s.title, 'Limerick About Races')
+        self.assertTrue(s.llm_title_generated)
+        s.save.assert_called()
+        title_events = [d for e, d in events if e == 'title']
+        self.assertEqual([d['title'] for d in title_events], ['Limerick About Races'])
+
+
+
 if __name__ == '__main__':
     unittest.main()
