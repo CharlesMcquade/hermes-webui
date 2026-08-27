@@ -664,8 +664,14 @@ def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
     """Return True if an agent lifecycle status should surface as a fallback warning."""
     k = str(kind or '').strip().lower()
     m = str(message or '').strip().lower()
+    # Two agent emitters carry fallback notices: conversation_loop uses
+    # status_callback("lifecycle", ...) for retry/switch chatter, while the
+    # provider-fallback activation path (chat_completion_helpers) defers its
+    # one-shot switch notice to _emit_warning → status_callback("warn", ...).
+    # Accept both kinds so a successful provider fallback still surfaces; the
+    # phrase gate below keeps unrelated degraded-path warnings filtered out.
     return (
-        k == 'lifecycle'
+        k in ('lifecycle', 'warn')
         and (
             'rate limited' in m
             or 'switching to fallback' in m
