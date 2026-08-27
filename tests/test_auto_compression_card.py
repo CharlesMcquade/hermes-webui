@@ -567,6 +567,24 @@ def test_fallback_lifecycle_message_predicate_matches_agent_emitters():
         "tool",
         "Rate limited — switching to fallback provider...",
     )
+    # Provider fallback activation (chat_completion_helpers) surfaces through
+    # _emit_warning → status_callback("warn", ...), not ("lifecycle", ...).
+    # The matcher must accept the warn kind for fallback-phrased texts or the
+    # successful-fallback notice is silently dropped by the WebUI bridge.
+    assert _is_fallback_lifecycle_message(
+        "warn",
+        "Fallback activated: GLM-5.3-Flash-512K → gpt-5.6-sol (copilot)",
+    )
+    assert _is_fallback_lifecycle_message(
+        "warn",
+        "Rate limited — switching to fallback provider...",
+    )
+    # warn kind is still phrase-gated: unrelated degraded-path warnings
+    # (auxiliary failures, compression blocks) must not surface as fallbacks.
+    assert not _is_fallback_lifecycle_message(
+        "warn",
+        "Auxiliary approval failed after 2 attempts",
+    )
     assert not _is_fallback_lifecycle_message(
         "lifecycle",
         "Compressing context",
