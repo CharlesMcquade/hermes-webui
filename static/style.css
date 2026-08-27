@@ -2727,7 +2727,9 @@
   .composer-content-width-btn[data-content-width-mode="wide"] .content-width-icon-line,.composer-content-width-btn[data-content-width-mode="full"] .content-width-icon-line{transform:scaleX(.86);}
   .content-width-icon-boundary{display:none;}
   .composer-content-width-btn[data-content-width-mode="full"] .content-width-icon-boundary{display:block;}
-  .composer-content-width-popup{display:none;position:absolute;right:0;bottom:calc(100% + 8px);align-items:stretch;gap:4px;padding:5px;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -8px 28px rgba(0,0,0,.28);z-index:220;}
+  /* The popup lives inside the horizontally scrollable left control strip. A
+     fixed layer prevents that strip's overflow-y:hidden from clipping the menu. */
+  .composer-content-width-popup{display:none;position:fixed;left:auto;top:auto;right:auto;bottom:auto;align-items:stretch;gap:4px;padding:5px;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -8px 28px rgba(0,0,0,.28);z-index:220;}
   .composer-content-width-popup:not([hidden]){display:flex;}
   .composer-content-width-popup button{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;width:58px;height:52px;padding:4px;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-size:10px;cursor:pointer;}
   .composer-content-width-popup button:hover{background:var(--hover-bg);color:var(--text);}
