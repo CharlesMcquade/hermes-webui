@@ -1592,9 +1592,28 @@ def _retire_worker_cancelled_state_locked(stream_id: str) -> None:
         # a completed-worker tombstone). Failed persistence has already moved
         # the exact token to the bounded dead-letter owner; the live map is no
         # longer an additional owner in that case.
-        if _dl_entry is not None and not _worker_durably_saved:
+        # Single-owner invariant: when the bounded dead-letter owns the EXACT
+        # current live generation (a failed/exhausted normal-settlement loop
+        # transferred B there), the live map must stop being a second owner of
+        # the same token.  Retire B from the map (and its generation token)
+        # while PRESERVING the dead-letter for retry/deadline ownership — even
+        # when an older generation A was durably saved.  Conversely, a
+        # dead-letter for an OLDER generation must not retire the live map or
+        # the counter that still tracks B's publication.
+        _dl_owns_live_generation = _dead_letter_matches_generation(
+            _dl_entry, _current_notice_generation(stream_id),
+        )
+        if (_dl_entry is not None and _dl_owns_live_generation
+                and not _fb_entry.get('_cancel_claimed')
+                and stream_id not in _STREAM_CANCEL_CLAIMED):
             _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
-        if _fb_entry is None or _notice_retired or _dl_entry is not None:
+            _notice_retired = True
+        elif _dl_entry is not None and not _worker_durably_saved:
+            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+        if _fb_entry is None or _notice_retired or (
+            _dl_entry is not None
+            and (_dl_owns_live_generation or not _worker_durably_saved)
+        ):
             _STREAM_NOTICE_GENERATION.pop(stream_id, None)
         _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
         _expire_dead_letter_if_due_locked(stream_id)
