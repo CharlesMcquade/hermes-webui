@@ -101,6 +101,7 @@ def test_stream_writeback_diagnostics_cover_final_writeback_stages():
             r'                        stream_id, s,\n'
             r'                        committed_generation=_commit_gen,\n'
             r'                        committed_notice=_commit_notice,\n'
+            r'                        committed_row=_commit_row,\n'
             r'                    \):\n'
             r'                        s\.save\(\)',
             src,
