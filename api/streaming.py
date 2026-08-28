@@ -4674,12 +4674,21 @@ def _looks_invalid_generated_title(text: str) -> bool:
         return True
     return bool(
         re.search(r'<think>|<\|channel\|>thought|<\|turn\|>thinking', s, flags=re.IGNORECASE)
-        or re.search(r'^\s*(the|ther)\s+user\s+', s, flags=re.IGNORECASE)
+        or re.search(r'^\s*(?:the|ther)\s+user(?:\s|\b)', s, flags=re.IGNORECASE)
+        or re.search(r"^\s*the\s+user(?:'s|s)?\b", s, flags=re.IGNORECASE)
         or re.search(r'^\s*user\s+\w+\s+', s, flags=re.IGNORECASE)
-        or re.search(r'\b(they|user)\s+want(s)?\s+me\s+to\b', s, flags=re.IGNORECASE)
-        or re.search(r'^\s*(i|we)\s+(should|need to|will|can)\b', s, flags=re.IGNORECASE)
+        or re.search(r"\b(?:they|user)\s+want(?:s)?\s+me\s+to\b", s, flags=re.IGNORECASE)
+        or re.search(r"^\s*(?:i|we)\s+(?:should|need(?:\s+to)?|will|can|am|'m)\b", s, flags=re.IGNORECASE)
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
+        or re.search(r'^\s*good\s+title\s+options?\s*:', s, flags=re.IGNORECASE)
+        or (
+            # Multi-option replies ("A", "B", or C) — a title is never a list of
+            # quoted alternatives, so treat that shape as a leak (yesterday's
+            # `Good title options: ...` failure came through this hole).
+            len(re.findall(r'"[^"]+"', s)) >= 2
+            or bool(re.search(r'\b(?:options?|alternatives?|candidates?)\s*:', s, flags=re.IGNORECASE))
+        )
     )
 
 
