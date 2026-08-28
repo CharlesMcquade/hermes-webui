@@ -9245,13 +9245,15 @@ function _notifyPromptCard(kind, sid, pending){
     if (now - Number(seenAt || 0) > _PROMPT_NOTIFY_TTL_MS) _promptNotifySeen.delete(staleKey);
   }
   if (_promptNotifySeen.has(key)) return;
-  // Unlike the completion notice (#4416, "was hidden at any point"), a prompt
-  // is suppressed only when the user is actively looking at the tab right
-  // now (visible AND focused). An unfocused-but-visible window — e.g. the
-  // WebUI on a second monitor — still gets the ping, because nothing will
-  // progress until the prompt is answered. Suppression is NOT recorded, so
-  // backgrounding while a prompt is pending yields one ping.
-  if (typeof _isDocumentVisibleAndFocused === 'function' && _isDocumentVisibleAndFocused()) return;
+  // Suppress ONLY when the user is effectively looking at this prompt right
+  // now: it belongs to the session open in the pane AND the tab is visible
+  // AND focused. Every other combination pings:
+  //   1. prompt for a non-active session (even with the tab focused)
+  //   2. active session, but a different tab is selected
+  //   3. active session, tab active, but the Chrome window is not focused
+  // Suppression is NOT recorded, so the same prompt still pings exactly once
+  // the moment the user is no longer looking at it.
+  if (typeof _isSessionActivelyViewed === 'function' && _isSessionActivelyViewed(sid)) return;
   _promptNotifySeen.set(key, now);
   if (typeof sendBrowserNotification !== 'function') return;
   if (kind === 'clarify') {
