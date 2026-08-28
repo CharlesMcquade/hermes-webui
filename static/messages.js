@@ -9256,10 +9256,14 @@ function _notifyPromptCard(kind, sid, pending){
   if (typeof _isSessionActivelyViewed === 'function' && _isSessionActivelyViewed(sid)) return;
   _promptNotifySeen.set(key, now);
   if (typeof sendBrowserNotification !== 'function') return;
+  // forceHidden: this caller already made the visibility decision (the
+  // actively-viewed gate above). sendBrowserNotification's own live gate
+  // ("notify only when document.hidden") would otherwise veto the
+  // unfocused-but-visible case, which this feature explicitly notifies for.
   if (kind === 'clarify') {
-    sendBrowserNotification('Clarification needed', p.question || p.description || 'Tool clarification needed', { sid });
+    sendBrowserNotification('Clarification needed', p.question || p.description || 'Tool clarification needed', { sid, forceHidden: true });
   } else {
-    sendBrowserNotification('Approval required', p.description || p.command || 'Tool approval needed', { sid });
+    sendBrowserNotification('Approval required', p.description || p.command || 'Tool approval needed', { sid, forceHidden: true });
   }
 }
 function sendBrowserNotification(title,body,options={}){

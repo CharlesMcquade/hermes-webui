@@ -200,11 +200,15 @@ process.stdout.write(JSON.stringify({{ CASES, sent }}));
     assert cases["clarify"] == 5, f"clarify routes its own title/body (got {cases['clarify']})"
     assert len(sent) == 5, f"expected exactly 5 pings, got {len(sent)}: {sent}"
     assert sent[0]["title"] == "Approval required"
-    assert sent[0]["options"] == {"sid": "sid-1"}
-    assert sent[2]["options"] == {"sid": "sid-2"}
+    assert sent[0]["options"] == {"sid": "sid-1", "forceHidden": True}
+    assert sent[2]["options"] == {"sid": "sid-2", "forceHidden": True}
     assert sent[2]["body"] == "other session"
     assert sent[4]["title"] == "Clarification needed"
     assert sent[4]["body"] == "Which one?"
+    # forceHidden must be set: _notifyPromptCard already made the visibility
+    # decision, and sendBrowserNotification's live gate ("notify only when
+    # document.hidden") would otherwise veto the unfocused-but-visible case.
+    assert all(o["options"].get("forceHidden") for o in sent)
 
 
 def test_completion_notification_preview_uses_settled_message_not_live_prefix():
