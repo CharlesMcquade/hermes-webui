@@ -41,8 +41,148 @@ def test_notification_payload_uses_completion_session_when_provided():
     assert "_completionNotificationPreviewText(lastAsst," in MESSAGES_JS
     assert "sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid})" in MESSAGES_JS
     assert "assistantText?assistantText.slice(0,100)" not in MESSAGES_JS
-    assert "sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid})" in MESSAGES_JS
-    assert "sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid})" in MESSAGES_JS
+
+
+def test_prompt_notifications_fire_from_card_renderer_chokepoint():
+    """Approval/clarify notifications are owned by the card renderers, so EVERY
+    surfacing path (live SSE, 1.5s fallback poll, post-respond 'next approval'
+    refresh, reload-while-pending) notifies — not just the active-session SSE
+    event. The SSE listeners no longer send notifications directly; the shared
+    _notifyPromptCard gate dedupes per prompt id so repeated poll ticks and
+    re-renders ping exactly once."""
+    # The chokepoint helper exists and both card renderers call it BEFORE the
+    # belongs-to-active-session guard (so a non-active session's prompt still
+    # notifies).
+    assert "function _notifyPromptCard(kind, sid, pending){" in MESSAGES_JS
+    for fn_name, kind in (("showApprovalCard", "approval"), ("showClarifyCard", "clarify")):
+        start = MESSAGES_JS.index(f"function {fn_name}(")
+        body_start = MESSAGES_JS.index("{", start)
+        depth = 0
+        for i in range(body_start, len(MESSAGES_JS)):
+            if MESSAGES_JS[i] == "{":
+                depth += 1
+            elif MESSAGES_JS[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    body = MESSAGES_JS[start : i + 1]
+                    break
+        assert "_notifyPromptCard(" in body, f"{fn_name} must route notifications through _notifyPromptCard"
+    assert "_notifyPromptCard('approval', sid, pending);" in MESSAGES_JS
+    assert "_notifyPromptCard('clarify', sid, pending);" in MESSAGES_JS
+    # Dedupe gate: per prompt id, with TTL cleanup of stale keys.
+    assert "const key = kind + ':' + id;" in MESSAGES_JS
+    assert "if (_promptNotifySeen.has(key)) return;" in MESSAGES_JS
+    assert "_PROMPT_NOTIFY_TTL_MS" in MESSAGES_JS
+    # Visibility gate: suppress only while the tab is visible AND focused
+    # (unlike the completion notice, an unfocused-but-visible window still
+    # gets the ping because the run is blocked until the prompt is answered).
+    assert "_isDocumentVisibleAndFocused()) return;" in MESSAGES_JS
+    # SSE listeners delegate; they must not send directly (would bypass dedupe).
+    approval_listener = _source_between(
+        "source.addEventListener('approval',e=>{",
+        "source.addEventListener('clarify',e=>{",
+    )
+    clarify_listener = _source_between(
+        "source.addEventListener('clarify',e=>{",
+        "source.addEventListener('state_saved',e=>{",
+    )
+    assert "sendBrowserNotification(" not in approval_listener
+    assert "sendBrowserNotification(" not in clarify_listener
+    assert "_notifyPromptCard()" in approval_listener  # ownership comment anchor
+    assert "_notifyPromptCard()" in clarify_listener
+
+
+def _extract_fn(src: str, name: str) -> str:
+    marker = f"function {name}"
+    start = src.find(marker)
+    assert start >= 0, f"{name} not found"
+    brace = src.find("{", start)
+    depth = 0
+    for i in range(brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+    raise AssertionError(f"{name} body did not close")
+
+
+def _run_node(source: str) -> dict:
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+
+        pytest.skip("node is required for the executed notification-gate test")
+    with tempfile.NamedTemporaryFile("w", suffix=".cjs", encoding="utf-8", dir=ROOT, delete=False) as script:
+        script.write(source)
+        script_path = Path(script.name)
+    try:
+        result = subprocess.run([node, str(script_path)], cwd=str(ROOT), capture_output=True, text=True, timeout=30)
+    finally:
+        script_path.unlink(missing_ok=True)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip())
+
+
+def test_notify_prompt_card_executed_gate_behavior():
+    """Executed node-VM proof of _notifyPromptCard's runtime gates:
+    (1) dedupes per prompt id — a second call for the same id is a no-op;
+    (2) suppresses while the tab is visible+focused WITHOUT recording, so the
+    same id still notifies once the tab is hidden (blocking prompt semantics);
+    (3) notifies when hidden, with the right title/body and sid routing."""
+    helper = _extract_fn(MESSAGES_JS, "_notifyPromptCard")
+    vis = _extract_fn(MESSAGES_JS, "_isDocumentVisibleAndFocused")
+    script = f"""
+const document = {{ hidden: false, visibilityState: 'visible', hasFocus: () => true }};
+const _promptNotifySeen = new Map();  // module-level state closed over by the helper
+const _PROMPT_NOTIFY_TTL_MS = 600000; // same, for the stale-key cleanup pass
+{vis}
+{helper}
+const sent = [];
+function sendBrowserNotification(title, body, options) {{ sent.push({{ title, body, options }}); }}
+const hiddenPending = {{ approval_id: 'a1', description: 'run the thing' }};
+// Hidden tab: fires once...
+document.hidden = true; document.visibilityState = 'hidden'; document.hasFocus = () => false;
+_notifyPromptCard('approval', 'sid-1', hiddenPending);
+_notifyPromptCard('approval', 'sid-1', hiddenPending); // dedupe: no second ping
+// Same id after returning to a focused tab: dedupe still holds.
+document.hidden = false; document.visibilityState = 'visible'; document.hasFocus = () => true;
+_notifyPromptCard('approval', 'sid-1', hiddenPending);
+// A DIFFERENT id while focused-visible: suppressed, NOT recorded...
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a2', description: 'second' }});
+const afterFocused = sent.length; // checkpoint: must still be 1 (no ping while focused)
+// ...so hiding the tab again pings it exactly once.
+document.hidden = true; document.visibilityState = 'hidden'; document.hasFocus = () => false;
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a2', description: 'second' }});
+const afterHidden = sent.length; // checkpoint: the suppressed id fires exactly once now
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a2', description: 'second' }}); // dedupe
+// Clarify shape routes its own title/body.
+_notifyPromptCard('clarify', 'sid-1', {{ clarify_id: 'c1', question: 'Which one?' }});
+process.stdout.write(JSON.stringify({{ sent, afterFocused, afterHidden }}));
+"""
+    result = _run_node(script)
+    sent = result["sent"]
+    # Mid-sequence checkpoints (a final count alone cannot distinguish
+    # suppression from reordering — bite-check verified this exact gap).
+    assert result["afterFocused"] == 1, (
+        f"no ping may fire while the tab is visible+focused (got {result['afterFocused']} pings at checkpoint)"
+    )
+    assert result["afterHidden"] == 2, (
+        f"the suppressed id must ping exactly once once the tab is hidden (got {result['afterHidden']} at checkpoint)"
+    )
+    assert len(sent) == 3, f"expected exactly 3 pings, got {len(sent)}: {sent}"
+    assert sent[0]["title"] == "Approval required"
+    assert sent[0]["body"] == "run the thing"
+    assert sent[0]["options"] == {"sid": "sid-1"}
+    assert sent[1]["body"] == "second"
+    assert sent[2]["title"] == "Clarification needed"
+    assert sent[2]["body"] == "Which one?"
 
 
 def test_completion_notification_preview_uses_settled_message_not_live_prefix():

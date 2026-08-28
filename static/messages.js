@@ -5982,7 +5982,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('approval',d,e);
       showApprovalForSession(activeSid, d, d.pending_count || 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
-      sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid});
+      // Browser notification is owned by showApprovalCard()/_notifyPromptCard()
+      // so every surfacing path (SSE, fallback poll, post-respond refresh,
+      // reload) dedupes through the same per-id gate.
     });
 
     source.addEventListener('clarify',e=>{
@@ -5990,7 +5992,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _applyToAnchor('clarify',d,e);
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
-      sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid});
+      // Browser notification is owned by showClarifyCard()/_notifyPromptCard().
     });
 
     source.addEventListener('state_saved',e=>{
@@ -7639,6 +7641,7 @@ function showApprovalForSession(sid, pending, pendingCount) {
 
 function showApprovalCard(pending, pendingCount) {
   const sid = _rememberApprovalPending(pending, pendingCount);
+  if(typeof _notifyPromptCard==='function') _notifyPromptCard('approval', sid, pending);
   if (!_approvalPromptBelongsToActiveSession(sid)) return;
   if (pending && pending.approval_id && _isApprovalDismissed(sid, pending.approval_id)) return;
   _approvalClearedOwner = null;
@@ -8757,6 +8760,7 @@ function _clarifySetControlsDisabled(disabled, loading=false) {
 
 function showClarifyCard(pending) {
   const sid = _rememberClarifyPending(pending);
+  if(typeof _notifyPromptCard==='function') _notifyPromptCard('clarify', sid, pending);
   if (!_clarifyPromptBelongsToActiveSession(sid)) return;
   const question = pending.question || pending.description || '';
   const choices = Array.isArray(pending.choices_offered)
@@ -9221,6 +9225,40 @@ function requestNotificationPermission(){
     if(typeof updateNotificationPermissionStatus==='function') updateNotificationPermissionStatus();
     return p;
   });
+}
+const _PROMPT_NOTIFY_TTL_MS = 600000;
+const _promptNotifySeen = new Map();
+// Prompt-card notifications: an approval or clarify card BLOCKS the run until
+// it is answered, so every surfacing path must notify — the live SSE event,
+// the 1.5s fallback poll, the post-respond "next approval" refresh, and a
+// page reload while a prompt is still pending. The chokepoint is the card
+// renderer itself (showApprovalCard / showClarifyCard); this helper dedupes
+// per prompt id so repeated poll ticks, re-renders, and session switches
+// ping exactly once per unique prompt.
+function _notifyPromptCard(kind, sid, pending){
+  const p = pending || {};
+  const id = p.approval_id || p.clarify_id || '';
+  if (!id) return;
+  const key = kind + ':' + id;
+  const now = Date.now();
+  for (const [staleKey, seenAt] of _promptNotifySeen) {
+    if (now - Number(seenAt || 0) > _PROMPT_NOTIFY_TTL_MS) _promptNotifySeen.delete(staleKey);
+  }
+  if (_promptNotifySeen.has(key)) return;
+  // Unlike the completion notice (#4416, "was hidden at any point"), a prompt
+  // is suppressed only when the user is actively looking at the tab right
+  // now (visible AND focused). An unfocused-but-visible window — e.g. the
+  // WebUI on a second monitor — still gets the ping, because nothing will
+  // progress until the prompt is answered. Suppression is NOT recorded, so
+  // backgrounding while a prompt is pending yields one ping.
+  if (typeof _isDocumentVisibleAndFocused === 'function' && _isDocumentVisibleAndFocused()) return;
+  _promptNotifySeen.set(key, now);
+  if (typeof sendBrowserNotification !== 'function') return;
+  if (kind === 'clarify') {
+    sendBrowserNotification('Clarification needed', p.question || p.description || 'Tool clarification needed', { sid });
+  } else {
+    sendBrowserNotification('Approval required', p.description || p.command || 'Tool approval needed', { sid });
+  }
 }
 function sendBrowserNotification(title,body,options={}){
   const force=!!(options&&options.force);
