@@ -5791,10 +5791,11 @@ def _looks_invalid_generated_title(text: str) -> bool:
         return True
     return bool(
         re.search(r'<think>|<\|channel\|>thought|<\|turn\|>thinking', s, flags=re.IGNORECASE)
-        or re.search(r'^\s*(the|ther)\s+user\s+', s, flags=re.IGNORECASE)
+        or re.search(r'^\s*(?:the|ther)\s+user(?:\s|\b)', s, flags=re.IGNORECASE)
+        or re.search(r"^\s*the\s+user(?:'s|s)?\b", s, flags=re.IGNORECASE)
         or re.search(r'^\s*user\s+\w+\s+', s, flags=re.IGNORECASE)
-        or re.search(r'\b(they|user)\s+want(s)?\s+me\s+to\b', s, flags=re.IGNORECASE)
-        or re.search(r'^\s*(i|we)\s+(should|need to|will|can)\b', s, flags=re.IGNORECASE)
+        or re.search(r"\b(?:they|user)\s+want(?:s)?\s+me\s+to\b", s, flags=re.IGNORECASE)
+        or re.search(r"^\s*(?:i|we)\s+(?:should|need(?:\s+to)?|will|can|am|'m)\b", s, flags=re.IGNORECASE)
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
         or _looks_like_title_option_menu(s)
