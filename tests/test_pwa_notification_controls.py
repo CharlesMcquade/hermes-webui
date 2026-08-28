@@ -73,10 +73,11 @@ def test_prompt_notifications_fire_from_card_renderer_chokepoint():
     assert "const key = kind + ':' + id;" in MESSAGES_JS
     assert "if (_promptNotifySeen.has(key)) return;" in MESSAGES_JS
     assert "_PROMPT_NOTIFY_TTL_MS" in MESSAGES_JS
-    # Visibility gate: suppress only while the tab is visible AND focused
-    # (unlike the completion notice, an unfocused-but-visible window still
-    # gets the ping because the run is blocked until the prompt is answered).
-    assert "_isDocumentVisibleAndFocused()) return;" in MESSAGES_JS
+    # Visibility gate: suppress only while the prompt's session is actively
+    # viewed (open in pane + tab visible + tab focused). All three of the
+    # user's notification cases fire: non-active session, hidden tab,
+    # unfocused window.
+    assert "_isSessionActivelyViewed(sid)) return;" in MESSAGES_JS
     # SSE listeners delegate; they must not send directly (would bypass dedupe).
     approval_listener = _source_between(
         "source.addEventListener('approval',e=>{",
@@ -133,56 +134,77 @@ def _run_node(source: str) -> dict:
 def test_notify_prompt_card_executed_gate_behavior():
     """Executed node-VM proof of _notifyPromptCard's runtime gates:
     (1) dedupes per prompt id — a second call for the same id is a no-op;
-    (2) suppresses while the tab is visible+focused WITHOUT recording, so the
-    same id still notifies once the tab is hidden (blocking prompt semantics);
-    (3) notifies when hidden, with the right title/body and sid routing."""
+    (2) suppresses only when the prompt's session is ACTIVELY VIEWED (open in
+    the pane + tab visible + tab focused) WITHOUT recording, so the same id
+    still notifies the moment the user looks away (blocking prompt semantics);
+    (3) notifies for a non-active session EVEN with the tab focused (case 1);
+    (4) notifies when the tab is hidden or the window unfocused (cases 2-3),
+    with the right title/body and sid routing."""
     helper = _extract_fn(MESSAGES_JS, "_notifyPromptCard")
-    vis = _extract_fn(MESSAGES_JS, "_isDocumentVisibleAndFocused")
+    viewed = _extract_fn(MESSAGES_JS, "_isSessionActivelyViewed")
+    current_pane = _extract_fn(MESSAGES_JS, "_isSessionCurrentPane")
+    visible = _extract_fn(MESSAGES_JS, "_isDocumentVisibleAndFocused")
     script = f"""
 const document = {{ hidden: false, visibilityState: 'visible', hasFocus: () => true }};
 const _promptNotifySeen = new Map();  // module-level state closed over by the helper
 const _PROMPT_NOTIFY_TTL_MS = 600000; // same, for the stale-key cleanup pass
-{vis}
+let _loadingSessionId = null;
+const S = {{ session: {{ session_id: 'sid-1' }} }};
+{current_pane}
+{visible}
+{viewed}
 {helper}
 const sent = [];
 function sendBrowserNotification(title, body, options) {{ sent.push({{ title, body, options }}); }}
-const hiddenPending = {{ approval_id: 'a1', description: 'run the thing' }};
-// Hidden tab: fires once...
-document.hidden = true; document.visibilityState = 'hidden'; document.hasFocus = () => false;
-_notifyPromptCard('approval', 'sid-1', hiddenPending);
-_notifyPromptCard('approval', 'sid-1', hiddenPending); // dedupe: no second ping
-// Same id after returning to a focused tab: dedupe still holds.
+const CASES = {{}};
+// Case 3: active session sid-1, tab visible, WINDOW unfocused → notifies.
+document.hidden = false; document.visibilityState = 'visible'; document.hasFocus = () => false;
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a3', description: 'window unfocused' }});
+CASES.windowUnfocused = sent.length; // 1
+// Case 2: tab hidden (different tab selected) → notifies.
+document.hidden = true; document.visibilityState = 'hidden';
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a2', description: 'tab hidden' }});
+CASES.tabHidden = sent.length; // 2
 document.hidden = false; document.visibilityState = 'visible'; document.hasFocus = () => true;
-_notifyPromptCard('approval', 'sid-1', hiddenPending);
-// A DIFFERENT id while focused-visible: suppressed, NOT recorded...
-_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a2', description: 'second' }});
-const afterFocused = sent.length; // checkpoint: must still be 1 (no ping while focused)
-// ...so hiding the tab again pings it exactly once.
-document.hidden = true; document.visibilityState = 'hidden'; document.hasFocus = () => false;
-_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a2', description: 'second' }});
-const afterHidden = sent.length; // checkpoint: the suppressed id fires exactly once now
-_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a2', description: 'second' }}); // dedupe
-// Clarify shape routes its own title/body.
+// Case 1: prompt for a NON-active session while tab is fully focused → notifies.
+_notifyPromptCard('approval', 'sid-2', {{ approval_id: 'a1', description: 'other session' }});
+CASES.otherSession = sent.length; // 3
+// Suppressed case: prompt for the ACTIVE session with tab visible+focused —
+// the user is literally looking at the card. NOT recorded, so...
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a4', description: 'watching' }});
+CASES.activelyViewed = sent.length; // still 3 (no ping while watching)
+// ...looking away (window blur) pings that same id exactly once.
+document.hasFocus = () => false;
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a4', description: 'watching' }});
+CASES.afterBlur = sent.length; // 4
+document.hasFocus = () => true;
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a4', description: 'watching' }}); // dedupe
+// Dedupe holds across focus changes for the first id too.
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a3', description: 'window unfocused' }});
+// Clarify shape routes its own title/body (window blurred again).
+document.hasFocus = () => false;
 _notifyPromptCard('clarify', 'sid-1', {{ clarify_id: 'c1', question: 'Which one?' }});
-process.stdout.write(JSON.stringify({{ sent, afterFocused, afterHidden }}));
+CASES.clarify = sent.length; // 5
+process.stdout.write(JSON.stringify({{ CASES, sent }}));
 """
     result = _run_node(script)
+    cases = result["CASES"]
     sent = result["sent"]
-    # Mid-sequence checkpoints (a final count alone cannot distinguish
-    # suppression from reordering — bite-check verified this exact gap).
-    assert result["afterFocused"] == 1, (
-        f"no ping may fire while the tab is visible+focused (got {result['afterFocused']} pings at checkpoint)"
-    )
-    assert result["afterHidden"] == 2, (
-        f"the suppressed id must ping exactly once once the tab is hidden (got {result['afterHidden']} at checkpoint)"
-    )
-    assert len(sent) == 3, f"expected exactly 3 pings, got {len(sent)}: {sent}"
+    # The user's three notification cases must all fire.
+    assert cases["windowUnfocused"] == 1, f"case 3 (window unfocused) must notify (got {cases['windowUnfocused']})"
+    assert cases["tabHidden"] == 2, f"case 2 (tab hidden) must notify (got {cases['tabHidden']})"
+    assert cases["otherSession"] == 3, f"case 1 (non-active session, tab focused) must notify (got {cases['otherSession']})"
+    # Suppression only while actively viewing; the suppressed id fires after blur.
+    assert cases["activelyViewed"] == 3, f"no ping while actively viewing the card (got {cases['activelyViewed']})"
+    assert cases["afterBlur"] == 4, f"the suppressed id must ping exactly once after blur (got {cases['afterBlur']})"
+    assert cases["clarify"] == 5, f"clarify routes its own title/body (got {cases['clarify']})"
+    assert len(sent) == 5, f"expected exactly 5 pings, got {len(sent)}: {sent}"
     assert sent[0]["title"] == "Approval required"
-    assert sent[0]["body"] == "run the thing"
     assert sent[0]["options"] == {"sid": "sid-1"}
-    assert sent[1]["body"] == "second"
-    assert sent[2]["title"] == "Clarification needed"
-    assert sent[2]["body"] == "Which one?"
+    assert sent[2]["options"] == {"sid": "sid-2"}
+    assert sent[2]["body"] == "other session"
+    assert sent[4]["title"] == "Clarification needed"
+    assert sent[4]["body"] == "Which one?"
 
 
 def test_completion_notification_preview_uses_settled_message_not_live_prefix():
