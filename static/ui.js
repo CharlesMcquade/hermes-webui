@@ -7102,6 +7102,7 @@ if(typeof window!=='undefined'){
         &&typeof _recentMessageWheelIntent==='function'&&!_recentMessageWheelIntent()
         &&typeof _recentMessageKeyScrollIntent==='function'&&!_recentMessageKeyScrollIntent()
         &&typeof _recentNonMessageScrollIntent==='function'&&!_recentNonMessageScrollIntent();
+      const _prevMessageScrollHeightForRepin=(typeof _lastMessageScrollHeight!=='undefined'&&_lastMessageScrollHeight!==null)?_lastMessageScrollHeight:null;
       if(typeof _lastMessageScrollHeight!=='undefined') _lastMessageScrollHeight=el.scrollHeight;
       const movedUp=!grew&&!shrankNoIntent&&_lastScrollTop!==null&&top<_lastScrollTop-2;
       const movedDown=_lastScrollTop!==null&&top>_lastScrollTop+2;
