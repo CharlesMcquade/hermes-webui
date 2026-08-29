@@ -36,6 +36,7 @@ from api.config import (
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env,
+    RunAdmissionDrainingError,
     register_active_run, update_active_run, unregister_active_run,
     unregister_stream_owner,
     peek_stream,
@@ -10741,6 +10742,7 @@ def _run_agent_streaming(
     _turn_route_model = model
     _turn_route_provider = model_provider
     cancel_event = threading.Event()
+    admission_draining = False
     q = peek_stream(stream_id)
     if q is not None:
         # Snapshot lookup is not admission: Stop can detach the stream before
@@ -10751,21 +10753,25 @@ def _run_agent_streaming(
             if stream_id not in STREAMS or cancel_event.is_set():
                 q = None
             else:
-                CANCEL_FLAGS[stream_id] = cancel_event
-                STREAM_PARTIAL_TEXT[stream_id] = ''
-                STREAM_REASONING_TEXT[stream_id] = ''
-                STREAM_LIVE_TOOL_CALLS[stream_id] = []
-                register_active_run(
-                    stream_id,
-                    session_id=session_id,
-                    started_at=time.time(),
-                    phase="starting",
-                    workspace=str(workspace),
-                    model=model,
-                    provider=model_provider,
-                    ephemeral=bool(ephemeral),
-                    backend=WEBUI_LOCAL_CHAT_BACKEND,
-                )
+                try:
+                    register_active_run(
+                        stream_id,
+                        session_id=session_id,
+                        started_at=time.time(),
+                        phase="starting",
+                        workspace=str(workspace),
+                        model=model,
+                        provider=model_provider,
+                        ephemeral=bool(ephemeral),
+                        backend=WEBUI_LOCAL_CHAT_BACKEND,
+                    )
+                except RunAdmissionDrainingError:
+                    admission_draining = True
+                else:
+                    CANCEL_FLAGS[stream_id] = cancel_event
+                    STREAM_PARTIAL_TEXT[stream_id] = ''
+                    STREAM_REASONING_TEXT[stream_id] = ''
+                    STREAM_LIVE_TOOL_CALLS[stream_id] = []
     if q is None:
         # The stream was cancelled before the worker started; the route layer
         # already registered the stream owner, so release it here to avoid
@@ -10793,6 +10799,19 @@ def _run_agent_streaming(
                 "Failed to retire worker settlement participant for pre-start "
                 "stream %s", stream_id, exc_info=True,
             )
+        return
+    if admission_draining:
+        q.put_nowait((
+            "apperror",
+            {
+                "type": "restart_draining",
+                "retryable": True,
+                "message": "Hermes WebUI is completing a supervised restart; retry shortly.",
+                "session_id": session_id,
+            },
+        ))
+        unregister_stream_owner(stream_id)
+        clear_session_writeback_owner_if_owned(session_id, stream_id)
         return
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
