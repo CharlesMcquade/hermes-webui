@@ -7151,6 +7151,7 @@ if(typeof window!=='undefined'){
         _lastScrollTop=top;
         return;
       }
+      const _prevScrollTopForLog=_lastScrollTop;
       _lastScrollTop=top;
       if(movedUp&&bottomDistance>1){
         // Only a real scroll-away unpins. A true-bottom geometry clamp keeps
