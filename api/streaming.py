@@ -36,6 +36,7 @@ from api.config import (
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env,
+    RunAdmissionDrainingError,
     register_active_run, update_active_run, unregister_active_run,
     unregister_stream_owner,
     peek_stream,
@@ -9737,17 +9738,33 @@ def _run_agent_streaming(
                 STREAM_PARTIAL_TEXT[stream_id] = ''
                 STREAM_REASONING_TEXT[stream_id] = ''
                 STREAM_LIVE_TOOL_CALLS[stream_id] = []
-                register_active_run(
-                    stream_id,
-                    session_id=session_id,
-                    started_at=time.time(),
-                    phase="starting",
-                    workspace=str(workspace),
-                    model=model,
-                    provider=model_provider,
-                    ephemeral=bool(ephemeral),
-                    backend=WEBUI_LOCAL_CHAT_BACKEND,
-                )
+                try:
+                    register_active_run(
+                        stream_id,
+                        session_id=session_id,
+                        started_at=time.time(),
+                        phase="starting",
+                        workspace=str(workspace),
+                        model=model,
+                        provider=model_provider,
+                        ephemeral=bool(ephemeral),
+                        backend=WEBUI_LOCAL_CHAT_BACKEND,
+                    )
+                except RunAdmissionDrainingError:
+                    # WebUI is draining for a supervised restart; reject this
+                    # admission and tear the pre-start stream down cleanly.
+                    q.put_nowait((
+                        "apperror",
+                        {
+                            "type": "restart_draining",
+                            "retryable": True,
+                            "message": "Hermes WebUI is completing a supervised restart; retry shortly.",
+                            "session_id": session_id,
+                        },
+                    ))
+                    # Signal the `if q is None` teardown below so the stream
+                    # owner and writeback ownership release on one path.
+                    q = None
     if q is None:
         # The stream was cancelled before the worker started; the route layer
         # already registered the stream owner, so release it here to avoid
