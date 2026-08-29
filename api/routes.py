@@ -13640,6 +13640,18 @@ def handle_get(handler, parsed) -> bool:
         from api.voice_live import handle_voice_live_capability
         return handle_voice_live_capability(handler)
 
+    if parsed.path == "/api/voice/live/connect":
+        from api.voice_live import handle_voice_live_connect
+        return handle_voice_live_connect(handler)
+
+    if parsed.path == "/api/voice/live/disconnect":
+        from api.voice_live import handle_voice_live_disconnect
+        return handle_voice_live_disconnect(handler)
+
+    if parsed.path == "/api/voice/live/turn":
+        from api.voice_live import handle_voice_live_turn
+        return handle_voice_live_turn(handler)
+
     if parsed.path == "/api/reasoning":
         # Current reasoning config (shared source of truth with the CLI —
         # reads display.show_reasoning and agent.reasoning_effort from
@@ -15251,6 +15263,10 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/voice/live/sdp":
         from api.voice_live import handle_voice_live_sdp
         return handle_voice_live_sdp(handler)
+
+    if parsed.path == "/api/voice/live/ask":
+        from api.voice_live import handle_voice_live_ask
+        return handle_voice_live_ask(handler)
 
     if parsed.path == "/api/client-events/log":
         if diag:
