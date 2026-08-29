@@ -139,11 +139,140 @@ def test_voice_js_uses_backend_and_agent_bridge():
     assert "api/voice/live/sdp" in VOICE_JS
     assert "api/voice/live/capability" in VOICE_JS
     assert "ask_verity" in VOICE_JS
-    assert "api/chat" in VOICE_JS
+    assert "api/voice/live/ask" in VOICE_JS
+    assert "api/voice/live/turn" in VOICE_JS
+    assert "api/voice/live/connect" in VOICE_JS
+    assert "api/voice/live/disconnect" in VOICE_JS
     assert "X-Hermes-CSRF-Token" in VOICE_JS
     # never touches OpenAI directly or embeds a key
     assert "api.openai.com" not in VOICE_JS
     assert "sk-" not in VOICE_JS
+
+
+def test_voice_js_async_bridge_contract():
+    # busy-guard: the bridge surfaces busy instead of spawning concurrent turns
+    assert "data.busy" in VOICE_JS
+    assert "api/chat/stream/status" in VOICE_JS
+    assert "api/chat/cancel" in VOICE_JS
+    # mirrors spoken turns into the transcript
+    assert "input_audio_transcription.completed" in VOICE_JS
+    assert "_mirrorTurn" in VOICE_JS
+    # YOLO lifecycle: connect enables, disconnect restores prior state
+    assert "yolo_was_enabled" in VOICE_JS
+    assert "_unbindSession" in VOICE_JS
+
+
+def test_routes_wired_v2():
+    assert '"/api/voice/live/ask"' in ROUTES_PY
+    assert '"/api/voice/live/turn"' in ROUTES_PY
+    assert '"/api/voice/live/connect"' in ROUTES_PY
+    assert '"/api/voice/live/disconnect"' in ROUTES_PY
+
+
+# ── v2 backend unit tests ────────────────────────────────────────────
+
+
+def _mk_session(tmp_path, monkeypatch, sid="voicetest01", msgs=None):
+    """Register a real Session and patch routes' lookup to return it."""
+    from api.models import Session
+    s = Session(session_id=sid, messages=msgs or [])
+    monkeypatch.setattr(
+        "api.voice_live._require_webui_session",
+        lambda handler, sid_arg: (s, None) if sid_arg == sid else (None, None),
+        raising=True,
+    )
+    return s
+
+
+def test_connect_enables_yolo_and_returns_digest(monkeypatch):
+    from api import voice_live
+    from api.route_approvals import enable_session_yolo, disable_session_yolo, is_session_yolo_enabled
+
+    sid = "voicetest02"
+    disable_session_yolo(sid)
+    from api.models import Session as _S
+    sess = _S(session_id=sid, messages=[
+        {"role": "user", "content": "hello there", "id": 1},
+        {"role": "assistant", "content": "Hi! What can I do for you?", "id": 2},
+    ])
+    monkeypatch.setattr(voice_live, "_require_webui_session", lambda h, x: (sess, None))
+    h = _FakeHandler(body={"session_id": sid})
+    voice_live.handle_voice_live_connect(h)
+    out = _last_json(h)
+    assert out["ok"] is True
+    assert out["yolo_enabled"] is True
+    assert out["yolo_was_enabled"] is False
+    assert "hello there" in out["digest"]
+    assert is_session_yolo_enabled(sid) is True
+    # restore
+    disable_session_yolo(sid)
+
+
+def test_disconnect_restores_prior_yolo_state(monkeypatch):
+    from api import voice_live
+    from api.route_approvals import enable_session_yolo, disable_session_yolo, is_session_yolo_enabled
+
+    sid = "voicetest03"
+    disable_session_yolo(sid)
+    from api.models import Session as _S
+    sess = _S(session_id=sid)
+    monkeypatch.setattr(voice_live, "_require_webui_session", lambda h, x: (sess, None))
+    # simulate connect having flipped it on with prior state False
+    enable_session_yolo(sid)
+    h = _FakeHandler(body={"session_id": sid, "yolo_was_enabled": False})
+    voice_live.handle_voice_live_disconnect(h)
+    assert _last_json(h)["ok"] is True
+    assert is_session_yolo_enabled(sid) is False
+    # if YOLO was already on before the call, disconnect must NOT disable it
+    enable_session_yolo(sid)
+    h2 = _FakeHandler(body={"session_id": sid, "yolo_was_enabled": True})
+    voice_live.handle_voice_live_disconnect(h2)
+    assert is_session_yolo_enabled(sid) is True
+    disable_session_yolo(sid)
+
+
+def test_turn_mirror_appends_and_persists(monkeypatch, tmp_path):
+    from api import voice_live
+    from api.models import Session as _S
+
+    sid = "voicetest04"
+    sess = _S(session_id=sid, messages=[{"role": "user", "content": "earlier", "id": 1}])
+    saved = []
+    monkeypatch.setattr(voice_live, "_require_webui_session", lambda h, x: (sess, None))
+    monkeypatch.setattr(type(sess), "save", lambda self, **kw: saved.append(True))
+    h = _FakeHandler(body={"session_id": sid, "user_text": "what time is it", "assistant_text": "Noon-ish"})
+    voice_live.handle_voice_live_turn(h)
+    out = _last_json(h)
+    assert out["ok"] is True and out["appended"] == 2
+    roles = [m["role"] for m in sess.messages]
+    assert roles == ["user", "user", "assistant"]
+    assert "[voice] what time is it" in sess.messages[1]["content"]
+    assert saved == [True]
+
+
+def test_turn_mirror_rejects_empty(monkeypatch):
+    from api import voice_live
+    from api.models import Session as _S
+
+    sess = _S(session_id="voicetest05")
+    monkeypatch.setattr(voice_live, "_require_webui_session", lambda h, x: (sess, None))
+    h = _FakeHandler(body={"session_id": "voicetest05"})
+    voice_live.handle_voice_live_turn(h)
+    assert h.status == 400
+
+
+def test_digest_truncates_and_orders(monkeypatch):
+    from api import voice_live
+    from api.models import Session as _S
+
+    msgs = [{"role": "user", "content": f"msg {i} " + "x" * 500, "id": i} for i in range(12)]
+    sess = _S(session_id="voicetest06", messages=msgs, title="Test Chat")
+    digest = voice_live._build_session_digest(sess)
+    assert "Test Chat" in digest
+    assert "msg 11" in digest       # recent turns included
+    assert "msg 0" not in digest    # old turns dropped
+    # each turn clipped to ~400 chars
+    assert len([l for l in digest.splitlines() if l.startswith("- ")]) == 8
 
 
 def test_css_live_voice_rules():

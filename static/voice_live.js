@@ -1,8 +1,9 @@
-// Hermes WebUI — Live Voice (OpenAI Realtime over WebRTC)
-// Thin voice front-end over the full Hermes agent. The realtime model has a
-// single tool, ask_verity, which we execute against POST /api/chat (the
-// synchronous agent endpoint) using the CURRENT session so voice exchanges
-// land in the visible transcript.
+// Hermes WebUI — Live Voice v2 (OpenAI Realtime over WebRTC)
+// Session-bound voice front-end. The realtime model gets a session digest,
+// mirrors its spoken turns into the visible transcript, and drives the real
+// agent through the non-blocking /api/voice/live/ask bridge (busy-guarded).
+// Session YOLO is enabled for the call by /api/voice/live/connect and
+// restored on disconnect.
 (function(){
   'use strict';
   if(typeof window==='undefined') return;
@@ -10,6 +11,10 @@
   let _pc=null, _dc=null, _mic=null, _audioEl=null;
   let _state='off'; // off | connecting | live | error
   let _pendingCalls=0;
+  let _boundSid=null;
+  let _yoloWasEnabled=true; // conservative default: leave YOLO alone on cleanup
+  let _activeAsk=null;      // {stream_id, started}
+  let _lastUserTranscript='';
 
   function $(id){ return document.getElementById(id); }
 
@@ -20,6 +25,13 @@
     return null;
   }
 
+  function _csrf(){
+    try{
+      const tok=window.__HERMES_CONFIG__&&window.__HERMES_CONFIG__.csrfToken;
+      return tok?{'X-Hermes-CSRF-Token':tok}:{};
+    }catch(_){ return {}; }
+  }
+
   function _setState(state, detail){
     _state=state;
     const btn=$('btnLiveVoice');
@@ -27,6 +39,7 @@
       btn.classList.toggle('live-voice-active', state==='live'||state==='connecting');
       btn.classList.toggle('live-voice-connecting', state==='connecting');
       btn.classList.toggle('live-voice-thinking', state==='live'&&_pendingCalls>0);
+      btn.classList.toggle('live-voice-yolo', state==='live'&&_yoloWasEnabled===false);
       const key = state==='live'?'live_voice_stop':(state==='connecting'?'live_voice_connecting':'live_voice_start');
       const label=(typeof t==='function'?t(key):null)||
         (state==='live'?'Stop live voice':(state==='connecting'?'Connecting…':'Live voice'));
@@ -39,33 +52,96 @@
     }
   }
 
-  async function _askVerity(question){
-    const sid=_sid();
-    if(!sid) return 'No active session is open in the WebUI. Ask the user to open a chat session.';
-    const headers={'Content-Type':'application/json'};
+  // ── transcript mirroring ─────────────────────────────────────────────
+
+  async function _mirrorTurn(userText, assistantText){
+    if(!_boundSid||(!userText&&!assistantText)) return;
     try{
-      const tok=window.__HERMES_CONFIG__&&window.__HERMES_CONFIG__.csrfToken;
-      if(tok) headers['X-Hermes-CSRF-Token']=tok;
-    }catch(_){ }
-    try{
-      const res=await fetch('api/chat',{
+      await fetch('api/voice/live/turn',{
         method:'POST',
-        headers,
-        body:JSON.stringify({session_id:sid,message:question})
+        headers:Object.assign({'Content-Type':'application/json'},_csrf()),
+        body:JSON.stringify({session_id:_boundSid,user_text:userText||'',assistant_text:assistantText||''})
       });
-      if(!res.ok){
-        let msg='HTTP '+res.status;
-        try{ const e=await res.json(); if(e&&e.error) msg=e.error; }catch(_){ }
-        return 'The agent request failed: '+msg;
-      }
+      try{ if(typeof loadSession==='function') loadSession(_boundSid,{preserveScroll:true}); }catch(_){ }
+    }catch(_){ }
+  }
+
+  // ── deep lane: non-blocking ask_verity via /api/voice/live/ask ───────
+
+  async function _fetchFinalAnswer(streamId){
+    // The stream just finished; the last assistant message in the session is
+    // the answer. GET /api/session returns the full message array.
+    try{
+      const res=await fetch('api/session?session_id='+encodeURIComponent(_boundSid)+'&messages=1',{cache:'no-store'});
+      if(!res.ok) return null;
       const data=await res.json();
-      const answer=(data&&data.answer)||'';
-      try{ if(typeof loadSession==='function') loadSession(sid,{preserveScroll:true}); }catch(_){ }
-      return answer||'(the agent returned an empty answer)';
+      const msgs=(data&&(data.session?data.session.messages:data.messages))||[];
+      for(let i=msgs.length-1;i>=0;i--){
+        const m=msgs[i];
+        if(m&&m.role==='assistant'&&(m.content||'').trim()) return String(m.content).trim();
+      }
+    }catch(_){ }
+    return null;
+  }
+
+  async function _pollAsk(streamId, startedAt){
+    // Poll stream status until the run ends, then fetch the final answer.
+    const maxMs=15*60*1000; // generous ceiling; user can hit Stop
+    while(Date.now()-startedAt<maxMs){
+      await new Promise(r=>setTimeout(r,1500));
+      let st=null;
+      try{
+        const res=await fetch('api/chat/stream/status?stream_id='+encodeURIComponent(streamId),{cache:'no-store'});
+        st=await res.json();
+      }catch(_){ }
+      if(!st){ continue; }
+      if(st.active===false){
+        return await _fetchFinalAnswer(streamId);
+      }
+    }
+    return null; // timed out
+  }
+
+  async function _askVerity(question){
+    const sid=_boundSid||_sid();
+    if(!sid) return 'No active session is open in the WebUI. Ask the user to open a chat session.';
+    try{
+      const res=await fetch('api/voice/live/ask',{
+        method:'POST',
+        headers:Object.assign({'Content-Type':'application/json'},_csrf()),
+        body:JSON.stringify({session_id:sid,question:question})
+      });
+      const data=await res.json().catch(()=>({}));
+      if(data&&data.busy){
+        return JSON.stringify({busy:true,message:data.message||'The agent is still working on the previous request.'});
+      }
+      if(!res.ok||!data||!data.stream_id){
+        return 'The agent request failed: '+((data&&data.error)||('HTTP '+res.status));
+      }
+      _activeAsk={stream_id:data.stream_id,started:Date.now()};
+      _pendingCalls++; _setState(_state);
+      try{
+        const answer=await _pollAsk(data.stream_id,_activeAsk.started);
+        return answer||'(the agent finished but returned no visible answer — it is in the chat transcript)';
+      }finally{
+        _activeAsk=null;
+        _pendingCalls=Math.max(0,_pendingCalls-1); _setState(_state);
+      }
     }catch(e){
       return 'The agent request failed: '+(e&&e.message||'network error');
     }
   }
+
+  async function _cancelAsk(){
+    const ask=_activeAsk;
+    if(!ask) return false;
+    try{
+      await fetch('api/chat/cancel?stream_id='+encodeURIComponent(ask.stream_id),{method:'POST',headers:_csrf()});
+    }catch(_){ }
+    return true;
+  }
+
+  // ── realtime event handling ──────────────────────────────────────────
 
   function _sendEvent(obj){
     try{ if(_dc&&_dc.readyState==='open') _dc.send(JSON.stringify(obj)); }catch(_){ }
@@ -76,9 +152,8 @@
     try{ args=JSON.parse(argsJson||'{}'); }catch(_){ }
     let output='';
     if(name==='ask_verity'){
-      _pendingCalls++; _setState(_state);
       try{ output=await _askVerity(String(args.question||'')); }
-      finally{ _pendingCalls=Math.max(0,_pendingCalls-1); _setState(_state); }
+      catch(e){ output='ask_verity failed: '+(e&&e.message||e); }
     }else{
       output='Unknown tool: '+name;
     }
@@ -94,22 +169,84 @@
     try{ msg=JSON.parse(ev.data); }catch(_){ return; }
     if(!msg||!msg.type) return;
     if(msg.type==='response.done'&&msg.response&&Array.isArray(msg.response.output)){
-      for(const item of msg.response.output){
-        if(item&&item.type==='function_call'&&item.name&&item.call_id){
-          _onToolCall(item.name,item.call_id,item.arguments);
+      // Mirror the spoken assistant reply (collected from audio deltas) —
+      // handled via response.output_text? gpt-realtime emits audio; the
+      // transcript of what it SAID arrives via response.done output content
+      // or the input_transcription events. We mirror what we can:
+      let spoken='';
+      try{
+        for(const item of (msg.response.output||[])){
+          if(item&&item.type==='message'&&item.role==='assistant'){
+            const parts=(item.content||[]);
+            for(const p of parts){
+              if(p&&(p.transcript||p.text)) spoken+=((p.transcript||p.text)+' ');
+            }
+          }
+          if(item&&item.type==='function_call'&&item.name&&item.call_id){
+            _onToolCall(item.name,item.call_id,item.arguments);
+          }
         }
+      }catch(_){ }
+      if(spoken.trim()){
+        _mirrorTurn('', spoken.trim());
+      }
+    }else if(msg.type==='conversation.item.input_audio_transcription.completed'){
+      const txt=(msg.transcript||'').trim();
+      if(txt&&txt!==_lastUserTranscript){
+        _lastUserTranscript=txt;
+        _mirrorTurn(txt,'');
       }
     }else if(msg.type==='error'){
       console.warn('[live-voice] realtime error',msg);
     }
   }
 
+  // ── connect / disconnect with session binding + YOLO ─────────────────
+
+  async function _bindSession(){
+    const sid=_sid();
+    if(!sid) throw new Error('No active session — open a chat first');
+    const res=await fetch('api/voice/live/connect',{
+      method:'POST',
+      headers:Object.assign({'Content-Type':'application/json'},_csrf()),
+      body:JSON.stringify({session_id:sid})
+    });
+    const data=await res.json().catch(()=>({}));
+    if(!res.ok||!data||!data.ok) throw new Error((data&&data.error)||('connect failed HTTP '+res.status));
+    _boundSid=data.session_id;
+    _yoloWasEnabled=(data.yolo_was_enabled!==false); // server says prior state
+    return data; // {digest, ...}
+  }
+
+  async function _unbindSession(){
+    if(!_boundSid) return;
+    try{
+      await fetch('api/voice/live/disconnect',{
+        method:'POST',
+        headers:Object.assign({'Content-Type':'application/json'},_csrf()),
+        body:JSON.stringify({session_id:_boundSid,yolo_was_enabled:_yoloWasEnabled})
+      });
+    }catch(_){ }
+    _boundSid=null;
+  }
+
   async function startLiveVoice(){
     if(_state==='connecting'||_state==='live') return;
     _setState('connecting');
     try{
+      const bind=await _bindSession();
+      try{
+        if(typeof showToast==='function') showToast(bind.yolo_enabled?'Live voice: full access enabled for this call':'Live voice connected',2500,'info');
+      }catch(_){ }
+    }catch(e){
+      _setState('error','Live voice: '+(e&&e.message||e));
+      _setState('off');
+      return;
+    }
+    try{
       _mic=await navigator.mediaDevices.getUserMedia({audio:true});
     }catch(e){
+      await _unbindSession();
       _setState('error','Microphone access denied');
       _setState('off');
       return;
@@ -131,11 +268,7 @@
       };
       const offer=await _pc.createOffer();
       await _pc.setLocalDescription(offer);
-      const headers={'Content-Type':'application/json'};
-      try{
-        const tok=window.__HERMES_CONFIG__&&window.__HERMES_CONFIG__.csrfToken;
-        if(tok) headers['X-Hermes-CSRF-Token']=tok;
-      }catch(_){ }
+      const headers=Object.assign({'Content-Type':'application/json'},_csrf());
       const res=await fetch('api/voice/live/sdp',{
         method:'POST',headers,
         body:JSON.stringify({sdp:offer.sdp})
@@ -161,6 +294,11 @@
     try{ if(_mic){ _mic.getTracks().forEach(tr=>{ try{tr.stop();}catch(_){}}); } }catch(_){ }
     try{ if(_audioEl){ _audioEl.srcObject=null; _audioEl.remove(); } }catch(_){ }
     _dc=null; _pc=null; _mic=null; _audioEl=null; _pendingCalls=0;
+    _activeAsk=null;
+    const sid=_boundSid;
+    // Fire-and-forget cleanup; YOLO restore is idempotent server-side.
+    if(sid){ _unbindSession(); }
+    _lastUserTranscript='';
     _setState('off');
     if(!silent){
       try{ if(typeof showToast==='function') showToast('Live voice ended',2500,'info'); }catch(_){ }
@@ -188,7 +326,7 @@
 
   window.toggleLiveVoice=toggleLiveVoice;
   window.stopLiveVoice=stopLiveVoice;
-  window._liveVoiceState=function(){ return _state; };
+  window._liveVoiceState=function(){ return {state:_state,bound:_boundSid,busy:!!_activeAsk}; };
 
   if(document.readyState==='loading'){
     document.addEventListener('DOMContentLoaded',_initLiveVoiceButton);

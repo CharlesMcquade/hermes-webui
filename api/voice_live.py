@@ -24,6 +24,7 @@ Design notes:
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import threading
@@ -40,15 +41,20 @@ DEFAULT_VOICE = "marin"
 VOICE_INSTRUCTIONS = (
     "You are Verity, a warm, dry-witted voice assistant for Charles, speaking "
     "through the Hermes WebUI. You are the VOICE FRONT-END for a much more "
-    "capable agent (also Verity) that has tools, memory, files, and the web. "
-    "Rules: (1) For anything requiring facts, tools, memory, personal data, "
-    "files, code, home automation, or actions, call the ask_verity function "
-    "with a clear self-contained question — do not guess or answer from your "
-    "own knowledge. (2) Only answer directly for trivial conversational "
-    "fillers (greetings, acknowledgements, repeating what was just said). "
-    "(3) While ask_verity is running, if the user speaks, respond briefly and "
-    "naturally. (4) Summarize tool results conversationally and concisely — "
-    "speak like a person, not a report. Keep responses short unless asked."
+    "capable agent (also Verity) that has terminal, files, memory, the web, "
+    "and every tool.\n"
+    "CONTEXT: After these instructions you are given a digest of the user's "
+    "current chat session. Use it — never ask what you were just talking "
+    "about; you already know.\n"
+    "TOOLS: (1) call ask_verity for ANYTHING requiring facts, tools, memory, "
+    "files, code, actions, or multi-step work — it runs the full agent on the "
+    "current session and may take minutes; keep chatting naturally while it "
+    "works. (2) If ask_verity returns {\"busy\": true}, tell the user the "
+    "agent is still working on their previous request and offer to wait or "
+    "cancel. (3) Only answer directly for trivial conversational fillers.\n"
+    "STYLE: Summarize results conversationally, like a person talking, not a "
+    "report. Short by default. If a result contains an error, say so plainly "
+    "and suggest the next step."
 )
 
 ASK_VERITY_TOOL = {
@@ -213,3 +219,296 @@ def handle_voice_live_sdp(handler):
         return j(handler, {"error": "unexpected response from OpenAI realtime"}, status=502)
 
     return j(handler, {"ok": True, "sdp": answer_sdp})
+
+
+# ── v2: session binding, digest, transcript mirror, YOLO handoff ─────────────
+
+
+def _require_webui_session(handler, sid: str):
+    """Validate a session id for voice use. Returns (session, error_response)."""
+    from api.models import is_safe_session_id
+
+    sid = str(sid or "").strip()
+    if not sid or not is_safe_session_id(sid):
+        return None, bad(handler, "invalid session_id", 400)
+    try:
+        from api.routes import _get_or_materialize_session
+        s = _get_or_materialize_session(sid)
+    except Exception:
+        return None, bad(handler, "Session not found", 404)
+    if s is None:
+        return None, bad(handler, "Session not found", 404)
+    return s, None
+
+
+def _build_session_digest(s) -> str:
+    """Compact digest of the current session for the realtime instructions."""
+    lines: list[str] = []
+    title = str(getattr(s, "title", "") or "")
+    if title and title != "Untitled":
+        lines.append(f"Current session title: {title}")
+    ws = str(getattr(s, "created_workspace", "") or "")
+    if ws:
+        lines.append(f"Workspace: {ws}")
+    msgs = list(getattr(s, "messages", None) or [])
+    recent = [m for m in msgs if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()][-8:]
+    if recent:
+        lines.append("Recent conversation (oldest first):")
+        for m in recent:
+            c = " ".join(str(m.get("content") or "").split())
+            if len(c) > 400:
+                c = c[:400] + "…"
+            lines.append(f"- {m.get('role')}: {c}")
+    else:
+        lines.append("The session has no prior conversation; this is a fresh start.")
+    return "\n".join(lines)
+
+
+def _auth_ok(handler) -> bool:
+    from api.auth import is_auth_enabled, parse_cookie, verify_session
+
+    if not is_auth_enabled():
+        return True
+    cv = parse_cookie(handler)
+    return bool(cv and verify_session(cv))
+
+
+def handle_voice_live_connect(handler):
+    """POST /api/voice/live/connect
+
+    Binds a realtime call to a session: {session_id, voice?}.
+    Enables session YOLO for the duration of the call (explicit user opt-in via
+    the voice button) and returns the session digest so the browser can pass
+    richer instructions at SDP mint time. Prior YOLO state is returned so the
+    disconnect handler can restore it exactly.
+    """
+    if handler.command != "POST":
+        return bad(handler, "POST required", 405)
+    if not _auth_ok(handler):
+        return bad(handler, "unauthorized", 401)
+    try:
+        data = read_body(handler)
+    except Exception:
+        return bad(handler, "invalid request body", 400)
+
+    s, err = _require_webui_session(handler, data.get("session_id"))
+    if err is not None:
+        return err
+
+    from api.route_approvals import (
+        disable_session_yolo,
+        enable_session_yolo,
+        is_session_yolo_enabled,
+    )
+
+    sid = s.session_id
+    was_enabled = bool(is_session_yolo_enabled(sid))
+    if not was_enabled:
+        enable_session_yolo(sid)
+    yolo_now = bool(is_session_yolo_enabled(sid))
+
+    print(f"[webui] voice live: session {sid} bound (yolo={yolo_now}, was={was_enabled})", flush=True)
+    return j(
+        handler,
+        {
+            "ok": True,
+            "session_id": sid,
+            "yolo_enabled": yolo_now,
+            "yolo_was_enabled": was_enabled,
+            "digest": _build_session_digest(s),
+        },
+    )
+
+
+def handle_voice_live_disconnect(handler):
+    """POST /api/voice/live/disconnect — {session_id, yolo_was_enabled}.
+
+    Restores the session's pre-call YOLO state. Idempotent.
+    """
+    if handler.command != "POST":
+        return bad(handler, "POST required", 405)
+    if not _auth_ok(handler):
+        return bad(handler, "unauthorized", 401)
+    try:
+        data = read_body(handler)
+    except Exception:
+        return bad(handler, "invalid request body", 400)
+
+    s, err = _require_webui_session(handler, data.get("session_id"))
+    if err is not None:
+        return err
+
+    from api.route_approvals import disable_session_yolo, set_session_yolo_enabled
+
+    sid = s.session_id
+    # Only disable if WE enabled it (caller reports prior state). If YOLO was
+    # already on before the call, leave it on.
+    if data.get("yolo_was_enabled") is False:
+        disable_session_yolo(sid)
+    else:
+        set_session_yolo_enabled(sid, True)
+
+    from api.route_approvals import is_session_yolo_enabled
+
+    print(f"[webui] voice live: session {sid} unbound (yolo restored={is_session_yolo_enabled(sid)})", flush=True)
+    return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
+
+
+def handle_voice_live_turn(handler):
+    """POST /api/voice/live/turn — {session_id, user_text, assistant_text?}
+
+    Appends a voice exchange to the session transcript WITHOUT triggering an
+    agent turn. The user's spoken question (input transcription) and the voice
+    model's spoken reply are mirrored so the visible transcript, session
+    search, and memory all see voice activity.
+    """
+    if handler.command != "POST":
+        return bad(handler, "POST required", 405)
+    if not _auth_ok(handler):
+        return bad(handler, "unauthorized", 401)
+    try:
+        data = read_body(handler)
+    except Exception:
+        return bad(handler, "invalid request body", 400)
+
+    s, err = _require_webui_session(handler, data.get("session_id"))
+    if err is not None:
+        return err
+
+    user_text = str(data.get("user_text") or "").strip()
+    assistant_text = str(data.get("assistant_text") or "").strip()
+    if not user_text and not assistant_text:
+        return bad(handler, "user_text or assistant_text required", 400)
+
+    now = time.time()
+    added = 0
+    if user_text:
+        s.messages.append({
+            "role": "user",
+            "content": "[voice] " + user_text[:8000],
+            "id": _next_message_id(s),
+            "timestamp": now,
+        })
+        added += 1
+    if assistant_text:
+        s.messages.append({
+            "role": "assistant",
+            "content": "[voice] " + assistant_text[:8000],
+            "id": _next_message_id(s),
+            "timestamp": now,
+        })
+        added += 1
+    if added:
+        try:
+            s.save()
+        except Exception as e:
+            print(f"[webui] voice live: transcript mirror save failed: {e}", flush=True)
+            return j(handler, {"error": "failed to persist transcript"}, status=500)
+    return j(handler, {"ok": True, "appended": added})
+
+
+def _next_message_id(s) -> int:
+    ids = [m.get("id") for m in getattr(s, "messages", []) if isinstance(m.get("id"), int)]
+    return (max(ids) + 1) if ids else len(getattr(s, "messages", []) or []) + 1
+
+
+def handle_voice_live_ask(handler):
+    """POST /api/voice/live/ask — {session_id, question}
+
+    Non-blocking deep lane: fires the session's real agent turn via the same
+    machinery the composer uses (POST /api/chat/start), so the run uses the
+    session's model, tools, skills, and memory — and returns {stream_id}
+    immediately. The bridge polls /api/chat/stream/status and fetches the
+    final answer via GET /api/session when the stream finishes.
+    """
+    if handler.command != "POST":
+        return bad(handler, "POST required", 405)
+    if not _auth_ok(handler):
+        return bad(handler, "unauthorized", 401)
+    try:
+        data = read_body(handler)
+    except Exception:
+        return bad(handler, "invalid request body", 400)
+
+    s, err = _require_webui_session(handler, data.get("session_id"))
+    if err is not None:
+        return err
+
+    question = str(data.get("question") or "").strip()
+    if not question:
+        return bad(handler, "question required", 400)
+
+    # Busy-guard: if the session already has an active stream, do NOT spawn a
+    # concurrent turn (fixes the relay-collision failure mode). Report it so
+    # the voice model can tell the user instead of hanging.
+    current_stream_id = getattr(s, "active_stream_id", None)
+    if current_stream_id:
+        from api.routes import STREAMS, STREAMS_LOCK, _active_stream_blocks_chat_start
+
+        with STREAMS_LOCK:
+            running = current_stream_id in STREAMS
+        if running and _active_stream_blocks_chat_start(s, current_stream_id):
+            return j(
+                handler,
+                {
+                    "busy": True,
+                    "stream_id": current_stream_id,
+                    "message": "The agent is still working on the previous request.",
+                },
+            )
+
+    # Reuse the real chat-start path by calling the route handler directly.
+    # This keeps all invariants (locks, stale-stream cleanup, workspace,
+    # model resolution) identical to a typed composer turn.
+    from api.routes import _handle_chat_start
+
+    class _ProxyHandler:
+        """Minimal proxy so _handle_chat_start writes into our JSON response."""
+
+        def __init__(self, inner, body):
+            self._inner = handler
+            self.command = "POST"
+            self.client_address = getattr(handler, "client_address", ("127.0.0.1", 0))
+            self._body = json.dumps(body).encode()
+            self.headers = {"Content-Length": str(len(self._body)), "Content-Type": "application/json"}
+            self.rfile = io.BytesIO(self._body)
+            self.wfile = io.BytesIO()
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, k, v):
+            pass
+
+        def end_headers(self):
+            pass
+
+    proxy = _ProxyHandler(handler, {"session_id": s.session_id, "message": question})
+    try:
+        _handle_chat_start(proxy, {"session_id": s.session_id, "message": question})
+    except Exception as e:
+        print(f"[webui] voice live: ask dispatch failed: {e}", flush=True)
+        return j(handler, {"error": "failed to start agent turn"}, status=500)
+
+    resp = {}
+    raw = proxy.wfile.getvalue()
+    try:
+        resp = json.loads(raw.decode()) if raw else {}
+    except Exception:
+        resp = {}
+    status = getattr(proxy, "status", 200) or 200
+
+    if status >= 400:
+        # 409 with active_stream_id = busy; surface as structured busy, not error
+        if status == 409 and resp.get("active_stream_id"):
+            return j(handler, {"busy": True, "stream_id": resp["active_stream_id"],
+                               "message": "The agent is already working on a request."}, status=200)
+        return j(handler, {"error": resp.get("error") or f"chat start failed ({status})"}, status=502)
+
+    if not resp.get("stream_id"):
+        return j(handler, {"error": "chat start returned no stream_id"}, status=502)
+
+    return j(handler, {"ok": True, "stream_id": resp["stream_id"], "session_id": s.session_id})
