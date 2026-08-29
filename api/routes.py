@@ -13636,6 +13636,10 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/transcribe/capability":
         return handle_transcribe_capability(handler)
 
+    if parsed.path == "/api/voice/live/capability":
+        from api.voice_live import handle_voice_live_capability
+        return handle_voice_live_capability(handler)
+
     if parsed.path == "/api/reasoning":
         # Current reasoning config (shared source of truth with the CLI —
         # reads display.show_reasoning and agent.reasoning_effort from
@@ -15243,6 +15247,10 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/tts":
         return _handle_tts(handler, parsed)
+
+    if parsed.path == "/api/voice/live/sdp":
+        from api.voice_live import handle_voice_live_sdp
+        return handle_voice_live_sdp(handler)
 
     if parsed.path == "/api/client-events/log":
         if diag:
