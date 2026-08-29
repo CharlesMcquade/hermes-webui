@@ -14,7 +14,10 @@
   function $(id){ return document.getElementById(id); }
 
   function _sid(){
-    try{ return (window.S&&S.session&&(S.session.session_id||S.session.id))||null; }catch(_){ return null; }
+    try{
+      if(typeof S!=='undefined'&&S&&S.session) return S.session.session_id||S.session.id||null;
+    }catch(_){ }
+    return null;
   }
 
   function _setState(state, detail){
