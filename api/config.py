@@ -9529,6 +9529,23 @@ def active_run_cancel_is_stale(
         return False
 
 
+class RunAdmissionDrainingError(RuntimeError):
+    """Raised when this WebUI process is draining for a supervised restart."""
+
+
+def _restart_drain_marker_path(pid: int | None = None) -> Path:
+    root = Path(
+        os.getenv("HERMES_WEBUI_RESTART_DRAIN_DIR")
+        or (_DEFAULT_STATE_HOME / "webui" / "restart-drain")
+    ).expanduser()
+    return root / f"{os.getpid() if pid is None else int(pid)}.json"
+
+
+def restart_drain_active() -> bool:
+    """Return whether this exact WebUI process generation is draining."""
+    return _restart_drain_marker_path().exists()
+
+
 def register_active_run(stream_id: str, **metadata) -> None:
     """Mark a WebUI agent worker as alive until its outer finally exits."""
     if not stream_id:
@@ -9539,6 +9556,8 @@ def register_active_run(stream_id: str, **metadata) -> None:
     entry.setdefault("started_at", now)
     entry.setdefault("phase", "running")
     with ACTIVE_RUNS_LOCK:
+        if restart_drain_active():
+            raise RunAdmissionDrainingError("WebUI is draining for a supervised restart")
         ACTIVE_RUNS[stream_id] = entry
 
 

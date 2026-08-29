@@ -36,6 +36,7 @@ from api.config import (
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env,
+    RunAdmissionDrainingError,
     register_active_run, update_active_run, unregister_active_run,
     unregister_stream_owner,
     stream_owner_session_id,
@@ -9750,16 +9751,30 @@ def _run_agent_streaming(
                 "stream %s", stream_id, exc_info=True,
             )
         return
-    register_active_run(
-        stream_id,
-        session_id=session_id,
-        started_at=time.time(),
-        phase="starting",
-        workspace=str(workspace),
-        model=model,
-        provider=model_provider,
-        ephemeral=bool(ephemeral),
-    )
+    try:
+        register_active_run(
+            stream_id,
+            session_id=session_id,
+            started_at=time.time(),
+            phase="starting",
+            workspace=str(workspace),
+            model=model,
+            provider=model_provider,
+            ephemeral=bool(ephemeral),
+        )
+    except RunAdmissionDrainingError:
+        q.put_nowait((
+            "apperror",
+            {
+                "type": "restart_draining",
+                "retryable": True,
+                "message": "Hermes WebUI is completing a supervised restart; retry shortly.",
+                "session_id": session_id,
+            },
+        ))
+        unregister_stream_owner(stream_id)
+        clear_session_writeback_owner_if_owned(session_id, stream_id)
+        return
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
     except Exception:

@@ -12707,6 +12707,7 @@ def _handle_health(handler, parsed):
         "last_run_finished_at": run_check.get("last_run_finished_at"),
         "server_started_at": SERVER_START_TIME,
         "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
+        "restart_drain_supported": True,
         "accept_loop": _accept_loop_health(handler),
     }
     if "oldest_run_age_seconds" in run_check:
@@ -24456,6 +24457,16 @@ def _handle_chat_start(handler, body, diag=None):
                 handler,
                 {"status": "suppressed", "reason": "silent_control_message"},
                 status=200,
+            )
+        if api_config.restart_drain_active():
+            return j(
+                handler,
+                {
+                    "status": "restart_draining",
+                    "retryable": True,
+                    "error": "Hermes WebUI is completing a supervised restart; retry shortly.",
+                },
+                status=503,
             )
         if body.get("regenerate") is True:
             from api.runtime_adapter import runtime_adapter_runner_enabled
