@@ -15,6 +15,7 @@
   let _yoloWasEnabled=true; // conservative default: leave YOLO alone on cleanup
   let _activeAsk=null;      // {stream_id, started}
   let _lastUserTranscript='';
+  let _digest='';
 
   function $(id){ return document.getElementById(id); }
 
@@ -156,6 +157,40 @@
     return null; // timed out
   }
 
+  // ── deep lane: non-blocking agent_ask via /api/voice/live/ask ────────
+
+  async function _voicePost(path, body){
+    const res=await fetch(path,{
+      method:'POST',
+      headers:Object.assign({'Content-Type':'application/json'},_csrf()),
+      body:JSON.stringify(Object.assign({session_id:_boundSid||_sid()},body||{}))
+    });
+    const data=await res.json().catch(()=>({}));
+    return {status:res.status,data:data||{}};
+  }
+
+  async function _agentStatus(){
+    const {data}=await _voicePost('api/voice/live/status',{});
+    if(!data.ok) return 'Status unavailable.';
+    if(!data.active) return 'No run is active right now.';
+    const parts=[];
+    if(data.latest_step) parts.push('Current step: '+data.latest_step);
+    if(Array.isArray(data.recent_tools)&&data.recent_tools.length) parts.push('Recent tools: '+data.recent_tools.join(', '));
+    return parts.length?parts.join('. '):'The run is active and working.';
+  }
+
+  async function _agentSteer(text){
+    const {data}=await _voicePost('api/voice/live/steer',{text:String(text||'')});
+    if(data.ok) return 'Delivered. The agent will apply it at its next step.';
+    return 'Could not steer: '+(data.message||data.reason||'no active run');
+  }
+
+  async function _agentStop(){
+    const {data}=await _voicePost('api/voice/live/stop',{});
+    if(data.ok&&data.cancelled) return 'Stopped. The run is cancelled.';
+    return 'Nothing to stop — no run is active.';
+  }
+
   async function _askVerity(question){
     const sid=_boundSid||_sid();
     if(!sid) return 'No active session is open in the WebUI. Ask the user to open a chat session.';
@@ -219,9 +254,18 @@
     let args={};
     try{ args=JSON.parse(argsJson||'{}'); }catch(_){ }
     let output='';
-    if(name==='ask_verity'){
+    if(name==='agent_ask'){
       try{ output=await _askVerity(String(args.question||'')); }
-      catch(e){ output='ask_verity failed: '+(e&&e.message||e); }
+      catch(e){ output='agent_ask failed: '+(e&&e.message||e); }
+    }else if(name==='agent_status'){
+      try{ output=await _agentStatus(); }
+      catch(e){ output='agent_status failed: '+(e&&e.message||e); }
+    }else if(name==='agent_steer'){
+      try{ output=await _agentSteer(String(args.text||'')); }
+      catch(e){ output='agent_steer failed: '+(e&&e.message||e); }
+    }else if(name==='agent_stop'){
+      try{ output=await _agentStop(); }
+      catch(e){ output='agent_stop failed: '+(e&&e.message||e); }
     }else{
       output='Unknown tool: '+name;
     }
@@ -283,6 +327,7 @@
     if(!res.ok||!data||!data.ok) throw new Error((data&&data.error)||('connect failed HTTP '+res.status));
     _boundSid=data.session_id;
     _yoloWasEnabled=(data.yolo_was_enabled!==false); // server says prior state
+    _digest=data.digest||'';
     return data; // {digest, ...}
   }
 
@@ -339,7 +384,7 @@
       const headers=Object.assign({'Content-Type':'application/json'},_csrf());
       const res=await fetch('api/voice/live/sdp',{
         method:'POST',headers,
-        body:JSON.stringify({sdp:offer.sdp})
+        body:JSON.stringify(Object.assign({sdp:offer.sdp},_digest?{digest:_digest}:{}))
       });
       if(!res.ok){
         let msg='HTTP '+res.status;
