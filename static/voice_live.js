@@ -84,9 +84,58 @@
     return null;
   }
 
+  // ── progress narration from the run journal ──────────────────────────
+
+  function _describeTool(name){
+    const n=String(name||'').toLowerCase();
+    if(n.includes('terminal')) return 'running a terminal command';
+    if(n.includes('web_search')||n==='search') return 'searching the web';
+    if(n.includes('web_extract')) return 'reading a web page';
+    if(n.includes('read_file')) return 'reading a file';
+    if(n.includes('write_file')||n.includes('patch')) return 'editing files';
+    if(n.includes('session_search')) return 'searching past conversations';
+    if(n.includes('memory')) return 'checking memory';
+    if(n.includes('execute_code')) return 'running some code';
+    if(n) return 'using '+n.replace(/_/g,' ');
+    return 'working';
+  }
+
+  function _narrate(text){
+    if(!text) return;
+    // Inject a short status as a system-ish context item so the realtime
+    // model can mention it naturally without derailing its turn.
+    _sendEvent({type:'conversation.item.create',item:{
+      type:'message',role:'system',content:[{type:'input_text',text:'[voice progress] '+text}]
+    }});
+  }
+
+  let _lastNarrSeq=0;
+  async function _narrateProgress(streamId){
+    // Poll the run journal for step events the agent already emits
+    // (interim_assistant / tool.started / approval) and voice them once.
+    try{
+      const res=await fetch('api/session?session_id='+encodeURIComponent(_boundSid)+'&messages=0',{cache:'no-store'});
+      if(!res.ok) return;
+      const data=await res.json();
+      const sess=data&&(data.session||data);
+      const snap=sess&&sess.runtime_journal;
+      if(!snap||snap.last_seq===undefined) return;
+      // The live snapshot payload is embedded on the session GET; fall back to
+      // the journal status endpoint for the coarse state.
+      if(snap.last_seq>_lastNarrSeq){
+        const le=String(snap.last_event||'');
+        _lastNarrSeq=snap.last_seq;
+        if(le==='tool') _narrate('using tools…');
+        else if(le==='interim_assistant') _narrate('working on it…');
+        else if(le==='approval') _narrate('an approval is waiting on screen');
+      }
+    }catch(_){ }
+  }
+
   async function _pollAsk(streamId, startedAt){
     // Poll stream status until the run ends, then fetch the final answer.
     const maxMs=15*60*1000; // generous ceiling; user can hit Stop
+    let narrAt=0;
     while(Date.now()-startedAt<maxMs){
       await new Promise(r=>setTimeout(r,1500));
       let st=null;
@@ -97,6 +146,11 @@
       if(!st){ continue; }
       if(st.active===false){
         return await _fetchFinalAnswer(streamId);
+      }
+      // Voice the agent's steps while it works (every ~6s at most).
+      if(Date.now()-narrAt>6000){
+        narrAt=Date.now();
+        void _narrateProgress(streamId);
       }
     }
     return null; // timed out
@@ -120,6 +174,20 @@
       }
       _activeAsk={stream_id:data.stream_id,started:Date.now()};
       _pendingCalls++; _setState(_state);
+      // Attach the app's own live renderer to this stream so tokens, tool
+      // cards, and the worklog appear in the transcript in real time — the
+      // same path a typed composer message takes.
+      try{
+        if(typeof attachLiveStream==='function'){
+          attachLiveStream(_boundSid,data.stream_id,[]);
+          try{
+            const sess=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id===_boundSid)?S.session:null;
+            if(sess) sess.active_stream_id=data.stream_id;
+            if(typeof S!=='undefined') S.activeStreamId=data.stream_id;
+            if(typeof setBusy==='function') setBusy(true);
+          }catch(_){ }
+        }
+      }catch(_){ }
       try{
         const answer=await _pollAsk(data.stream_id,_activeAsk.started);
         return answer||'(the agent finished but returned no visible answer — it is in the chat transcript)';
@@ -327,6 +395,23 @@
   window.toggleLiveVoice=toggleLiveVoice;
   window.stopLiveVoice=stopLiveVoice;
   window._liveVoiceState=function(){ return {state:_state,bound:_boundSid,busy:!!_activeAsk}; };
+
+  // Orphan-proofing: if the page unloads mid-call (refresh, close, navigate),
+  // sendBeacon still delivers the YOLO restore — it survives page teardown
+  // where fetch() does not. The endpoint is CSRF-exempt and fail-safe (it can
+  // only restrict privilege, never grant it). Server-side binding state is the
+  // authoritative backup if even the beacon is lost.
+  window.addEventListener('pagehide',function(){
+    if(!_boundSid) return;
+    try{
+      const payload=JSON.stringify({session_id:_boundSid});
+      if(navigator.sendBeacon){
+        navigator.sendBeacon('api/voice/live/disconnect',new Blob([payload],{type:'application/json'}));
+      }else{
+        fetch('api/voice/live/disconnect',{method:'POST',keepalive:true,headers:{'Content-Type':'application/json'},body:payload});
+      }
+    }catch(_){ }
+  });
 
   if(document.readyState==='loading'){
     document.addEventListener('DOMContentLoaded',_initLiveVoiceButton);

@@ -217,17 +217,32 @@ def test_disconnect_restores_prior_yolo_state(monkeypatch):
     from api.models import Session as _S
     sess = _S(session_id=sid)
     monkeypatch.setattr(voice_live, "_require_webui_session", lambda h, x: (sess, None))
-    # simulate connect having flipped it on with prior state False
-    enable_session_yolo(sid)
-    h = _FakeHandler(body={"session_id": sid, "yolo_was_enabled": False})
+    # Simulate connect (server-side binding records prior state)
+    h0 = _FakeHandler(body={"session_id": sid})
+    voice_live.handle_voice_live_connect(h0)
+    assert is_session_yolo_enabled(sid) is True
+    # disconnect restores the pre-call state WITHOUT trusting client input
+    h = _FakeHandler(body={"session_id": sid})
     voice_live.handle_voice_live_disconnect(h)
     assert _last_json(h)["ok"] is True
     assert is_session_yolo_enabled(sid) is False
     # if YOLO was already on before the call, disconnect must NOT disable it
     enable_session_yolo(sid)
-    h2 = _FakeHandler(body={"session_id": sid, "yolo_was_enabled": True})
+    h1 = _FakeHandler(body={"session_id": sid})
+    voice_live.handle_voice_live_connect(h1)
+    assert _last_json(h1)["yolo_was_enabled"] is True
+    h2 = _FakeHandler(body={"session_id": sid})
     voice_live.handle_voice_live_disconnect(h2)
     assert is_session_yolo_enabled(sid) is True
+    # reconnect mid-call (page refresh): rebind must KEEP the recorded
+    # pre-call state (False here), not re-read the flag we enabled ourselves
+    disable_session_yolo(sid)
+    voice_live.handle_voice_live_connect(_FakeHandler(body={"session_id": sid}))
+    hb = _FakeHandler(body={"session_id": sid})
+    voice_live.handle_voice_live_connect(hb)
+    assert _last_json(hb)["yolo_was_enabled"] is False  # survived the rebind
+    voice_live.handle_voice_live_disconnect(_FakeHandler(body={"session_id": sid}))
+    assert is_session_yolo_enabled(sid) is False
     disable_session_yolo(sid)
 
 

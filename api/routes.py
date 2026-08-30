@@ -5850,6 +5850,11 @@ def _csrf_exempt_path(path: str) -> bool:
         "/api/auth/passkey/options",
         "/api/auth/passkey/login",
         "/api/csp-report",
+        # Voice disconnect via navigator.sendBeacon (page unload) cannot send
+        # custom CSRF headers. Exempting is fail-SAFE: the endpoint only ever
+        # RESTORES the pre-call approval state — it can restrict privilege,
+        # never grant it (connect, which enables YOLO, still requires CSRF).
+        "/api/voice/live/disconnect",
     }
 
 
