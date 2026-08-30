@@ -87,9 +87,10 @@ async function _probeOfflineRecovery(){
     try{ctrl=(typeof AbortController!=='undefined')?new AbortController():null;}catch(_){ctrl=null;}
     if(ctrl)timer=setTimeout(()=>{try{ctrl.abort();}catch(_){}},OFFLINE_HEALTH_TIMEOUT_MS);
     try{
-      const opts={cache:'no-store',credentials:'include'};
+      const opts={cache:'no-store',credentials:'include',headers:{'X-Requested-With':'XMLHttpRequest'}};
       if(ctrl)opts.signal=ctrl.signal;
       const res=await fetcher(_offlineHealthUrl(),opts);
+      if(_redirectIfUnauth(res))return false;
       return !!(res&&res.ok);
     }catch(_){return false;}
     finally{if(timer)clearTimeout(timer);}
@@ -181,7 +182,18 @@ function _patchOfflineFetch(){
   _offlineFetchPatched=true;
   _offlineRawFetch=window.fetch.bind(window);
   window.fetch=async function(...args){
-    try{return await _offlineRawFetch(...args);}
+    try{
+      const input=args[0];
+      const init=args[1]||{};
+      let requestUrl=null;
+      try{requestUrl=new URL(typeof input==='string'||input instanceof URL?input:input.url,document.baseURI||location.href);}catch(_){}
+      if(requestUrl&&requestUrl.origin===location.origin){
+        const headers=new Headers(init.headers||(input&&input.headers)||undefined);
+        if(!headers.has('X-Requested-With'))headers.set('X-Requested-With','XMLHttpRequest');
+        args=[input,{...init,headers}];
+      }
+      return await _offlineRawFetch(...args);
+    }
     catch(e){
       if(!_isAbortError(e)&&(e instanceof TypeError||!_browserReportsOnline())){
         void _showOfflineBannerIfProbeFails(_browserReportsOnline()?'network':'browser');
@@ -192,17 +204,26 @@ function _patchOfflineFetch(){
 }
 function initOfflineMonitor(){
   _patchOfflineFetch();
+  const probeOnResume=()=>{
+    if(document.hidden||document.visibilityState==='hidden')return;
+    void _probeOfflineRecovery();
+  };
   window.addEventListener('offline',()=>{void _showOfflineBannerIfProbeFails('browser',{requireConsecutiveFailures:false});});
   window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();});
+  window.addEventListener('focus',probeOnResume);
+  window.addEventListener('pageshow',probeOnResume);
+  document.addEventListener('visibilitychange',probeOnResume);
   if(!_browserReportsOnline())void _showOfflineBannerIfProbeFails('browser',{requireConsecutiveFailures:false});
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initOfflineMonitor,{once:true});
 else initOfflineMonitor();
-// Redirect to login when the server responds with 401 (auth session expired).
-// Handles iOS PWA standalone mode and keeps subpath mounts like /hermes/ from
-// escaping to the personal site root /login.
-// #5578: on a login-shaped page, reload 'login' WITHOUT a next (avoid self-nesting).
-function _redirectIfUnauth(res){if(res&&res.status===401){var _p=(window.location.pathname||'').replace(/\/+$/,'');if(/(?:^|\/)login$/.test(_p)){window.location.href='login';}else{window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);}return true;}return false;}
+// A 401 can come from WebUI auth or an identity-aware reverse proxy. Reload the
+// current top-level URL so the owner of that auth boundary can run its normal
+// navigation flow (for example, Cloudflare Access can refresh its HttpOnly
+// application token). Deduping matters because several API calls often settle
+// together after a suspended mobile app resumes.
+let _authReloadStarted=false;
+function _redirectIfUnauth(res){if(!res||res.status!==401)return false;if(!_authReloadStarted){_authReloadStarted=true;window.location.reload();}return true;}
 function _getSessionQueue(sid, create=false){
   if(!sid) return [];
   if(!SESSION_QUEUES[sid]&&create) SESSION_QUEUES[sid]=[];
