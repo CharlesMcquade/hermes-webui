@@ -279,8 +279,8 @@ def handle_voice_live_connect(handler):
     Binds a realtime call to a session: {session_id, voice?}.
     Enables session YOLO for the duration of the call (explicit user opt-in via
     the voice button) and returns the session digest so the browser can pass
-    richer instructions at SDP mint time. Prior YOLO state is returned so the
-    disconnect handler can restore it exactly.
+    richer instructions at SDP mint time. Prior YOLO state is stored server-side
+    (survives page refresh) and restored by disconnect.
     """
     if handler.command != "POST":
         return bad(handler, "POST required", 405)
@@ -296,13 +296,21 @@ def handle_voice_live_connect(handler):
         return err
 
     from api.route_approvals import (
-        disable_session_yolo,
         enable_session_yolo,
         is_session_yolo_enabled,
     )
 
     sid = s.session_id
-    was_enabled = bool(is_session_yolo_enabled(sid))
+    with _BIND_LOCK:
+        prior = _VOICE_BINDINGS.get(sid)
+        if prior is not None:
+            # Rebind (e.g. page refresh mid-call): the YOLO state currently on
+            # is OURS from the previous binding, so the true pre-call state is
+            # the stored one — never re-read the flag we enabled ourselves.
+            was_enabled = bool(prior.get("yolo_was_enabled"))
+        else:
+            was_enabled = bool(is_session_yolo_enabled(sid))
+        _VOICE_BINDINGS[sid] = {"yolo_was_enabled": was_enabled, "ts": time.time()}
     if not was_enabled:
         enable_session_yolo(sid)
     yolo_now = bool(is_session_yolo_enabled(sid))
@@ -320,10 +328,19 @@ def handle_voice_live_connect(handler):
     )
 
 
-def handle_voice_live_disconnect(handler):
-    """POST /api/voice/live/disconnect — {session_id, yolo_was_enabled}.
+# Live voice call bindings: session_id -> {yolo_was_enabled, ts}. Server-side
+# ownership of the YOLO handoff so a page refresh (which kills the browser JS
+# before disconnect fires) cannot orphan a session with YOLO left on.
+_VOICE_BINDINGS: dict[str, dict] = {}
+_BIND_LOCK = threading.Lock()
 
-    Restores the session's pre-call YOLO state. Idempotent.
+
+def handle_voice_live_disconnect(handler):
+    """POST /api/voice/live/disconnect — {session_id}.
+
+    Restores the session's pre-call YOLO state from the server-side binding
+    record (also reachable via sendBeacon on page unload — CSRF-exempt because
+    the worst case is RESTRICTING privilege, never granting it). Idempotent.
     """
     if handler.command != "POST":
         return bad(handler, "POST required", 405)
@@ -338,19 +355,22 @@ def handle_voice_live_disconnect(handler):
     if err is not None:
         return err
 
-    from api.route_approvals import disable_session_yolo, set_session_yolo_enabled
+    from api.route_approvals import disable_session_yolo, set_session_yolo_enabled, is_session_yolo_enabled
 
     sid = s.session_id
-    # Only disable if WE enabled it (caller reports prior state). If YOLO was
-    # already on before the call, leave it on.
-    if data.get("yolo_was_enabled") is False:
-        disable_session_yolo(sid)
-    else:
+    with _BIND_LOCK:
+        binding = _VOICE_BINDINGS.pop(sid, None)
+    was_enabled = bool(binding.get("yolo_was_enabled")) if binding else None
+    if was_enabled is None:
+        # No binding (never connected, already unbound, or server restarted):
+        # leave YOLO exactly as it is — do not guess.
+        pass
+    elif was_enabled:
         set_session_yolo_enabled(sid, True)
+    else:
+        disable_session_yolo(sid)
 
-    from api.route_approvals import is_session_yolo_enabled
-
-    print(f"[webui] voice live: session {sid} unbound (yolo restored={is_session_yolo_enabled(sid)})", flush=True)
+    print(f"[webui] voice live: session {sid} unbound (yolo now={is_session_yolo_enabled(sid)})", flush=True)
     return j(handler, {"ok": True, "yolo_enabled": bool(is_session_yolo_enabled(sid))})
 
 
