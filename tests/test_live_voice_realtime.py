@@ -102,10 +102,13 @@ def test_voice_allowlist_clamps():
 
 
 def test_session_config_is_server_side():
-    # The realtime session gets exactly one tool: ask_verity, defined server-side.
-    assert voice_live.ASK_VERITY_TOOL["name"] == "ask_verity"
-    assert voice_live.ASK_VERITY_TOOL["type"] == "function"
-    assert "ask_verity" in voice_live.VOICE_INSTRUCTIONS
+    # The realtime session gets the four orchestration tools, defined server-side.
+    assert voice_live.ASK_VERITY_TOOL["name"] == "agent_ask"
+    assert voice_live.AGENT_STATUS_TOOL["name"] == "agent_status"
+    assert voice_live.AGENT_STEER_TOOL["name"] == "agent_steer"
+    assert voice_live.AGENT_STOP_TOOL["name"] == "agent_stop"
+    assert "agent_ask" in voice_live.VOICE_INSTRUCTIONS
+    assert "agent_steer" in voice_live.VOICE_INSTRUCTIONS
 
 
 def test_capability_endpoint(monkeypatch):
@@ -138,7 +141,7 @@ def test_index_has_button_and_script():
 def test_voice_js_uses_backend_and_agent_bridge():
     assert "api/voice/live/sdp" in VOICE_JS
     assert "api/voice/live/capability" in VOICE_JS
-    assert "ask_verity" in VOICE_JS
+    assert "agent_ask" in VOICE_JS
     assert "api/voice/live/ask" in VOICE_JS
     assert "api/voice/live/turn" in VOICE_JS
     assert "api/voice/live/connect" in VOICE_JS
@@ -153,13 +156,20 @@ def test_voice_js_async_bridge_contract():
     # busy-guard: the bridge surfaces busy instead of spawning concurrent turns
     assert "data.busy" in VOICE_JS
     assert "api/chat/stream/status" in VOICE_JS
-    assert "api/chat/cancel" in VOICE_JS
     # mirrors spoken turns into the transcript
     assert "input_audio_transcription.completed" in VOICE_JS
     assert "_mirrorTurn" in VOICE_JS
+    # orchestration surface: steer/status/stop handled client-side
+    assert "api/voice/live/steer" in VOICE_JS
+    assert "api/voice/live/status" in VOICE_JS
+    assert "api/voice/live/stop" in VOICE_JS
+    assert "agent_steer" in VOICE_JS
+    assert "agent_stop" in VOICE_JS
     # YOLO lifecycle: connect enables, disconnect restores prior state
     assert "yolo_was_enabled" in VOICE_JS
     assert "_unbindSession" in VOICE_JS
+    # digest flows to SDP mint for instruction enrichment
+    assert "digest:_digest" in VOICE_JS
 
 
 def test_routes_wired_v2():
@@ -167,6 +177,9 @@ def test_routes_wired_v2():
     assert '"/api/voice/live/turn"' in ROUTES_PY
     assert '"/api/voice/live/connect"' in ROUTES_PY
     assert '"/api/voice/live/disconnect"' in ROUTES_PY
+    assert '"/api/voice/live/steer"' in ROUTES_PY
+    assert '"/api/voice/live/status"' in ROUTES_PY
+    assert '"/api/voice/live/stop"' in ROUTES_PY
 
 
 # ── v2 backend unit tests ────────────────────────────────────────────

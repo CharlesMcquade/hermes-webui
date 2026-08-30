@@ -15273,6 +15273,18 @@ def handle_post(handler, parsed) -> bool:
         from api.voice_live import handle_voice_live_ask
         return handle_voice_live_ask(handler)
 
+    if parsed.path == "/api/voice/live/steer":
+        from api.voice_live import handle_voice_live_steer
+        return handle_voice_live_steer(handler)
+
+    if parsed.path == "/api/voice/live/status":
+        from api.voice_live import handle_voice_live_status
+        return handle_voice_live_status(handler)
+
+    if parsed.path == "/api/voice/live/stop":
+        from api.voice_live import handle_voice_live_stop
+        return handle_voice_live_stop(handler)
+
     if parsed.path == "/api/client-events/log":
         if diag:
             diag.stage("read_client_event_body")
