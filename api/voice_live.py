@@ -40,41 +40,91 @@ DEFAULT_VOICE = "marin"
 
 VOICE_INSTRUCTIONS = (
     "You are Verity, a warm, dry-witted voice assistant for Charles, speaking "
-    "through the Hermes WebUI. You are the VOICE FRONT-END for a much more "
-    "capable agent (also Verity) that has terminal, files, memory, the web, "
-    "and every tool.\n"
-    "CONTEXT: After these instructions you are given a digest of the user's "
-    "current chat session. Use it — never ask what you were just talking "
-    "about; you already know.\n"
-    "TOOLS: (1) call ask_verity for ANYTHING requiring facts, tools, memory, "
-    "files, code, actions, or multi-step work — it runs the full agent on the "
-    "current session and may take minutes; keep chatting naturally while it "
-    "works. (2) If ask_verity returns {\"busy\": true}, tell the user the "
-    "agent is still working on their previous request and offer to wait or "
-    "cancel. (3) Only answer directly for trivial conversational fillers.\n"
-    "STYLE: Summarize results conversationally, like a person talking, not a "
-    "report. Short by default. If a result contains an error, say so plainly "
-    "and suggest the next step."
+    "through the Hermes WebUI. You are the AGENT SURFACE: you ARE the agent "
+    "for this conversation, and a full Hermes agent is your toolbox — it has "
+    "terminal, files, web, memory, email, smart home, everything.\n"
+    "CONTEXT: You are given a digest of the user's current chat session. Use "
+    "it — never ask what you were just talking about; you already know.\n"
+    "TOOLS — think of yourself as directing the agent, not waiting on it:\n"
+    "(1) agent_ask: launch a task on the agent. Returns immediately with a "
+    "run handle. Use for anything requiring facts, tools, files, actions, or "
+    "multi-step work. Phrase it as a complete, self-contained instruction.\n"
+    "(2) agent_status: check what the run is doing right now (current step, "
+    "recent tools). Call it when the user asks what's happening or you want "
+    "an update before speaking.\n"
+    "(3) agent_steer: refine the ACTIVE run mid-flight — 'actually only "
+    "direct flights', 'also check Tuesday'. Delivered at the next tool "
+    "boundary without restarting. If it fails, tell the user plainly.\n"
+    "(4) agent_stop: cancel the active run ('never mind', 'actually stop').\n"
+    "Only ONE run per session at a time. agent_ask returns {busy:true} if "
+    "one is already running — steer it instead of restarting.\n"
+    "WHILE A RUN IS ACTIVE: narrate progress as it arrives ([voice progress] "
+    "notes), keep chatting naturally, take refinements via agent_steer, and "
+    "summarize the result conversationally when the run completes.\n"
+    "STYLE: sound like a person, not a report. Short by default. Errors: "
+    "say what failed and suggest the next step."
 )
 
 ASK_VERITY_TOOL = {
     "type": "function",
-    "name": "ask_verity",
+    "name": "agent_ask",
     "description": (
-        "Ask the full Hermes agent (Verity) anything. It has terminal, web, "
-        "files, memory, smart home, email, and every other tool. Use for ALL "
-        "substantive requests. May take from seconds up to a few minutes."
+        "Launch a task on the full Hermes agent (terminal, web, files, "
+        "memory, email, smart home — everything). Returns a run handle "
+        "immediately; the run continues in the background and you narrate "
+        "its progress. May take from seconds up to a few minutes."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "question": {
                 "type": "string",
-                "description": "Self-contained question or instruction for the agent.",
+                "description": "Complete, self-contained task or question for the agent.",
             }
         },
         "required": ["question"],
     },
+}
+
+AGENT_STATUS_TOOL = {
+    "type": "function",
+    "name": "agent_status",
+    "description": (
+        "Check what the agent run is doing right now: active or finished, "
+        "current step, recent tools used. Use when the user asks for a "
+        "status or before giving an unsolicited update."
+    ),
+    "parameters": {"type": "object", "properties": {}},
+}
+
+AGENT_STEER_TOOL = {
+    "type": "function",
+    "name": "agent_steer",
+    "description": (
+        "Refine the ACTIVE agent run mid-flight without restarting it — "
+        "e.g. 'actually only direct flights', 'skip that step'. Delivered "
+        "at the agent's next tool boundary. Fails if no run is active."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {
+                "type": "string",
+                "description": "The course-correction for the in-flight run.",
+            }
+        },
+        "required": ["text"],
+    },
+}
+
+AGENT_STOP_TOOL = {
+    "type": "function",
+    "name": "agent_stop",
+    "description": (
+        "Cancel the ACTIVE agent run entirely ('never mind', 'actually "
+        "stop', 'forget it'). Fails softly if no run is active."
+    ),
+    "parameters": {"type": "object", "properties": {}},
 }
 
 
@@ -158,12 +208,28 @@ def handle_voice_live_sdp(handler):
     if not api_key:
         return bad(handler, "no OpenAI API key configured on this server", 503)
 
+    # Optional session binding: the frontend binds the call first
+    # (/api/voice/live/connect) and can pass the digest to enrich instructions.
+    instructions = VOICE_INSTRUCTIONS
+    digest = str(data.get("digest") or "").strip()
+    if digest:
+        instructions = (
+            instructions
+            + "\n\nCURRENT SESSION DIGEST (live context — you already know this):\n"
+            + digest[:6000]
+        )
+
     session_config = json.dumps(
         {
             "type": "realtime",
             "model": REALTIME_MODEL,
-            "instructions": VOICE_INSTRUCTIONS,
-            "tools": [ASK_VERITY_TOOL],
+            "instructions": instructions,
+            "tools": [
+                ASK_VERITY_TOOL,
+                AGENT_STATUS_TOOL,
+                AGENT_STEER_TOOL,
+                AGENT_STOP_TOOL,
+            ],
             "tool_choice": "auto",
             "audio": {
                 "input": {
@@ -532,3 +598,195 @@ def handle_voice_live_ask(handler):
         return j(handler, {"error": "chat start returned no stream_id"}, status=502)
 
     return j(handler, {"ok": True, "stream_id": resp["stream_id"], "session_id": s.session_id})
+
+
+# ── realtime-as-agent-surface: steer / status / cancel ────────────────────────
+#
+# Design: the realtime model is the agent SURFACE (orchestrator); the Hermes
+# agent is the toolbox executor. Voice gets lifecycle control over the session's
+# single agent run: launch (ask), watch (progress), steer mid-flight, cancel.
+# One run per session at a time is a feature, not a limit — the run IS the
+# session's agent activity, identical to what a typed turn would do.
+
+
+def _voice_binding_sid(handler, data):
+    s, err = _require_webui_session(handler, data.get("session_id"))
+    if err is not None:
+        return None, err
+    return s, None
+
+
+def handle_voice_live_steer(handler):
+    """POST /api/voice/live/steer — {session_id, text}
+
+    Injects course-correction into the session's ACTIVE agent run without
+    interrupting it (same machinery as /steer in the composer). Refines an
+    in-flight request: "actually use the direct flight", "also check Tuesday".
+    """
+    if handler.command != "POST":
+        return bad(handler, "POST required", 405)
+    if not _auth_ok(handler):
+        return bad(handler, "unauthorized", 401)
+    try:
+        data = read_body(handler)
+    except Exception:
+        return bad(handler, "invalid request body", 400)
+
+    s, err = _voice_binding_sid(handler, data)
+    if err is not None:
+        return err
+
+    text = str(data.get("text") or "").strip()
+    if not text:
+        return bad(handler, "text required", 400)
+
+    from api.streaming import _handle_chat_steer
+
+    class _ProxyHandler:
+        def __init__(self, inner, body):
+            self._inner = handler
+            self.command = "POST"
+            self.client_address = getattr(handler, "client_address", ("127.0.0.1", 0))
+            self._body = json.dumps(body).encode()
+            self.headers = {"Content-Length": str(len(self._body)), "Content-Type": "application/json"}
+            self.rfile = io.BytesIO(self._body)
+            self.wfile = io.BytesIO()
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, k, v):
+            pass
+
+        def end_headers(self):
+            pass
+
+    proxy = _ProxyHandler(handler, {"session_id": s.session_id, "text": text})
+    try:
+        _handle_chat_steer(proxy, {"session_id": s.session_id, "text": text})
+    except Exception as e:
+        print(f"[webui] voice live: steer failed: {e}", flush=True)
+        return j(handler, {"accepted": False, "error": "steer failed"}, status=500)
+
+    raw = proxy.wfile.getvalue()
+    try:
+        resp = json.loads(raw.decode()) if raw else {}
+    except Exception:
+        resp = {}
+    if resp.get("accepted"):
+        return j(handler, {"ok": True, "stream_id": resp.get("stream_id")})
+    return j(handler, {
+        "ok": False,
+        "reason": resp.get("fallback") or "not_accepted",
+        "message": "No active run to steer" if resp.get("fallback") in ("not_running", "stream_dead", "session_not_found")
+                   else "The agent could not accept steering right now",
+    })
+
+
+def handle_voice_live_status(handler):
+    """POST /api/voice/live/status — {session_id}
+
+    Compact orchestration view for the realtime model: is a run active, what
+    step is it on (from the run journal), recent tool names.
+    """
+    if handler.command != "POST":
+        return bad(handler, "POST required", 405)
+    if not _auth_ok(handler):
+        return bad(handler, "unauthorized", 401)
+    try:
+        data = read_body(handler)
+    except Exception:
+        return bad(handler, "invalid request body", 400)
+
+    s, err = _voice_binding_sid(handler, data)
+    if err is not None:
+        return err
+
+    sid = s.session_id
+    active_stream_id = getattr(s, "active_stream_id", None)
+    running = False
+    if active_stream_id:
+        from api.routes import STREAMS, STREAMS_LOCK
+
+        with STREAMS_LOCK:
+            running = active_stream_id in STREAMS
+
+    out = {
+        "ok": True,
+        "session_id": sid,
+        "active": running,
+        "stream_id": active_stream_id if running else None,
+    }
+
+    if running:
+        try:
+            from api.run_journal import find_run_summary, read_run_events
+
+            summary = find_run_summary(active_stream_id)
+            if summary:
+                out["last_event"] = summary.get("last_event")
+                out["last_seq"] = summary.get("last_seq")
+                journal = read_run_events(sid, active_stream_id)
+                events = [e for e in (journal.get("events") or []) if isinstance(e, dict)]
+                # last few tool names + latest interim assistant text
+                tool_names = []
+                last_interim = ""
+                for e in events:
+                    ev = e.get("event") or e.get("type")
+                    payload = e.get("payload") if isinstance(e.get("payload"), dict) else {}
+                    if ev == "tool" and payload.get("name"):
+                        tool_names.append(str(payload["name"]))
+                    elif ev == "interim_assistant" and payload.get("text"):
+                        last_interim = str(payload["text"])[:200]
+                out["recent_tools"] = tool_names[-5:]
+                out["latest_step"] = last_interim
+        except Exception as e:
+            print(f"[webui] voice live: status journal read failed: {e}", flush=True)
+
+    return j(handler, out)
+
+
+def handle_voice_live_stop(handler):
+    """POST /api/voice/live/stop — {session_id}
+
+    Cancels the session's active agent run (voice "stop" / "never mind").
+    Same machinery as the composer's Stop button.
+    """
+    if handler.command != "POST":
+        return bad(handler, "POST required", 405)
+    if not _auth_ok(handler):
+        return bad(handler, "unauthorized", 401)
+    try:
+        data = read_body(handler)
+    except Exception:
+        return bad(handler, "invalid request body", 400)
+
+    s, err = _voice_binding_sid(handler, data)
+    if err is not None:
+        return err
+
+    sid = s.session_id
+    active_stream_id = getattr(s, "active_stream_id", None)
+    if not active_stream_id:
+        return j(handler, {"ok": True, "cancelled": False, "message": "No active run"})
+
+    from api.routes import STREAMS, STREAMS_LOCK
+
+    with STREAMS_LOCK:
+        running = active_stream_id in STREAMS
+    if not running:
+        return j(handler, {"ok": True, "cancelled": False, "message": "No active run"})
+
+    from api.streaming import cancel_stream
+
+    try:
+        result = cancel_stream(active_stream_id)
+    except Exception as e:
+        print(f"[webui] voice live: stop failed: {e}", flush=True)
+        return j(handler, {"ok": False, "error": "cancel failed"}, status=500)
+
+    cancelled = bool(result.get("cancelled")) if isinstance(result, dict) else bool(result)
+    return j(handler, {"ok": True, "cancelled": cancelled, "stream_id": active_stream_id})
