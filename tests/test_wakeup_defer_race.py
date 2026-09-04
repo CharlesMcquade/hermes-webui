@@ -257,9 +257,9 @@ def test_idle_completion_still_fires_once(monkeypatch):
 def test_next_user_turn_drain_and_teardown_hook_dont_double_fire(monkeypatch):
     """If a user turn DOES come, the next-turn drain
     (_drain_webui_process_notifications) must NOT also deliver the deferred
-    completion: _process_one set BG_TASK_COMPLETE_EVENTS_SEEN AND the registry
-    _completion_consumed marker BEFORE the defer, and it consumed the
-    completion_queue event, so the next-turn drain has nothing to fire. The
+    completion: _process_one claimed BG_TASK_COMPLETE_EVENTS_SEEN before
+    deferring without marking registry consumption, and removed the
+    completion_queue event. Shared ownership prevents duplicate delivery. The
     teardown idle-hook then delivers it exactly once. Total deliveries == 1.
     """
     from api import background_process as bp, config as cfg
@@ -279,14 +279,13 @@ def test_next_user_turn_drain_and_teardown_hook_dont_double_fire(monkeypatch):
             cfg.ACTIVE_RUNS[stream_id] = {"session_id": sid}
 
         bp._process_one(_completion_evt("proc-shared-1", sid))
-        # Shared dedupe contract: _process_one marked it seen + registry-
-        # consumed before deferring.
+        # Shared ownership is claimed before defer; disposition is not ACKed.
         assert "proc-shared-1" in cfg.BG_TASK_COMPLETE_EVENTS_SEEN[sid]
-        assert fake.is_completion_consumed("proc-shared-1")
+        assert not fake.is_completion_consumed("proc-shared-1")
         assert sid in cfg.DEFERRED_PROCESS_WAKEUPS
 
         # A user turn comes: the next-turn drain runs. Even if a duplicate
-        # event were re-queued (kill_process race), the SEEN + consumed gate
+        # event were re-queued (kill_process race), the shared SEEN gate
         # makes it a no-op — it must NOT deliver the deferred wakeup.
         fake.completion_queue.put(_completion_evt("proc-shared-1", sid))
         notifications = st._drain_webui_process_notifications(sid)
@@ -541,9 +540,8 @@ def test_paused_process_wakeup_409_does_not_requeue(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# Test 8 — Greptile P1: multiple deferred wakeups in one teardown. Only the
-# FIRST starts a turn (the rest would 409 racing the per-session agent lock);
-# entries 2..N must be re-deferred, not lost, and drain on later teardowns.
+# Test 8 — multiple deferred wakeups are delivered in one teardown batch,
+# without racing separate turns or losing entries.
 # --------------------------------------------------------------------------
 
 
@@ -552,8 +550,7 @@ def test_multiple_deferred_wakeups_each_survive_across_teardowns(monkeypatch):
     teardown drain must NOT fire N racing daemon threads (only one wins the
     agent lock; the losers 409 and, since the entries were already popped,
     their prompts would be lost forever). The fix starts exactly one wakeup
-    and re-defers the remainder, so each subsequent teardown delivers the
-    next — every prompt is eventually delivered exactly once.
+    containing every deferred prompt; later teardowns have nothing to deliver.
     """
     from api import background_process as bp, config as cfg
 
@@ -582,24 +579,11 @@ def test_multiple_deferred_wakeups_each_survive_across_teardowns(monkeypatch):
         assert bp.drain_deferred_wakeups_for_session(sid) == 1
         assert _wait_for_wakeup(holder)
         assert len(holder["calls"]) == 1
-        assert len(cfg.DEFERRED_PROCESS_WAKEUPS.get(sid, [])) == 2
-
-        # Second teardown delivers the next, third delivers the last.
-        holder["event"].clear()
-        assert bp.drain_deferred_wakeups_for_session(sid) == 1
-        assert _wait_for_wakeup(holder)
-        assert len(holder["calls"]) == 2
-        assert len(cfg.DEFERRED_PROCESS_WAKEUPS.get(sid, [])) == 1
-
-        holder["event"].clear()
-        assert bp.drain_deferred_wakeups_for_session(sid) == 1
-        assert _wait_for_wakeup(holder)
-        assert len(holder["calls"]) == 3
         assert sid not in cfg.DEFERRED_PROCESS_WAKEUPS
-
-        # All three distinct prompts delivered exactly once, no duplicates.
-        delivered = {c["message"] for c in holder["calls"]}
-        assert len(delivered) == 3
+        # All three results enter one continuation, without serial empty turns.
+        delivered = holder["calls"][0]["message"]
+        for pid in ("proc-A", "proc-B", "proc-C"):
+            assert delivered.count(f"Background process {pid} completed") == 1
         # Nothing left → a final drain is a no-op (no wakeup loop).
         assert bp.drain_deferred_wakeups_for_session(sid) == 0
     finally:

@@ -71,7 +71,8 @@ graphify-out/
 .graphify_cached.json
 .graphify_uncached.txt
 
-.venv/
+# Ignore a local environment whether it is a directory or a symlink.
+.venv
 
 # Dev-only lint tooling (ESLint runtime-error guard) — see TESTING.md
 node_modules/
