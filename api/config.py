@@ -774,6 +774,21 @@ def _config_for_yaml_save(config_data: dict) -> dict:
     return data
 
 
+def _protect_credential_reference(current, raw, field):
+    """Keep source-owned credential references symbolic at the save boundary."""
+    ref = re.compile(r"\$\{([^}]+)\}")
+    secret_name = re.compile(r"password|passwd|token|secret|api[_-]?key|credential|authorization|cookie", re.I)
+    refs = ref.findall(raw)
+    protected = refs if secret_name.search(field) else [name for name in refs if secret_name.search(name)]
+    if protected:
+        # A complete new reference contains no expanded credential bytes.
+        if ref.fullmatch(current):
+            return current
+        if not set(protected).issubset(ref.findall(current)):
+            return raw
+    return None
+
+
 def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
     try:
         import yaml as _yaml
@@ -781,9 +796,28 @@ def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    # Parse strictly: the permissive read cache cannot establish write safety.
+    try:
+        raw = _yaml.safe_load(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+        if raw is None:
+            raw = {}
+        if not isinstance(raw, dict):
+            raise ValueError("configuration root is not a mapping")
+    except Exception:
+        raise ValueError("Cannot preserve environment references in unreadable existing configuration") from None
+    try:
+        from hermes_cli.config import _preserve_env_ref_templates
+        data = _preserve_env_ref_templates(
+            _config_for_yaml_save(config_data), raw, _expand_env_vars(raw),
+            string_policy=_protect_credential_reference,
+        )
+    except (ImportError, TypeError):
+        # This security boundary requires the paired reference-policy helper.
+        # Do not silently persist expansions with an older companion agent.
+        raise ValueError("Config save requires a compatible reference-preserving agent") from None
     _paths._atomic_write_text(
         config_path,
-        _yaml.safe_dump(_config_for_yaml_save(config_data), sort_keys=False, allow_unicode=True),
+        _yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
     # Invalidate the memoized parse for this path so the next read re-parses the

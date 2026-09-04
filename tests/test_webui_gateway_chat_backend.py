@@ -268,6 +268,15 @@ def test_gateway_chat_health_payload_is_documented_as_operator_diagnostic_only()
 
 
 def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monkeypatch):
+    import api.config as config_api
+    import api.profiles as profiles_api
+    monkeypatch.setattr(config_api, 'get_config', lambda: {'agent': {'system_prompt': 'WRONG_GLOBAL_OVERLAY'}})
+    monkeypatch.setattr(profiles_api, 'get_hermes_home_for_profile', lambda profile: tmp_path / str(profile or 'default'))
+    homes = []
+    def profile_config(home):
+        homes.append(Path(home))
+        return {'agent': {'system_prompt': 'SESSION_PROFILE_OVERLAY'}}
+    monkeypatch.setattr(config_api, 'get_config_for_profile_home', profile_config)
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
@@ -320,6 +329,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
 
     s = new_session()
     stream_id = "stream-gateway-test"
+    s.profile = 'profile-test'
     s.active_stream_id = stream_id
     s.pending_user_message = "Say hello"
     s.pending_attachments = []
@@ -353,6 +363,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
     assert payload["reasoning_effort"] == "high"
+    assert tmp_path / 'profile-test' in homes
+    assert captured['body'].count('SESSION_PROFILE_OVERLAY') == 1
+    assert 'WRONG_GLOBAL_OVERLAY' not in captured['body']
     # #3324: the gateway path's first system message is now the full WebUI
     # ephemeral system prompt (progress prompt + session/delivery context),
     # NOT the bare _WEBUI_PROGRESS_PROMPT — otherwise the delivery/session

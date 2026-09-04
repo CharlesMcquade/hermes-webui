@@ -1020,6 +1020,17 @@ def _run_gateway_chat_streaming(
         from api.config import get_config  # imported lazily to avoid config-cycle churn
 
         cfg = get_config()
+        from api.config import get_config_for_profile_home
+        from api.profiles import get_hermes_home_for_profile
+        # Detached workers have no request TLS. Resolve prompt/prefill from the
+        # session identity, never another browser's process-global profile. A
+        # failure to resolve the profile home aborts the turn via the outer
+        # handler; the inner try below tolerates prefill/system-prompt
+        # construction failures by continuing with empty prefill rather than
+        # falling back to the wrong (global) profile.
+        prompt_cfg = get_config_for_profile_home(
+            get_hermes_home_for_profile(getattr(s, "profile", None))
+        )
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
             model=model,
@@ -1050,7 +1061,7 @@ def _run_gateway_chat_streaming(
                 _webui_ephemeral_system_prompt,
             )
 
-            prefill_context = _load_webui_prefill_context(cfg)
+            prefill_context = _load_webui_prefill_context(prompt_cfg)
             # #3324: the WebUI session/delivery context (connected platforms,
             # home channels, delivery hints, session framing) is now carried in
             # the ephemeral system prompt rather than a prefill `user` message.
@@ -1058,15 +1069,16 @@ def _run_gateway_chat_streaming(
             # context is not silently dropped on Gateway-routed WebUI chats.
             _gateway_system_prompt = _webui_ephemeral_system_prompt(
                 None,
+                personality_name=getattr(s, "personality", None),
                 surface_context={
                     "source": "webui",
                     "session_id": session_id,
                     "profile": getattr(s, "profile", None),
                     "workspace": s.workspace if s is not None else str(workspace),
                 },
-                config_data=cfg,
+                config_data=prompt_cfg,
             )
-            prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
+            prefill_messages = _prefill_messages_with_webui_context(prefill_context, prompt_cfg)
             prefill_messages = _normalize_prefill_messages_before_user_turn(prefill_messages)
             prefill_messages = [
                 {"role": "system", "content": _gateway_system_prompt},

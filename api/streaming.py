@@ -1789,11 +1789,47 @@ def _webui_ephemeral_system_prompt(
     personality_prompt: Optional[str],
     surface_context: Optional[dict] = None,
     config_data: Optional[dict] = None,
+    *,
+    personality_name: Optional[str] = None,
 ) -> str:
-    """Build WebUI-only runtime instructions that are not persisted to history."""
+    """Compose the native session overlay with WebUI surface guidance.
+
+    Explicit session selection (including neutral '') overrides the profile
+    selection. Otherwise the native resolver supplies personality/manual-overlay
+    precedence. An explicit prompt body remains supported for existing callers.
+    """
+    effective_config = dict(config_data or {})
+    if personality_name is not None:
+        effective_config['display'] = {
+            **(effective_config.get('display') or {}),
+            'personality': personality_name,
+        }
+    overlay = personality_prompt
+    if not overlay:
+        try:
+            from hermes_cli.personality import resolve_ephemeral_system_prompt
+        except ImportError:
+            # Compatibility with older/standalone installs: configured
+            # personalities and the manual overlay still work. Built-in-only
+            # personalities require the companion agent's native resolver.
+            agent_cfg = effective_config.get("agent") or {}
+            selected = str((effective_config.get("display") or {}).get("personality") or "").strip().lower()
+            definitions = {str(k).strip().lower(): v for k, v in (agent_cfg.get("personalities") or {}).items()}
+            body = definitions.get(selected) if selected not in ('', 'none', 'neutral', 'default') else None
+            if isinstance(body, dict):
+                parts = [body.get('system_prompt') or body.get('prompt') or '']
+                for field in ('tone', 'style'):
+                    if body.get(field):
+                        parts.append(f'{field.title()}: {body[field]}')
+                body = '\n'.join(str(part).strip() for part in parts if str(part).strip())
+            if not body:
+                body = agent_cfg.get('system_prompt', '')
+            overlay = str(body or '')
+        else:
+            overlay = resolve_ephemeral_system_prompt(effective_config)
     parts = []
-    if personality_prompt:
-        parts.append(str(personality_prompt).strip())
+    if overlay:
+        parts.append(str(overlay).strip())
     surface_prompt = _webui_surface_context_prompt(surface_context)
     if surface_prompt:
         parts.append(surface_prompt)
@@ -4069,6 +4105,15 @@ def _drain_webui_process_notifications(
                     evt_sid, stale_age, stale_completion_max_age,
                 )
             continue
+
+        # Routing ownership is not acknowledgment: the background queue may
+        # already own this result while the agent later consumes its output.
+        from api import config as _completion_cfg
+        with _completion_cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+            seen = _completion_cfg.BG_TASK_COMPLETE_EVENTS_SEEN.setdefault(session_id, set())
+            if evt_sid in seen:
+                continue
+            seen.add(evt_sid)
 
         if is_stale:
             logger.info(
@@ -11691,30 +11736,11 @@ def _run_agent_streaming(
                 "write_file, read_file, search_files, terminal workdir, and patch. "
                 "Never fall back to a hardcoded path when this tag is present."
             )
-            # Resolve personality prompt from config.yaml agent.personalities
-            # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)
-            _personality_prompt = None
-            _pname = getattr(s, 'personality', None)
-            if _pname:
-                _agent_cfg = _cfg.get('agent', {})
-                _personalities = _agent_cfg.get('personalities', {})
-                if isinstance(_personalities, dict) and _pname in _personalities:
-                    _pval = _personalities[_pname]
-                    if isinstance(_pval, dict):
-                        _parts = [_pval.get('system_prompt', '') or _pval.get('prompt', '')]
-                        if _pval.get('tone'):
-                            _parts.append(f'Tone: {_pval["tone"]}')
-                        if _pval.get('style'):
-                            _parts.append(f'Style: {_pval["style"]}')
-                        _personality_prompt = '\n'.join(p for p in _parts if p)
-                    else:
-                        _personality_prompt = str(_pval)
-            # Pass WebUI-only runtime guidance via ephemeral_system_prompt
-            # (agent's own mechanism). This preserves any selected personality
-            # while making long tool runs emit real user-visible interim text
-            # through interim_assistant_callback instead of frontend guesses.
+            # Resolve the native profile/session overlay in the shared builder.
+            # Do not duplicate personality precedence at individual call sites.
             agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(
-                _personality_prompt,
+                None,
+                personality_name=getattr(s, 'personality', None),
                 surface_context={
                     'source': 'webui',
                     'session_id': session_id,
