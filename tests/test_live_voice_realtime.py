@@ -566,8 +566,9 @@ def test_voice_gate_orders_transcripts_and_stops_only_explicit_hold():
       emit({type:'conversation.item.input_audio_transcription.completed',item_id:'u0',transcript:'Hello'});
       emit({type:'response.created',response:{id:'r0'}});
       emit({type:'output_audio_buffer.started',response_id:'r0'});
-      emit({type:'input_audio_buffer.speech_started'});
+      emit({type:'input_audio_buffer.speech_started',item_id:'u1'});
       const ambientCancels=count('response.cancel');
+      emit({type:'input_audio_buffer.speech_stopped',item_id:'u1'});
       emit({type:'input_audio_buffer.committed',item_id:'u1'});
       emit({type:'input_audio_buffer.committed',item_id:'u2'});
       emit({type:'conversation.item.input_audio_transcription.completed',item_id:'u2',transcript:'Still talking'});
@@ -808,6 +809,211 @@ def test_voice_stop_preserves_persistence_warning():
     """)
     assert "persistence" in result["output"].lower()
     assert "Nothing to stop" not in result["output"]
+
+
+@pytest.mark.parametrize("drain_event", ["output_audio_buffer.stopped", "output_audio_buffer.cleared"])
+def test_voice_stale_audio_drain_cannot_release_new_response(drain_event):
+    result = _run_voice_js_scenario(r'''
+      window.toggleLiveVoice(); await delay(25);
+      emit({type:'response.created',response:{id:'old'}});
+      emit({type:'output_audio_buffer.started',response_id:'old'});
+      emit({type:'response.done',response:{id:'old',status:'completed',output:[]}});
+      emit({type:'output_audio_buffer.stopped',response_id:'old'});
+      emit({type:'response.created',response:{id:'current'}});
+      emit({type:'output_audio_buffer.started',response_id:'current'});
+      emit({type:'response.done',response:{id:'current',status:'completed',output:[]}});
+      emit({type:EVENT,response_id:'old'});
+      emit({type:'conversation.item.input_audio_transcription.completed',item_id:'next',transcript:'And the next thing?'});
+      const before=count('response.create');
+      emit({type:'output_audio_buffer.stopped',response_id:'current'});
+      const after=count('response.create');
+      window.stopLiveVoice(true);
+      console.log(JSON.stringify({before,after}));
+    '''.replace("EVENT", json.dumps(drain_event)))
+    assert result == {"before": 0, "after": 1}
+
+
+def test_voice_audio_content_reserves_playback_before_started_event():
+    result = _run_voice_js_scenario(r'''
+      window.toggleLiveVoice(); await delay(25);
+      emit({type:'response.created',response:{id:'r'}});
+      emit({type:'response.content_part.added',response_id:'r',part:{type:'audio'}});
+      emit({type:'conversation.item.input_audio_transcription.completed',item_id:'next',transcript:'Next question'});
+      emit({type:'response.done',response:{id:'r',status:'completed',output:[{
+        type:'message',role:'assistant',content:[{type:'audio',transcript:'Still playing'}]
+      }]}});
+      const beforeStarted=count('response.create');
+      emit({type:'output_audio_buffer.started',response_id:'r'});
+      const beforeDrained=count('response.create');
+      emit({type:'output_audio_buffer.stopped',response_id:'r'});
+      const after=count('response.create');
+      window.stopLiveVoice(true);
+      console.log(JSON.stringify({beforeStarted,beforeDrained,after}));
+    ''')
+    assert result == {"beforeStarted": 0, "beforeDrained": 0, "after": 1}
+
+
+def test_voice_background_result_waits_for_audio_and_pending_user_transcript():
+    result = _run_voice_js_scenario(r'''
+      const baseFetch=fetch; let resolveStatus;
+      global.fetch=(url,opts)=>String(url).includes('/status')
+        ? new Promise(r=>{resolveStatus=r;}) : baseFetch(url,opts);
+      window.toggleLiveVoice(); await delay(25);
+      emit({type:'response.created',response:{id:'ask'}});
+      emit({type:'response.done',response:{id:'ask',status:'completed',output:[{
+        type:'function_call',name:'agent_ask',call_id:'ask',arguments:'{"question":"Check something"}'
+      }]}});
+      await delay(10);
+      emit({type:'response.created',response:{id:'ack'}});
+      emit({type:'output_audio_buffer.started',response_id:'ack'});
+      await delay(1550);
+      resolveStatus(response(200,{ok:true,terminal:true,terminal_state:'completed',result_available:true,answer:'Verified result'}));
+      await delay(10);
+      const notes=()=>sent.filter(e=>e.item&&e.item.type==='message');
+      const whileGenerating=notes().length;
+      emit({type:'response.done',response:{id:'ack',status:'completed',output:[]}});
+      const whilePlaying=notes().length;
+      emit({type:'input_audio_buffer.speech_started',item_id:'u'});
+      emit({type:'output_audio_buffer.stopped',response_id:'ack'});
+      const whileSpeaking={notes:notes().length,creates:count('response.create')};
+      emit({type:'input_audio_buffer.speech_stopped',item_id:'u'});
+      emit({type:'input_audio_buffer.committed',item_id:'u'});
+      emit({type:'output_audio_buffer.stopped',response_id:'ack'});
+      const whileTranscribing=count('response.create');
+      emit({type:'conversation.item.input_audio_transcription.completed',item_id:'u',transcript:'Please include the details'});
+      const after={notes:notes().map(e=>e.item.content[0].text),creates:count('response.create')};
+      const lastTypes=sent.slice(-2).map(e=>e.type);
+      const cancels=count('response.cancel')+count('output_audio_buffer.clear');
+      window.stopLiveVoice(true);
+      console.log(JSON.stringify({whileGenerating,whilePlaying,whileSpeaking,whileTranscribing,after,lastTypes,cancels}));
+    ''')
+    assert result == {
+        "whileGenerating": 0, "whilePlaying": 0,
+        "whileSpeaking": {"notes": 0, "creates": 1}, "whileTranscribing": 1,
+        "after": {"notes": ["[agent result]\nVerified result"], "creates": 2},
+        "lastTypes": ["conversation.item.create", "response.create"], "cancels": 0,
+    }
+
+
+@pytest.mark.parametrize("finish", ["reply", "result", "disconnect", "cancel", "send-failure"])
+def test_voice_coalesces_background_progress_and_releases_owned_context(finish):
+    result = _run_voice_js_scenario(r'''
+      const finish=FINISH;
+      const realTimeout=setTimeout;
+      global.setTimeout=(fn,ms,...args)=>realTimeout(fn,ms===1500?5:ms,...args);
+      const realNow=Date.now; let clock=realNow();
+      Date.now=()=>clock;
+      const baseFetch=fetch; const statuses=[]; const notices=[];
+      global.showToast=msg=>notices.push(msg);
+      global.fetch=(url,opts)=>String(url).includes('/status')
+        ? new Promise(resolve=>statuses.push(resolve)) : baseFetch(url,opts);
+      const nextStatus=async()=>{
+        for(let i=0;!statuses.length&&i<100;i++) await delay(2);
+        if(!statuses.length) throw Error('expected status poll');
+        return statuses.shift();
+      };
+      const noteTexts=()=>sent.filter(e=>e.item&&e.item.type==='message').map(e=>e.item.content[0].text);
+      window.toggleLiveVoice(); await delay(25);
+      const oldMessageHandler=dc.onmessage;
+      emit({type:'response.created',response:{id:'ask'}});
+      emit({type:'response.done',response:{id:'ask',status:'completed',output:[{
+        type:'function_call',name:'agent_ask',call_id:'ask',arguments:'{"question":"Look it up"}'
+      }]}});
+      await delay(10);
+      emit({type:'response.created',response:{id:'ack'}});
+      emit({type:'output_audio_buffer.started',response_id:'ack'});
+      (await nextStatus())(response(200,{ok:true,active:true,latest_step:'Old step'}));
+      await delay(5); clock+=7000;
+      (await nextStatus())(response(200,{ok:true,active:true,latest_step:'Latest step'}));
+      await delay(5);
+      const before=noteTexts();
+      const createsBefore=count('response.create');
+      if(finish==='result'){
+        (await nextStatus())(response(200,{ok:true,terminal:true,terminal_state:'completed',result_available:true,answer:'Final answer'}));
+        await delay(5);
+      }
+      if(finish==='disconnect'){
+        window.stopLiveVoice(true); window.toggleLiveVoice(); await delay(25);
+        // Queued callbacks from the old channel cannot reserve the new floor.
+        oldMessageHandler({data:JSON.stringify({type:'output_audio_buffer.started',response_id:'ack'})});
+      }else{
+        emit({type:'response.done',response:{id:'ack',status:'completed',output:[]}});
+        emit({type:'output_audio_buffer.stopped',response_id:'ack'});
+      }
+      if(finish==='cancel'){
+        const pendingStatus=await nextStatus();
+        emit({type:'response.created',response:{id:'stop'}});
+        emit({type:'response.done',response:{id:'stop',status:'completed',output:[{
+          type:'function_call',name:'agent_stop',call_id:'stop',arguments:'{}'
+        }]}});
+        await delay(5);
+        pendingStatus(response(200,{ok:true,active:true,latest_step:'Stale after cancel'}));
+        await delay(10);
+      }
+      if(finish==='send-failure'){
+        const originalSend=dc.send;
+        dc.send=raw=>{ if(JSON.parse(raw).item?.type==='message') throw Error('send failed'); originalSend(raw); };
+      }
+      if(finish!=='result'&&finish!=='cancel'){
+        emit({type:'conversation.item.input_audio_transcription.completed',item_id:'next',transcript:'What do you know?'});
+      }
+      await delay(5);
+      const state=window._liveVoiceState().state;
+      const notes=noteTexts();
+      const createsAfter=count('response.create');
+      const cancels=count('response.cancel')+count('output_audio_buffer.clear');
+      window.stopLiveVoice(true);
+      // Settle any fake network requests after disconnect, no leaked polling.
+      statuses.splice(0).forEach(resolve=>resolve(response(200,{ok:true,active:false})));
+      Date.now=realNow;
+      console.log(JSON.stringify({before,notes,createsBefore,createsAfter,state,cancels,notices}));
+    '''.replace("FINISH", json.dumps(finish)))
+    assert result["before"] == []
+    assert result["notes"] == ({"reply": ["[voice progress] Latest step"],
+                                "result": ["[agent result]\nFinal answer"]}.get(finish, []))
+    assert result["createsAfter"] == result["createsBefore"] + (finish != "send-failure")
+    assert result["state"] == ("off" if finish == "send-failure" else "live")
+    assert result["cancels"] == 0
+    if finish == "send-failure":
+        assert any("update" in notice for notice in result["notices"])
+
+
+def test_voice_late_audio_completion_cannot_resurrect_drained_or_foreign_audio():
+    result = _run_voice_js_scenario(r'''
+      window.toggleLiveVoice(); await delay(25);
+      const output=[{type:'message',role:'assistant',content:[{type:'audio',transcript:'Partial'}]}];
+      emit({type:'response.created',response:{id:'r'}});
+      emit({type:'response.content_part.added',response_id:'r',part:{type:'audio'}});
+      emit({type:'output_audio_buffer.cleared',response_id:'r'});
+      emit({type:'response.done',response:{id:'r',status:'cancelled',output}});
+      emit({type:'response.done',response:{id:'foreign',status:'completed',output}});
+      emit({type:'output_audio_buffer.started',response_id:'r'});
+      emit({type:'conversation.item.input_audio_transcription.completed',item_id:'u',transcript:'Next please'});
+      const creates=count('response.create');
+      window.stopLiveVoice(true);
+      console.log(JSON.stringify({creates}));
+    ''')
+    assert result == {"creates": 1}
+
+
+@pytest.mark.parametrize("started", [False, True])
+@pytest.mark.parametrize("status", ["cancelled", "incomplete", "completed"])
+def test_voice_empty_audio_response_releases_only_unstarted_reservation(started, status):
+    result = _run_voice_js_scenario(r'''
+      const started=STARTED;
+      window.toggleLiveVoice(); await delay(25);
+      emit({type:'response.created',response:{id:'empty'}});
+      emit({type:'response.content_part.added',response_id:'empty',part:{type:'audio'}});
+      if(started) emit({type:'output_audio_buffer.started',response_id:'empty'});
+      emit({type:'response.done',response:{id:'empty',status:STATUS,output:[]}});
+      emit({type:'conversation.item.input_audio_transcription.completed',item_id:'u',transcript:'Next please'});
+      const beforeDrain=count('response.create');
+      emit({type:'output_audio_buffer.stopped',response_id:'empty'});
+      const afterDrain=count('response.create');
+      window.stopLiveVoice(true);
+      console.log(JSON.stringify({beforeDrain,afterDrain}));
+    '''.replace("STARTED", json.dumps(started)).replace("STATUS", json.dumps(status)))
+    assert result == {"beforeDrain": 0 if started else 1, "afterDrain": 1}
 
 
 def test_css_live_voice_rules():
