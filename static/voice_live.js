@@ -583,6 +583,9 @@
           _responseReasons.add('retry');
           const generation=_generation;
           setTimeout(()=>{ if(generation===_generation) _flushResponseQueue(); },100);
+        }else{
+          _setState('error','Voice reply was rejected after retrying. Reconnect voice to continue; accepted Hermes tasks remain in chat.');
+          stopLiveVoice(true);
         }
       }
       console.warn('[live-voice] realtime error',msg);
