@@ -691,6 +691,46 @@ def test_voice_failed_response_exits_visibly_instead_of_staying_silent():
     assert any("failed" in msg.lower() for msg in result["notices"])
 
 
+@pytest.mark.parametrize("trigger", ["user", "tool"])
+def test_voice_rejected_response_retry_exits_visibly_without_repeating_tools(trigger):
+    result = _run_voice_js_scenario("""
+      const trigger=%s;
+      const notices=[];
+      global.showToast=msg=>notices.push(msg);
+      window.toggleLiveVoice(); await delay(25);
+      emit({type:'conversation.item.input_audio_transcription.completed',item_id:'u',transcript:'Status?'});
+      if(trigger==='tool'){
+        emit({type:'response.created',response:{id:'r'}});
+        const item={type:'function_call',name:'agent_status',call_id:'c',arguments:'{}'};
+        emit({type:'response.done',response:{id:'r',status:'completed',output:[item]}});
+        await delay(10);
+      }
+      const creates=()=>sent.filter(e=>e.type==='response.create');
+      const beforeFailure=creates().length;
+      emit({type:'error',error:{event_id:creates().at(-1).event_id,message:'create rejected'}});
+      await delay(130);
+      const afterRetry=creates().length;
+      emit({type:'error',event_id:creates().at(-1).event_id,error:{message:'retry rejected'}});
+      await delay(130);
+      const state=window._liveVoiceState();
+      const disconnects=fetches.filter(f=>f.url.includes('/disconnect')).length;
+      const statusCalls=fetches.filter(f=>f.url.includes('/status')).length;
+      const toolOutputs=sent.filter(e=>e.item&&e.item.call_id==='c').length;
+      const cancels=fetches.filter(f=>f.url.includes('/stop')||f.url.includes('/cancel')).length;
+      window.stopLiveVoice(true);
+      console.log(JSON.stringify({beforeFailure,afterRetry,afterFailure:creates().length,
+        state,notices,disconnects,statusCalls,toolOutputs,cancels}));
+    """ % json.dumps(trigger))
+    assert result["afterRetry"] == result["beforeFailure"] + 1
+    assert result["afterFailure"] == result["afterRetry"]
+    assert result["state"] == {"state": "off", "bound": None, "busy": False}
+    assert result["disconnects"] == 1
+    assert any("rejected" in msg.lower() and "reconnect" in msg.lower() for msg in result["notices"])
+    assert result["statusCalls"] == (1 if trigger == "tool" else 0)
+    assert result["toolOutputs"] == (1 if trigger == "tool" else 0)
+    assert result["cancels"] == 0
+
+
 def test_voice_refused_response_send_exits_visibly():
     result = _run_voice_js_scenario("""
       window.toggleLiveVoice(); await delay(20);
