@@ -23,6 +23,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+- [`docs/architecture/live-voice-contract.md`](architecture/live-voice-contract.md):
+  Realtime audio/reply gating, tool settlement, reconnect ownership, and exact-run
+  result retrieval. Voice reuses the existing Hermes launch/steer/cancel paths;
+  it does not create a second executor or change run-state authority.
 - [`docs/rfcs/webui-run-state-consistency-contract.md`](rfcs/webui-run-state-consistency-contract.md):
   proposed consistency rules for current WebUI streaming, recovery, replay,
   model-context reconstruction, compression, UI scene/cache, and sidebar metadata
