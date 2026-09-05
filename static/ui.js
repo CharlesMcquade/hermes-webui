@@ -6410,6 +6410,15 @@ if(typeof window!=='undefined'){
       const caughtPrevTail=movedDown
         &&_prevMessageScrollHeightForRepin!==null
         &&(top+el.clientHeight)>=(_prevMessageScrollHeightForRepin-80);
+      // A small upward movement can be either a browser/layout nudge or real
+      // reader input. Aggressive follow may absorb only the former. If the
+      // wheel, keyboard, touch surface, or native scrollbar owns the movement,
+      // release the pin immediately so the next streamed write cannot yank the
+      // viewport back to the bottom and create a visible bottom-edge vibration.
+      const explicitReaderScrollIntent=(typeof _scrollbarDragActive!=='undefined'&&!!_scrollbarDragActive)
+        ||(typeof _recentMessageTouchScrollIntent==='function'&&_recentMessageTouchScrollIntent())
+        ||(typeof _recentMessageWheelIntent==='function'&&_recentMessageWheelIntent())
+        ||(typeof _recentMessageKeyScrollIntent==='function'&&_recentMessageKeyScrollIntent());
       // Suppress the post-render scroll artifact: right after renderMessages()
       // rebuilds #msgInner, the browser can emit a non-user upward scroll event.
       // The typeof guards keep this branch inert in unit harnesses that inject
@@ -6446,11 +6455,11 @@ if(typeof window!=='undefined'){
         // Aggressive-follow escape threshold: while Auto-follow is ON and the
         // pane is pinned, an upward move only unpins once the tail region has
         // actually LEFT the viewport (scrolled up more than ~one screen).
-        // Small upward moves near the bottom — trackpad jiggle, momentum
-        // overshoot, layout nudges — keep the pin and the follow writer
-        // re-snaps. Escaping follow = deliberately scrolling up a full screen,
-        // matching reader intent ("the previous turn is out of view now").
-        if(typeof window!=='undefined'&&window._autoScrollFollow&&_scrollPinned&&bottomDistance<=el.clientHeight){
+        // Small upward moves near the bottom with no reader input — layout
+        // nudges or browser anchoring artifacts — keep the pin and let the
+        // follow writer re-snap. Explicit reader input always escapes; otherwise
+        // the writer fights the gesture and visibly vibrates at the bottom.
+        if(typeof window!=='undefined'&&window._autoScrollFollow&&_scrollPinned&&bottomDistance<=el.clientHeight&&!explicitReaderScrollIntent){
           _nearBottomCount=0;
         }else{
         _cancelBottomSettle();
