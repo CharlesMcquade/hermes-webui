@@ -27,6 +27,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
   architecture contract for remote terminal workspaces (SSH/Docker), target-side
   POSIX path preservation against macOS synthetic firmlink expansion, and
   per-profile isolation boundaries.
+- [`docs/architecture/live-voice-contract.md`](architecture/live-voice-contract.md):
+  Historical Realtime audio/reply gating, tool settlement, reconnect ownership,
+  and exact-run result retrieval. This feature is retired in the target overlay;
+  this reference is preserved only until the final candidate excludes its runtime.
 - [`docs/rfcs/webui-run-state-consistency-contract.md`](rfcs/webui-run-state-consistency-contract.md):
   proposed consistency rules for current WebUI streaming, recovery, replay,
   model-context reconstruction, compression, UI scene/cache, and sidebar metadata
