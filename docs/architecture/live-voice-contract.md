@@ -15,6 +15,23 @@ Hermes, not as a second executor. The implementation lives in
   considering a response. Incidental speech-start events never cancel playback.
 - Ordinary completed speech queues until generation **and** WebRTC playback have
   finished. This deliberately trades instant barge-in for speakerphone stability.
+- Playback is reserved by response ID as soon as audio content is announced,
+  including when `response.done` precedes `output_audio_buffer.started`. Only a
+  matching `output_audio_buffer.stopped`/`cleared` releases actual playback.
+  An unstarted reservation can also be released when the terminal response
+  snapshot contains no audio (an announced part was abandoned, not played).
+  Late/duplicate/foreign events cannot release or resurrect another response.
+  These events describe the server's audio buffer; they do not measure physical
+  device output latency.
+- Background results and progress stay in a connection-owned context queue until
+  the same safe boundary used for replies. No progress/result context is injected
+  during generation, playback, user speech, or pending committed transcription.
+  Only the latest pending progress per run is retained; a final result replaces
+  that run's pending progress. Progress piggybacks on the next reply rather than
+  causing an unsolicited spoken turn at every poll. A result requests one reply,
+  coalesced with other waiting input, immediately after the boundary opens.
+  Function-call outputs remain protocol settlement messages, not unsolicited
+  background context; their spoken continuation uses this same response gate.
 - A recognized explicit hold such as `don't reply until I say "Spider-Man"`
   suppresses all new replies, progress narration, and new tool dispatch. It also
   cancels active generation and clears active playback. The declaration itself
@@ -71,9 +88,12 @@ Hermes, not as a second executor. The implementation lives in
 - Progress uses that same journal's tool/interim events. No separate runtime
   journal is invented in the session GET payload.
 - Disconnect fences all outstanding asynchronous work by generation/session,
-  closes audio resources, and stops watching. It does **not** cancel a Hermes
-  run; accepted work remains in chat. Setup is serialized so an old microphone
-  or bind promise cannot take ownership of a new call.
+  including already-queued data-channel callbacks, clears pending context and
+  input/playback reservations, closes audio resources, and stops watching. It
+  does **not** cancel a Hermes run; accepted work remains in chat. Confirmed run
+  cancellation discards its pending progress and fences in-flight poll results.
+  Setup is serialized so an old microphone or bind promise cannot take ownership
+  of a new call.
 - Existing privilege behavior is unchanged: connect temporarily enables session
   YOLO, disconnect restores the remembered prior value, and pagehide attempts a
   restore beacon. This is not a new approval policy or a durable lease across
@@ -87,16 +107,32 @@ node --check static/voice_live.js
 ```
 
 The Node/VM cases drive the shipped JavaScript through fake browser/provider
-edges: ordered gate/release, playback drain, failed replies, overlapping tool
+edges: ordered gate/release, response-scoped playback drain, content announced
+before playback starts, abandoned empty audio, failed replies, overlapping tool
 settlement, malformed arguments, stale completion, reconnect, and run-result
-arrival while held. Backend cases use real isolated journals and test exact-run
-ownership, terminal precedence, malformed rows, and no transcript-tail fallback.
+arrival while held or while user transcription is pending. They also exercise
+latest-only progress, result-over-progress replacement, cancellation cleanup,
+and failed update delivery. Backend cases use real isolated journals and test
+exact-run ownership, terminal precedence, malformed rows, and no transcript-tail
+fallback.
 
 A live provider smoke using synthesized 24 kHz speech verified session-config
 acceptance, input transcription, zero automatic responses before the client
 request, an `agent_status` call, and a spoken response after a supplied test tool
-result. That smoke uses WebSocket transport, not iPhone Safari/WebRTC acoustics.
-Mocked tools and synthetic speech do not prove real action execution or physical
+result. That smoke used WebSocket transport.
+
+A separate real Chrome/OpenAI WebRTC smoke exercised the shipped JavaScript with
+synthetic silent input and mocked Hermes task endpoints. A result became ready
+while a long reply was speaking; no result context or next response was sent
+until that reply's `output_audio_buffer.stopped`. Both provider runs completed
+without cancel/clear commands or provider errors; remote audio recordings decoded
+and were non-silent. The final-code run sent the queued context 0.2 ms after the
+prior drain event and received the next audio-start event 658.8 ms after it.
+Those are one-run control-event timings, not measured loudspeaker latency or a
+latency guarantee. The test did not compare audible quality against the old code.
+
+Mocked tools and synthetic input do not prove real action execution or physical
 speakerphone performance. Physical iPhone acceptance still requires a refreshed
-client and restarted backend, followed by a test with concurrent nearby speech,
-an explicit hold/release, and an authorized real Hermes task.
+client (and a backend restart only if its Python config is not yet loaded),
+followed by concurrent nearby speech, an explicit hold/release, and an authorized
+real Hermes task. This handoff change is browser-only and needs no server restart.
