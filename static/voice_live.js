@@ -18,7 +18,10 @@
   let _generation=0;
   let _replyGate=null;      // normalized release phrase, or null
   let _responseOpen=false;  // response.create sent until matching response.done
-  let _audioPlaying=false;  // WebRTC output buffer can outlive response.done
+  const _playbackResponses=new Map(); // response ID -> whether playback has started
+  const _drainedResponses=new Set();  // late events cannot resurrect old playback
+  const _pendingContext=new Map();    // latest progress / final result per run
+  let _speakingItem=null;
   let _activeResponseId=null;
   let _unbindPromise=Promise.resolve();
   let _connectPromise=Promise.resolve();
@@ -106,16 +109,15 @@
     return 'working';
   }
 
-  function _narrate(text){
+  function _narrate(text, streamId){
     if(!text) return;
-    // Inject a short status as a system-ish context item so the realtime
-    // model can mention it naturally without derailing its turn.
-    _sendEvent({type:'conversation.item.create',item:{
-      type:'message',role:'system',content:[{type:'input_text',text:'[voice progress] '+text}]
-    }});
+    // Progress is context for the next reply, not a new turn every six seconds.
+    // Coalesce it locally: never rewrite the conversation beneath active speech.
+    _pendingContext.set('progress:'+streamId,'[voice progress] '+String(text).slice(0,2000));
   }
 
-  async function _pollAsk(streamId, startedAt, sid, generation){
+  async function _pollAsk(ask){
+    const {stream_id:streamId, started:startedAt, sid, generation}=ask;
     // The exact run's immutable done journal owns its answer, never the
     // mutable last message of a session which may already have another run.
     const maxMs=15*60*1000; // generous ceiling; user can hit Stop
@@ -124,13 +126,13 @@
     let lastNarration='';
     while(generation===_generation&&Date.now()-startedAt<maxMs){
       await new Promise(r=>setTimeout(r,1500));
-      if(generation!==_generation) return null;
+      if(generation!==_generation||ask.cancelled) return null;
       let st=null;
       try{
         const result=await _voicePost('api/voice/live/status',{session_id:sid,stream_id:streamId});
         if(result.status<400&&result.data.ok) st=result.data;
       }catch(_){ }
-      if(generation!==_generation) return null;
+      if(generation!==_generation||ask.cancelled) return null;
       if(!st){
         consecutiveErrors++;
         if(consecutiveErrors>=5){
@@ -150,7 +152,7 @@
         const progress=st.latest_step||((st.recent_tools||[]).length?_describeTool(st.recent_tools[st.recent_tools.length-1]):'');
         if(progress&&progress!==lastNarration){
           lastNarration=progress;
-          _narrate(progress);
+          _narrate(progress, streamId);
         }
       }
     }
@@ -198,12 +200,15 @@
     const generation=_generation;
     const ask=_activeAsk;
     const {data}=await _voicePost('api/voice/live/stop',{});
+    if((data.persistence_failed||(data.ok&&data.cancelled))&&
+       generation===_generation&&ask===_activeAsk&&ask){
+      ask.cancelled=true;
+      _pendingContext.delete('progress:'+ask.stream_id);
+    }
     if(data.persistence_failed){
-      if(generation===_generation&&ask===_activeAsk&&ask) ask.cancelled=true;
       return 'The stop encountered a persistence failure. Do not claim the final state was saved; check the chat for the recovery warning.';
     }
     if(data.ok&&data.cancelled){
-      if(generation===_generation&&ask===_activeAsk&&ask) ask.cancelled=true;
       return 'Stopped. The run is cancelled.';
     }
     if(!data.ok) return 'Could not stop the run: '+(data.error||'stop failed');
@@ -212,20 +217,14 @@
 
   async function _watchAsk(ask){
     try{
-      const result=await _pollAsk(
-        ask.stream_id,
-        ask.started,
-        ask.sid,
-        ask.generation
-      );
+      const result=await _pollAsk(ask);
       if(ask.generation!==_generation||ask.cancelled||!result) return;
       const rawText=String(result.answer||result.error||'');
       const text=rawText.length>16000
         ? rawText.slice(0,16000)+'\n…(truncated for voice; full answer is in the chat transcript)'
         : rawText;
-      _sendEvent({type:'conversation.item.create',item:{
-        type:'message',role:'system',content:[{type:'input_text',text:'[agent result]\n'+text}]
-      }});
+      _pendingContext.delete('progress:'+ask.stream_id);
+      _pendingContext.set('result:'+ask.stream_id,'[agent result]\n'+text);
       _queueResponse('agent-result');
     }finally{
       if(_activeAsk===ask&&ask.generation===_generation){
@@ -340,8 +339,33 @@
   let _responseEventSeq=0;
   let _responseEventId=null;
   let _responseRetryCount=0;
+
+  function _reservePlayback(responseId, started=false){
+    if(responseId&&!_drainedResponses.has(responseId)&&
+       (responseId===_activeResponseId||_playbackResponses.has(responseId))){
+      _playbackResponses.set(responseId,started||_playbackResponses.get(responseId)===true);
+    }
+  }
+
+  function _isAudioPart(part){
+    return part&&(part.type==='audio'||part.type==='output_audio');
+  }
+
   function _flushResponseQueue(){
-    if(_replyGate||_responseOpen||_audioPlaying||_settlingResponses||!_responseReasons.size) return;
+    if(_replyGate||_responseOpen||_playbackResponses.size||_settlingResponses||_pendingCalls||
+       _speakingItem!==null||_inputItems.length||!_responseReasons.size) return;
+    // Context and its reply share ONE boundary. A new result is not permission
+    // to cut the previous audio, or talk over a user whose transcript is pending.
+    for(const [key,text] of _pendingContext){
+      if(!_sendEvent({type:'conversation.item.create',item:{
+        type:'message',role:'system',content:[{type:'input_text',text}]
+      }})){
+        _setState('error','Voice connection lost while delivering an update. The result remains in chat.');
+        stopLiveVoice(true);
+        return;
+      }
+      _pendingContext.delete(key);
+    }
     const eventId='hermes-voice-response-'+_generation+'-'+(++_responseEventSeq);
     if(_sendEvent({event_id:eventId,type:'response.create'})){
       _requestedMirrorUsers=_deferredMirrorUsers.concat(_pendingMirrorUsers);
@@ -446,6 +470,18 @@
       return;
     }
 
+    // Generation can finish before WebRTC's playback-start notification. The
+    // audio content itself reserves the floor until this response drains.
+    if((response.output||[]).some(item=>(item.content||[]).some(_isAudioPart))){
+      _reservePlayback(responseId);
+    }else if(ownsOpenResponse&&_playbackResponses.get(responseId)===false){
+      // An announced part can be abandoned before any audio is produced. Its
+      // terminal snapshot has no audio, so there is no buffer to wait on. Never
+      // apply this shortcut after playback has actually started.
+      _playbackResponses.delete(responseId);
+      _drainedResponses.add(responseId);
+    }
+
     if(ownsOpenResponse){
       _responseOpen=false;
       _activeResponseId=null;
@@ -520,7 +556,7 @@
       // Only a recognized explicit silence command may interrupt playback;
       // arbitrary speech/VAD activity never does.
       if(_responseOpen) _sendEvent({type:'response.cancel'});
-      if(_audioPlaying) _sendEvent({type:'output_audio_buffer.clear'});
+      if(_playbackResponses.size) _sendEvent({type:'output_audio_buffer.clear'});
       return;
     }
     if(_replyGate){
@@ -535,14 +571,25 @@
     let msg=null;
     try{ msg=JSON.parse(ev.data); }catch(_){ return; }
     if(!msg||!msg.type) return;
-    if(msg.type==='input_audio_buffer.committed'&&msg.item_id){
+    if(msg.type==='input_audio_buffer.speech_started'){
+      _speakingItem=String(msg.item_id||'');
+    }else if(msg.type==='input_audio_buffer.speech_stopped'){
+      _speakingItem=null;
+      // Keep the floor reserved through commit and transcription, not just VAD.
+      if(msg.item_id&&!_seenTranscriptItems.has(msg.item_id)&&!_inputItems.includes(msg.item_id)) _inputItems.push(msg.item_id);
+    }else if(msg.type==='input_audio_buffer.committed'&&msg.item_id){
       // Input transcription completion can arrive out of order. Apply silence
       // directives in audio-commit order, not transcription network order.
-      if(!_inputItems.includes(msg.item_id)) _inputItems.push(msg.item_id);
+      if(!_seenTranscriptItems.has(msg.item_id)&&!_inputItems.includes(msg.item_id)) _inputItems.push(msg.item_id);
+    }else if(msg.type==='response.content_part.added'&&_isAudioPart(msg.part)){
+      _reservePlayback(msg.response_id);
     }else if(msg.type==='output_audio_buffer.started'){
-      _audioPlaying=true;
+      _reservePlayback(msg.response_id,true);
+      if(_replyGate&&_playbackResponses.has(msg.response_id)) _sendEvent({type:'output_audio_buffer.clear'});
     }else if(msg.type==='output_audio_buffer.stopped'||msg.type==='output_audio_buffer.cleared'){
-      _audioPlaying=false;
+      if(!msg.response_id) return;
+      _drainedResponses.add(msg.response_id);
+      _playbackResponses.delete(msg.response_id);
       _flushResponseQueue();
     }else if(msg.type==='response.created'&&msg.response){
       _responseOpen=true;
@@ -558,6 +605,7 @@
     }else if(msg.type==='response.done'&&msg.response){
       void _handleResponseDone(msg.response);
     }else if(msg.type==='conversation.item.input_audio_transcription.completed'){
+      if(_speakingItem===String(msg.item_id||'')) _speakingItem=null;
       if(_inputItems.includes(msg.item_id)){
         _transcripts.set(msg.item_id,msg);
         while(_inputItems.length&&_transcripts.has(_inputItems[0])){
@@ -567,6 +615,7 @@
           _onCompletedTranscript(transcript);
         }
       }else _onCompletedTranscript(msg);
+      _flushResponseQueue();
     }else if(msg.type==='conversation.item.input_audio_transcription.failed'){
       _setState('error','Voice transcription failed. Reconnect before continuing so a missed instruction is not ignored.');
       stopLiveVoice(true);
@@ -638,7 +687,10 @@
   async function _startLiveVoice(generation){
     _replyGate=null;
     _responseOpen=false;
-    _audioPlaying=false;
+    _playbackResponses.clear();
+    _drainedResponses.clear();
+    _pendingContext.clear();
+    _speakingItem=null;
     _activeResponseId=null;
     _responseEventId=null;
     _responseRetryCount=0;
@@ -702,7 +754,7 @@
       _pc.ontrack=(e)=>{ _audioEl.srcObject=e.streams[0]; };
       _pc.addTrack(_mic.getTracks()[0]);
       _dc=_pc.createDataChannel('oai-events');
-      _dc.onmessage=_onDataChannelMessage;
+      _dc.onmessage=ev=>{ if(generation===_generation) _onDataChannelMessage(ev); };
       _dc.onopen=_flushResponseQueue;
       _dc.onclose=()=>{
         if(generation!==_generation) return;
@@ -754,7 +806,10 @@
     _activeAsk=null;
     _replyGate=null;
     _responseOpen=false;
-    _audioPlaying=false;
+    _playbackResponses.clear();
+    _drainedResponses.clear();
+    _pendingContext.clear();
+    _speakingItem=null;
     _activeResponseId=null;
     _responseEventId=null;
     _responseRetryCount=0;
