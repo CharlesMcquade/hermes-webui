@@ -6679,6 +6679,15 @@ if(typeof window!=='undefined'){
       const caughtPrevTail=movedDown
         &&_prevMessageScrollHeightForRepin!==null
         &&(top+el.clientHeight)>=(_prevMessageScrollHeightForRepin-80);
+      // A small upward movement can be either a browser/layout nudge or real
+      // reader input. Aggressive follow may absorb only the former. If the
+      // wheel, keyboard, touch surface, or native scrollbar owns the movement,
+      // release the pin immediately so the next streamed write cannot yank the
+      // viewport back to the bottom and create a visible bottom-edge vibration.
+      const explicitReaderScrollIntent=(typeof _scrollbarDragActive!=='undefined'&&!!_scrollbarDragActive)
+        ||(typeof _recentMessageTouchScrollIntent==='function'&&_recentMessageTouchScrollIntent())
+        ||(typeof _recentMessageWheelIntent==='function'&&_recentMessageWheelIntent())
+        ||(typeof _recentMessageKeyScrollIntent==='function'&&_recentMessageKeyScrollIntent());
       // Suppress the post-render scroll artifact: right after renderMessages()
       // rebuilds #msgInner, the browser can emit a non-user upward scroll event.
       // The typeof guards keep this branch inert in unit harnesses that inject
@@ -6712,11 +6721,10 @@ if(typeof window!=='undefined'){
       const _prevScrollTopForLog=_lastScrollTop;
       _lastScrollTop=top;
       if(movedUp&&bottomDistance>1){
-        // Above-tail collapse can move scrollTop upward while the reader is still
-        // flush with the true tail. That is not an intentional scroll-away.
-        // With aggressive follow enabled, wait until the tail leaves the viewport;
-        // otherwise preserve the immediate unpin for a genuine upward move.
-        if(typeof window!=='undefined'&&window._autoScrollFollow&&_scrollPinned&&bottomDistance<=el.clientHeight){
+        // An above-tail collapse may move scrollTop upward while the reader is
+        // still flush with the tail. With Auto-follow on, ignore near-tail
+        // anchoring artifacts, but explicit reader input always escapes.
+        if(typeof window!=='undefined'&&window._autoScrollFollow&&_scrollPinned&&bottomDistance<=el.clientHeight&&!explicitReaderScrollIntent){
           _nearBottomCount=0;
         }else{
         _cancelBottomSettle();
