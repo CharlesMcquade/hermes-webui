@@ -250,6 +250,22 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Appends to existing textarea content (doesn't replace)
 - Hidden when browser doesn't support Web Speech API (Chrome, Edge, Safari)
 
+### Live voice
+- Realtime two-way voice over WebRTC when an OpenAI API key is configured
+- Uses far-field denoising, low-eagerness semantic VAD, browser echo/noise
+  constraints, and non-interrupting playback; completed turns queue instead of
+  cutting off assistant audio
+- Explicit reply holds such as “don't reply until I say Spider-Man” are enforced
+  in the browser once transcribed; a hold stops playback and blocks new replies
+  until the release phrase is transcribed
+- Substantive requests launch the same Hermes run used by typed chat; status,
+  steering, stopping, and tool results stay on the existing session/run paths
+- Live voice temporarily enables full tool access (session YOLO) for the call
+  and restores the session's prior approval state when the call disconnects
+- This is not speaker identification: another person saying the release phrase
+  can release the hold. See the [live voice contract](docs/architecture/live-voice-contract.md)
+  for lifecycle guarantees, test coverage, and device-validation limits
+
 ### Profiles
 - Profile chip in the **composer footer** -- dropdown showing all profiles with gateway status and model info
 - Gateway status dots (green = running), model info, skill count per profile
