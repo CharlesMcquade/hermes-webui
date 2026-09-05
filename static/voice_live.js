@@ -14,8 +14,26 @@
   let _boundSid=null;
   let _yoloWasEnabled=true; // conservative default: leave YOLO alone on cleanup
   let _activeAsk=null;      // {stream_id, started}
-  let _lastUserTranscript='';
   let _digest='';
+  let _generation=0;
+  let _replyGate=null;      // normalized release phrase, or null
+  let _responseOpen=false;  // response.create sent until matching response.done
+  let _audioPlaying=false;  // WebRTC output buffer can outlive response.done
+  let _activeResponseId=null;
+  let _unbindPromise=Promise.resolve();
+  let _connectPromise=Promise.resolve();
+  let _settlingResponses=0;
+  const _responseReasons=new Set();
+  const _seenTranscriptItems=new Set();
+  const _inputItems=[];
+  const _transcripts=new Map();
+  const _completedResponses=new Set();
+  const _toolCalls=new Map(); // call_id -> Promise<{continueResponse:boolean}>
+  let _pendingMirrorUsers=[];
+  let _requestedMirrorUsers=[];
+  let _deferredMirrorUsers=[];
+  const _responseMirrorUsers=new Map(); // response_id -> triggering transcripts
+  const _voiceRequests=new Set();
 
   function $(id){ return document.getElementById(id); }
 
@@ -39,7 +57,7 @@
     if(btn){
       btn.classList.toggle('live-voice-active', state==='live'||state==='connecting');
       btn.classList.toggle('live-voice-connecting', state==='connecting');
-      btn.classList.toggle('live-voice-thinking', state==='live'&&_pendingCalls>0);
+      btn.classList.toggle('live-voice-thinking', state==='live'&&(_pendingCalls>0||!!_activeAsk));
       btn.classList.toggle('live-voice-yolo', state==='live'&&_yoloWasEnabled===false);
       const key = state==='live'?'live_voice_stop':(state==='connecting'?'live_voice_connecting':'live_voice_start');
       const label=(typeof t==='function'?t(key):null)||
@@ -55,35 +73,22 @@
 
   // ── transcript mirroring ─────────────────────────────────────────────
 
-  async function _mirrorTurn(userText, assistantText){
-    if(!_boundSid||(!userText&&!assistantText)) return;
+  async function _mirrorTurn(userText, assistantText, sid){
+    const targetSid=sid||_boundSid;
+    if(!targetSid||(!userText&&!assistantText)) return;
     try{
-      await fetch('api/voice/live/turn',{
+      const res=await fetch('api/voice/live/turn',{
         method:'POST',
         headers:Object.assign({'Content-Type':'application/json'},_csrf()),
-        body:JSON.stringify({session_id:_boundSid,user_text:userText||'',assistant_text:assistantText||''})
+        body:JSON.stringify({session_id:targetSid,user_text:userText||'',assistant_text:assistantText||''})
       });
-      try{ if(typeof loadSession==='function') loadSession(_boundSid,{preserveScroll:true}); }catch(_){ }
+      if(!res.ok) return;
+      try{ if(_sid()===targetSid&&typeof loadSession==='function') loadSession(targetSid,{preserveScroll:true}); }catch(_){ }
     }catch(_){ }
   }
 
   // ── deep lane: non-blocking ask_verity via /api/voice/live/ask ───────
 
-  async function _fetchFinalAnswer(streamId){
-    // The stream just finished; the last assistant message in the session is
-    // the answer. GET /api/session returns the full message array.
-    try{
-      const res=await fetch('api/session?session_id='+encodeURIComponent(_boundSid)+'&messages=1',{cache:'no-store'});
-      if(!res.ok) return null;
-      const data=await res.json();
-      const msgs=(data&&(data.session?data.session.messages:data.messages))||[];
-      for(let i=msgs.length-1;i>=0;i--){
-        const m=msgs[i];
-        if(m&&m.role==='assistant'&&(m.content||'').trim()) return String(m.content).trim();
-      }
-    }catch(_){ }
-    return null;
-  }
 
   // ── progress narration from the run journal ──────────────────────────
 
@@ -110,63 +115,67 @@
     }});
   }
 
-  let _lastNarrSeq=0;
-  async function _narrateProgress(streamId){
-    // Poll the run journal for step events the agent already emits
-    // (interim_assistant / tool.started / approval) and voice them once.
-    try{
-      const res=await fetch('api/session?session_id='+encodeURIComponent(_boundSid)+'&messages=0',{cache:'no-store'});
-      if(!res.ok) return;
-      const data=await res.json();
-      const sess=data&&(data.session||data);
-      const snap=sess&&sess.runtime_journal;
-      if(!snap||snap.last_seq===undefined) return;
-      // The live snapshot payload is embedded on the session GET; fall back to
-      // the journal status endpoint for the coarse state.
-      if(snap.last_seq>_lastNarrSeq){
-        const le=String(snap.last_event||'');
-        _lastNarrSeq=snap.last_seq;
-        if(le==='tool') _narrate('using tools…');
-        else if(le==='interim_assistant') _narrate('working on it…');
-        else if(le==='approval') _narrate('an approval is waiting on screen');
-      }
-    }catch(_){ }
-  }
-
-  async function _pollAsk(streamId, startedAt){
-    // Poll stream status until the run ends, then fetch the final answer.
+  async function _pollAsk(streamId, startedAt, sid, generation){
+    // The exact run's immutable done journal owns its answer, never the
+    // mutable last message of a session which may already have another run.
     const maxMs=15*60*1000; // generous ceiling; user can hit Stop
     let narrAt=0;
-    while(Date.now()-startedAt<maxMs){
+    let consecutiveErrors=0;
+    let lastNarration='';
+    while(generation===_generation&&Date.now()-startedAt<maxMs){
       await new Promise(r=>setTimeout(r,1500));
+      if(generation!==_generation) return null;
       let st=null;
       try{
-        const res=await fetch('api/chat/stream/status?stream_id='+encodeURIComponent(streamId),{cache:'no-store'});
-        st=await res.json();
+        const result=await _voicePost('api/voice/live/status',{session_id:sid,stream_id:streamId});
+        if(result.status<400&&result.data.ok) st=result.data;
       }catch(_){ }
-      if(!st){ continue; }
-      if(st.active===false){
-        return await _fetchFinalAnswer(streamId);
+      if(generation!==_generation) return null;
+      if(!st){
+        consecutiveErrors++;
+        if(consecutiveErrors>=5){
+          return {completed:false,error:'I lost the live status connection. The Hermes run may still be working in chat.'};
+        }
+        continue;
+      }
+      consecutiveErrors=0;
+      if(st.terminal){
+        return st.result_available&&typeof st.answer==='string'
+          ? {completed:true,answer:(st.terminal_state==='completed'?'':'Run ended with '+String(st.terminal_state)+'; this result may be partial.\n')+st.answer}
+          : {completed:true,error:'The Hermes run ended ('+String(st.terminal_state||'unknown')+') without a verified final answer. Check the chat transcript.'};
       }
       // Voice the agent's steps while it works (every ~6s at most).
       if(Date.now()-narrAt>6000){
         narrAt=Date.now();
-        void _narrateProgress(streamId);
+        const progress=st.latest_step||((st.recent_tools||[]).length?_describeTool(st.recent_tools[st.recent_tools.length-1]):'');
+        if(progress&&progress!==lastNarration){
+          lastNarration=progress;
+          _narrate(progress);
+        }
       }
     }
-    return null; // timed out
+    if(generation!==_generation) return null;
+    return {completed:false,error:'The Hermes run is still active after the voice wait limit. Check the chat transcript for progress.'};
   }
 
   // ── deep lane: non-blocking agent_ask via /api/voice/live/ask ────────
 
   async function _voicePost(path, body){
-    const res=await fetch(path,{
-      method:'POST',
-      headers:Object.assign({'Content-Type':'application/json'},_csrf()),
-      body:JSON.stringify(Object.assign({session_id:_boundSid||_sid()},body||{}))
-    });
-    const data=await res.json().catch(()=>({}));
-    return {status:res.status,data:data||{}};
+    const controller=new AbortController();
+    _voiceRequests.add(controller);
+    const timer=setTimeout(()=>controller.abort(),30000);
+    try{
+      const res=await fetch(path,{
+        method:'POST',signal:controller.signal,
+        headers:Object.assign({'Content-Type':'application/json'},_csrf()),
+        body:JSON.stringify(Object.assign({session_id:_boundSid||_sid()},body||{}))
+      });
+      const data=await res.json().catch(()=>({}));
+      return {status:res.status,data:data||{}};
+    }finally{
+      clearTimeout(timer);
+      _voiceRequests.delete(controller);
+    }
   }
 
   async function _agentStatus(){
@@ -181,87 +190,193 @@
 
   async function _agentSteer(text){
     const {data}=await _voicePost('api/voice/live/steer',{text:String(text||'')});
-    if(data.ok) return 'Delivered. The agent will apply it at its next step.';
+    if(data.ok) return 'Delivered to the active run. Application is not yet confirmed.';
     return 'Could not steer: '+(data.message||data.reason||'no active run');
   }
 
   async function _agentStop(){
+    const generation=_generation;
+    const ask=_activeAsk;
     const {data}=await _voicePost('api/voice/live/stop',{});
-    if(data.ok&&data.cancelled) return 'Stopped. The run is cancelled.';
+    if(data.persistence_failed){
+      if(generation===_generation&&ask===_activeAsk&&ask) ask.cancelled=true;
+      return 'The stop encountered a persistence failure. Do not claim the final state was saved; check the chat for the recovery warning.';
+    }
+    if(data.ok&&data.cancelled){
+      if(generation===_generation&&ask===_activeAsk&&ask) ask.cancelled=true;
+      return 'Stopped. The run is cancelled.';
+    }
+    if(!data.ok) return 'Could not stop the run: '+(data.error||'stop failed');
     return 'Nothing to stop — no run is active.';
+  }
+
+  async function _watchAsk(ask){
+    try{
+      const result=await _pollAsk(
+        ask.stream_id,
+        ask.started,
+        ask.sid,
+        ask.generation
+      );
+      if(ask.generation!==_generation||ask.cancelled||!result) return;
+      const rawText=String(result.answer||result.error||'');
+      const text=rawText.length>16000
+        ? rawText.slice(0,16000)+'\n…(truncated for voice; full answer is in the chat transcript)'
+        : rawText;
+      _sendEvent({type:'conversation.item.create',item:{
+        type:'message',role:'system',content:[{type:'input_text',text:'[agent result]\n'+text}]
+      }});
+      _queueResponse('agent-result');
+    }finally{
+      if(_activeAsk===ask&&ask.generation===_generation){
+        _activeAsk=null;
+        _setState(_state);
+      }
+    }
   }
 
   async function _askVerity(question){
     const sid=_boundSid||_sid();
+    const generation=_generation;
     if(!sid) return 'No active session is open in the WebUI. Ask the user to open a chat session.';
+    if(!String(question||'').trim()) return 'The agent request failed: question required.';
     try{
-      const res=await fetch('api/voice/live/ask',{
-        method:'POST',
-        headers:Object.assign({'Content-Type':'application/json'},_csrf()),
-        body:JSON.stringify({session_id:sid,question:question})
-      });
-      const data=await res.json().catch(()=>({}));
+      const {status,data}=await _voicePost('api/voice/live/ask',{session_id:sid,question:question});
+      if(generation!==_generation) return 'Voice disconnected. Any accepted run remains in chat.';
       if(data&&data.busy){
         return JSON.stringify({busy:true,message:data.message||'The agent is still working on the previous request.'});
       }
-      if(!res.ok||!data||!data.stream_id){
-        return 'The agent request failed: '+((data&&data.error)||('HTTP '+res.status));
+      if(status>=400||!data||!data.stream_id){
+        return 'The agent request failed: '+((data&&data.error)||('HTTP '+status));
       }
-      _activeAsk={stream_id:data.stream_id,started:Date.now()};
-      _pendingCalls++; _setState(_state);
+      const ask={
+        stream_id:data.stream_id,
+        started:Date.now(),
+        sid,
+        generation,
+        cancelled:false
+      };
+      _activeAsk=ask;
+      _setState(_state);
       // Attach the app's own live renderer to this stream so tokens, tool
       // cards, and the worklog appear in the transcript in real time — the
       // same path a typed composer message takes.
       try{
-        if(typeof attachLiveStream==='function'){
-          attachLiveStream(_boundSid,data.stream_id,[]);
+        if(typeof attachLiveStream==='function'&&generation===_generation&&_sid()===sid){
+          attachLiveStream(sid,data.stream_id,[]);
           try{
-            const sess=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id===_boundSid)?S.session:null;
+            const sess=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id===sid)?S.session:null;
             if(sess) sess.active_stream_id=data.stream_id;
             if(typeof S!=='undefined') S.activeStreamId=data.stream_id;
             if(typeof setBusy==='function') setBusy(true);
           }catch(_){ }
         }
       }catch(_){ }
-      try{
-        const answer=await _pollAsk(data.stream_id,_activeAsk.started);
-        return answer||'(the agent finished but returned no visible answer — it is in the chat transcript)';
-      }finally{
-        _activeAsk=null;
-        _pendingCalls=Math.max(0,_pendingCalls-1); _setState(_state);
-      }
+      void _watchAsk(ask);
+      return JSON.stringify({
+        ok:true,
+        stream_id:data.stream_id,
+        message:'The Hermes run started. Continue the conversation while it works.'
+      });
     }catch(e){
-      return 'The agent request failed: '+(e&&e.message||'network error');
+      return 'The request outcome is unconfirmed: '+(e&&e.message||'network error')+'. Check agent_status and chat before repeating the action.';
     }
-  }
-
-  async function _cancelAsk(){
-    const ask=_activeAsk;
-    if(!ask) return false;
-    try{
-      await fetch('api/chat/cancel?stream_id='+encodeURIComponent(ask.stream_id),{method:'POST',headers:_csrf()});
-    }catch(_){ }
-    return true;
   }
 
   // ── realtime event handling ──────────────────────────────────────────
 
   function _sendEvent(obj){
-    try{ if(_dc&&_dc.readyState==='open') _dc.send(JSON.stringify(obj)); }catch(_){ }
+    try{
+      if(_dc&&_dc.readyState==='open'){
+        _dc.send(JSON.stringify(obj));
+        return true;
+      }
+    }catch(_){ }
+    return false;
   }
 
-  async function _onToolCall(name, callId, argsJson){
-    let args={};
-    try{ args=JSON.parse(argsJson||'{}'); }catch(_){ }
+  function _normalizeSpeech(text){
+    return String(text||'')
+      .normalize('NFKC')
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu,' ')
+      .trim()
+      .replace(/\s+/g,' ');
+  }
+
+  function _extractReplyGate(text){
+    const raw=String(text||'').replace(/[’‘]/g,"'").trim();
+    const patterns=[
+      /\b(?:do not|don't|dont|please do not|please don't)\s+(?:reply|respond|answer|speak|talk|say anything)(?:\s+to me)?\s+(?:again\s+)?(?:until|unless)\s+(?:i\s+)?(?:say|tell you)\s+(.+)$/iu,
+      /\b(?:stay|keep|be)\s+(?:silent|quiet)\s+(?:until|unless)\s+(?:i\s+)?(?:say|tell you)\s+(.+)$/iu,
+      /\bwait\s+(?:to\s+)?(?:reply|respond|answer|speak|talk)\s+until\s+(?:i\s+)?(?:say|tell you)\s+(.+)$/iu
+    ];
+    for(const pattern of patterns){
+      const match=raw.match(pattern);
+      if(!match) continue;
+      const quoted=match[1].match(/^["“]([^"”]+)["”]/u);
+      const phrase=(quoted?quoted[1]:match[1].split(/[.!?]/u)[0])
+        .replace(/^[\s"'“”‘’]+|[\s"'“”‘’.,!?;:]+$/gu,'');
+      const normalized=_normalizeSpeech(phrase);
+      if(normalized&&normalized.length<=80&&normalized.split(' ').length<=8) return normalized;
+    }
+    return null;
+  }
+
+  function _containsReplyGate(text){
+    if(!_replyGate) return false;
+    const normalized=_normalizeSpeech(text);
+    if((' '+normalized+' ').includes(' '+_replyGate+' ')) return true;
+    // Transcription may render a compound release phrase with or without a
+    // hyphen/space ("Spider-Man" vs "Spiderman"). Accept that narrow variant
+    // without making short one-word gates fuzzy.
+    if(_replyGate.includes(' ')){
+      const compactGate=_replyGate.replace(/\s+/g,'');
+      if(compactGate.length>=5) return normalized.split(' ').includes(compactGate);
+    }
+    return false;
+  }
+
+  let _responseEventSeq=0;
+  let _responseEventId=null;
+  let _responseRetryCount=0;
+  function _flushResponseQueue(){
+    if(_replyGate||_responseOpen||_audioPlaying||_settlingResponses||!_responseReasons.size) return;
+    const eventId='hermes-voice-response-'+_generation+'-'+(++_responseEventSeq);
+    if(_sendEvent({event_id:eventId,type:'response.create'})){
+      _requestedMirrorUsers=_deferredMirrorUsers.concat(_pendingMirrorUsers);
+      _deferredMirrorUsers=[];
+      _pendingMirrorUsers=[];
+      _responseReasons.clear();
+      _responseOpen=true;
+      _responseEventId=eventId;
+    }else{
+      _setState('error','Voice connection lost before replying. Reconnect voice to continue.');
+      stopLiveVoice(true);
+    }
+  }
+
+  function _queueResponse(reason){
+    if(reason!=='retry') _responseRetryCount=0;
+    _responseReasons.add(reason||'turn');
+    _flushResponseQueue();
+  }
+
+  async function _executeToolCall(name, args){
+    if(name==='wait_for_user'){
+      return {output:JSON.stringify({ok:true,waiting:true}),continueResponse:false};
+    }
     let output='';
     if(name==='agent_ask'){
-      try{ output=await _askVerity(String(args.question||'')); }
+      if(!String(args.question||'').trim()) output='agent_ask failed: question required';
+      else try{ output=await _askVerity(String(args.question)); }
       catch(e){ output='agent_ask failed: '+(e&&e.message||e); }
     }else if(name==='agent_status'){
       try{ output=await _agentStatus(); }
       catch(e){ output='agent_status failed: '+(e&&e.message||e); }
     }else if(name==='agent_steer'){
-      try{ output=await _agentSteer(String(args.text||'')); }
+      if(!String(args.text||'').trim()) output='agent_steer failed: text required';
+      else try{ output=await _agentSteer(String(args.text)); }
       catch(e){ output='agent_steer failed: '+(e&&e.message||e); }
     }else if(name==='agent_stop'){
       try{ output=await _agentStop(); }
@@ -269,46 +384,207 @@
     }else{
       output='Unknown tool: '+name;
     }
-    // Realtime output item size safety: clip enormous answers for the voice
-    // channel (full text is already in the transcript).
-    if(output.length>16000) output=output.slice(0,16000)+'\n…(truncated for voice; full answer is in the chat transcript)';
-    _sendEvent({type:'conversation.item.create',item:{type:'function_call_output',call_id:callId,output:output}});
-    _sendEvent({type:'response.create'});
+    return {output:String(output==null?'':output),continueResponse:true};
+  }
+
+  function _dispatchToolCall(item){
+    const callId=String(item&&item.call_id||'');
+    if(!callId) return Promise.resolve({continueResponse:false});
+    if(_toolCalls.has(callId)) return _toolCalls.get(callId);
+    const generation=_generation;
+    const promise=(async()=>{
+      _pendingCalls++; _setState(_state);
+      let result;
+      let args={};
+      try{
+        try{ args=JSON.parse(item.arguments||'{}'); }
+        catch(_){ result={output:'Invalid JSON arguments for '+String(item.name||'unknown tool'),continueResponse:true}; }
+        if(!result&&(!args||typeof args!=='object'||Array.isArray(args))){
+          result={output:'Tool arguments must be a JSON object',continueResponse:true};
+        }
+        if(!result&&_replyGate){
+          result={output:'Reply hold is active. Wait for the release phrase.',continueResponse:false};
+        }
+        if(!result) result=await _executeToolCall(String(item.name||''),args);
+        if(generation!==_generation) return {continueResponse:false};
+        let output=String(result.output||'');
+        // Full text remains in the WebUI transcript; bound the voice context.
+        if(output.length>16000) output=output.slice(0,16000)+'\n…(truncated for voice; full answer is in the chat transcript)';
+        if(!_sendEvent({type:'conversation.item.create',item:{type:'function_call_output',call_id:callId,output}})){
+          _setState('error','Voice connection lost while delivering a tool result. Check the chat before retrying the action.');
+          stopLiveVoice(true);
+          return {continueResponse:false};
+        }
+        return {continueResponse:result.continueResponse!==false};
+      }finally{
+        if(generation===_generation){
+          _pendingCalls=Math.max(0,_pendingCalls-1); _setState(_state);
+        }
+      }
+    })();
+    _toolCalls.set(callId,promise);
+    return promise;
+  }
+
+  function _functionCalls(output){
+    return (Array.isArray(output)?output:[]).filter(item=>
+      item&&item.type==='function_call'&&item.name&&item.call_id&&(!item.status||item.status==='completed')
+    );
+  }
+
+  async function _handleResponseDone(response){
+    const generation=_generation;
+    const responseId=String(response&&response.id||'');
+    if(responseId&&_completedResponses.has(responseId)) return;
+    if(responseId) _completedResponses.add(responseId);
+    const ownsOpenResponse=!!responseId&&_activeResponseId===responseId;
+    if(response&&response.status==='failed'){
+      if(ownsOpenResponse){
+        _setState('error','Voice response failed. Reconnect voice to continue; accepted Hermes tasks remain in chat.');
+        stopLiveVoice(true);
+      }
+      return;
+    }
+
+    if(ownsOpenResponse){
+      _responseOpen=false;
+      _activeResponseId=null;
+      _responseEventId=null;
+      _responseRetryCount=0;
+    }
+
+    let users=[];
+    if(responseId&&_responseMirrorUsers.has(responseId)){
+      users=_responseMirrorUsers.get(responseId)||[];
+      _responseMirrorUsers.delete(responseId);
+    }else if(ownsOpenResponse&&_requestedMirrorUsers.length){
+      users=_requestedMirrorUsers;
+      _requestedMirrorUsers=[];
+    }
+
+    let spoken='';
+    try{
+      for(const item of (response&&response.output||[])){
+        if(item&&item.type==='message'&&item.role==='assistant'){
+          for(const part of (item.content||[])){
+            if(part&&(part.transcript||part.text)) spoken+=((part.transcript||part.text)+' ');
+          }
+        }
+      }
+    }catch(_){ }
+
+    const calls=_functionCalls(response&&response.output);
+    const toolNames=new Set(calls.map(call=>String(call.name||'')));
+    if(toolNames.has('agent_ask')||toolNames.has('wait_for_user')){
+      // agent_ask persists the prompt through the normal chat-start path;
+      // wait_for_user intentionally discards ambient/non-addressed chatter.
+      users=[];
+    }else if(calls.length){
+      // Keep the triggering transcript for the post-tool spoken answer rather
+      // than persisting an unmatched user row or a throwaway preamble.
+      _deferredMirrorUsers=users.concat(_deferredMirrorUsers);
+      users=[];
+    }else if(response.status==='completed'&&spoken.trim()&&users.length){
+      void _mirrorTurn(users.join('\n'),spoken.trim());
+    }
+
+    if(calls.length){
+      _settlingResponses++;
+      let results;
+      try{ results=await Promise.all(calls.map(_dispatchToolCall)); }
+      finally{ if(generation===_generation) _settlingResponses--; }
+      if(generation!==_generation) return;
+      if(ownsOpenResponse&&results.some(result=>result&&result.continueResponse)){
+        _queueResponse('tool');
+      }else if(ownsOpenResponse){
+        _flushResponseQueue();
+      }
+    }else if(ownsOpenResponse){
+      _flushResponseQueue();
+    }
+  }
+
+  function _onCompletedTranscript(msg){
+    const txt=String(msg.transcript||'').trim();
+    if(!txt) return;
+    const itemId=String(msg.item_id||(msg.item&&msg.item.id)||msg.event_id||'');
+    if(itemId&&_seenTranscriptItems.has(itemId)) return;
+    if(itemId) _seenTranscriptItems.add(itemId);
+
+    const newGate=_extractReplyGate(txt);
+    if(newGate){
+      _replyGate=newGate;
+      _responseReasons.delete('user');
+      _pendingMirrorUsers=[];
+      _deferredMirrorUsers=[];
+      // Only a recognized explicit silence command may interrupt playback;
+      // arbitrary speech/VAD activity never does.
+      if(_responseOpen) _sendEvent({type:'response.cancel'});
+      if(_audioPlaying) _sendEvent({type:'output_audio_buffer.clear'});
+      return;
+    }
+    if(_replyGate){
+      if(!_containsReplyGate(txt)) return;
+      _replyGate=null;
+    }
+    _pendingMirrorUsers.push(txt);
+    _queueResponse('user');
   }
 
   function _onDataChannelMessage(ev){
     let msg=null;
     try{ msg=JSON.parse(ev.data); }catch(_){ return; }
     if(!msg||!msg.type) return;
-    if(msg.type==='response.done'&&msg.response&&Array.isArray(msg.response.output)){
-      // Mirror the spoken assistant reply (collected from audio deltas) —
-      // handled via response.output_text? gpt-realtime emits audio; the
-      // transcript of what it SAID arrives via response.done output content
-      // or the input_transcription events. We mirror what we can:
-      let spoken='';
-      try{
-        for(const item of (msg.response.output||[])){
-          if(item&&item.type==='message'&&item.role==='assistant'){
-            const parts=(item.content||[]);
-            for(const p of parts){
-              if(p&&(p.transcript||p.text)) spoken+=((p.transcript||p.text)+' ');
-            }
-          }
-          if(item&&item.type==='function_call'&&item.name&&item.call_id){
-            _onToolCall(item.name,item.call_id,item.arguments);
-          }
-        }
-      }catch(_){ }
-      if(spoken.trim()){
-        _mirrorTurn('', spoken.trim());
+    if(msg.type==='input_audio_buffer.committed'&&msg.item_id){
+      // Input transcription completion can arrive out of order. Apply silence
+      // directives in audio-commit order, not transcription network order.
+      if(!_inputItems.includes(msg.item_id)) _inputItems.push(msg.item_id);
+    }else if(msg.type==='output_audio_buffer.started'){
+      _audioPlaying=true;
+    }else if(msg.type==='output_audio_buffer.stopped'||msg.type==='output_audio_buffer.cleared'){
+      _audioPlaying=false;
+      _flushResponseQueue();
+    }else if(msg.type==='response.created'&&msg.response){
+      _responseOpen=true;
+      _activeResponseId=String(msg.response.id||'')||null;
+      if(_activeResponseId){
+        _responseMirrorUsers.set(_activeResponseId,_requestedMirrorUsers);
+        _requestedMirrorUsers=[];
       }
+    }else if(msg.type==='response.output_item.done'&&msg.item&&msg.item.type==='function_call'&&(!msg.item.status||msg.item.status==='completed')){
+      void _dispatchToolCall(msg.item);
+    }else if(msg.type==='response.function_call_arguments.done'&&msg.call_id&&msg.name){
+      void _dispatchToolCall({type:'function_call',name:msg.name,call_id:msg.call_id,arguments:msg.arguments});
+    }else if(msg.type==='response.done'&&msg.response){
+      void _handleResponseDone(msg.response);
     }else if(msg.type==='conversation.item.input_audio_transcription.completed'){
-      const txt=(msg.transcript||'').trim();
-      if(txt&&txt!==_lastUserTranscript){
-        _lastUserTranscript=txt;
-        _mirrorTurn(txt,'');
-      }
+      if(_inputItems.includes(msg.item_id)){
+        _transcripts.set(msg.item_id,msg);
+        while(_inputItems.length&&_transcripts.has(_inputItems[0])){
+          const id=_inputItems.shift();
+          const transcript=_transcripts.get(id);
+          _transcripts.delete(id);
+          _onCompletedTranscript(transcript);
+        }
+      }else _onCompletedTranscript(msg);
+    }else if(msg.type==='conversation.item.input_audio_transcription.failed'){
+      _setState('error','Voice transcription failed. Reconnect before continuing so a missed instruction is not ignored.');
+      stopLiveVoice(true);
     }else if(msg.type==='error'){
+      const failedEventId=String((msg.error&&msg.error.event_id)||msg.event_id||'');
+      if(failedEventId&&failedEventId===_responseEventId){
+        _responseOpen=false;
+        _activeResponseId=null;
+        _responseEventId=null;
+        if(_responseRetryCount<1){
+          _responseRetryCount++;
+          _pendingMirrorUsers=_requestedMirrorUsers.concat(_pendingMirrorUsers);
+          _requestedMirrorUsers=[];
+          _responseReasons.add('retry');
+          const generation=_generation;
+          setTimeout(()=>{ if(generation===_generation) _flushResponseQueue(); },100);
+        }
+      }
       console.warn('[live-voice] realtime error',msg);
     }
   }
@@ -331,35 +607,85 @@
     return data; // {digest, ...}
   }
 
-  async function _unbindSession(){
-    if(!_boundSid) return;
+  async function _unbindSession(sid){
+    const targetSid=sid||_boundSid;
+    if(!targetSid) return;
     try{
       await fetch('api/voice/live/disconnect',{
         method:'POST',
         headers:Object.assign({'Content-Type':'application/json'},_csrf()),
-        body:JSON.stringify({session_id:_boundSid,yolo_was_enabled:_yoloWasEnabled})
+        body:JSON.stringify({session_id:targetSid,yolo_was_enabled:_yoloWasEnabled})
       });
     }catch(_){ }
-    _boundSid=null;
+    if(_boundSid===targetSid) _boundSid=null;
   }
 
-  async function startLiveVoice(){
+  function startLiveVoice(){
     if(_state==='connecting'||_state==='live') return;
+    const generation=++_generation;
     _setState('connecting');
+    // A stopped getUserMedia/connect request can still resolve. Serialize
+    // setup so its late result cannot overwrite the next call's resources.
+    _connectPromise=_connectPromise.catch(()=>{}).then(async()=>{
+      await _unbindPromise;
+      if(generation===_generation) await _startLiveVoice(generation);
+    });
+  }
+
+  async function _startLiveVoice(generation){
+    _replyGate=null;
+    _responseOpen=false;
+    _audioPlaying=false;
+    _activeResponseId=null;
+    _responseEventId=null;
+    _responseRetryCount=0;
+    _responseReasons.clear();
+    _seenTranscriptItems.clear();
+    _inputItems.length=0;
+    _transcripts.clear();
+    _completedResponses.clear();
+    _toolCalls.clear();
+    _pendingMirrorUsers=[];
+    _requestedMirrorUsers=[];
+    _deferredMirrorUsers=[];
+    _responseMirrorUsers.clear();
+
+    _settlingResponses=0;
+    _setState('connecting');
+    await _unbindPromise;
+    if(generation!==_generation) return;
     try{
       const bind=await _bindSession();
+      if(generation!==_generation){
+        const staleSid=_boundSid;
+        _unbindPromise=_unbindSession(staleSid);
+        return;
+      }
       try{
         if(typeof showToast==='function') showToast(bind.yolo_enabled?'Live voice: full access enabled for this call':'Live voice connected',2500,'info');
       }catch(_){ }
     }catch(e){
+      if(generation!==_generation) return;
       _setState('error','Live voice: '+(e&&e.message||e));
       _setState('off');
       return;
     }
     try{
-      _mic=await navigator.mediaDevices.getUserMedia({audio:true});
+      _mic=await navigator.mediaDevices.getUserMedia({audio:{
+        echoCancellation:{ideal:true},
+        noiseSuppression:{ideal:true},
+        autoGainControl:{ideal:true},
+        channelCount:{ideal:1}
+      }});
+      if(generation!==_generation){
+        _mic.getTracks().forEach(track=>{ try{ track.stop(); }catch(_){ } });
+        _mic=null;
+        return;
+      }
     }catch(e){
-      await _unbindSession();
+      const sid=_boundSid;
+      await _unbindSession(sid);
+      if(generation!==_generation) return;
       _setState('error','Microphone access denied');
       _setState('off');
       return;
@@ -368,10 +694,18 @@
       _pc=new RTCPeerConnection();
       _audioEl=document.createElement('audio');
       _audioEl.autoplay=true;
+      _audioEl.playsInline=true;
+      _audioEl.setAttribute('playsinline','');
       _pc.ontrack=(e)=>{ _audioEl.srcObject=e.streams[0]; };
       _pc.addTrack(_mic.getTracks()[0]);
       _dc=_pc.createDataChannel('oai-events');
       _dc.onmessage=_onDataChannelMessage;
+      _dc.onopen=_flushResponseQueue;
+      _dc.onclose=()=>{
+        if(generation!==_generation) return;
+        _setState('error','Voice connection closed. Accepted Hermes tasks remain in chat.');
+        stopLiveVoice(true);
+      };
       _pc.onconnectionstatechange=()=>{
         const st=_pc&&_pc.connectionState;
         if(st==='connected') _setState('live');
@@ -381,6 +715,7 @@
       };
       const offer=await _pc.createOffer();
       await _pc.setLocalDescription(offer);
+      if(generation!==_generation) return;
       const headers=Object.assign({'Content-Type':'application/json'},_csrf());
       const res=await fetch('api/voice/live/sdp',{
         method:'POST',headers,
@@ -393,25 +728,46 @@
       }
       const data=await res.json();
       if(!data||!data.sdp) throw new Error('no SDP answer');
+      if(generation!==_generation) return;
       await _pc.setRemoteDescription({type:'answer',sdp:data.sdp});
       // state flips to 'live' via onconnectionstatechange
     }catch(e){
+      if(generation!==_generation) return;
       _setState('error','Live voice failed: '+(e&&e.message||e));
       stopLiveVoice(true);
     }
   }
 
   function stopLiveVoice(silent){
-    try{ if(_dc){ _dc.onmessage=null; _dc.close(); } }catch(_){ }
+    _generation++;
+    _voiceRequests.forEach(controller=>controller.abort());
+    _voiceRequests.clear();
+    try{ if(_dc){ _dc.onmessage=null; _dc.onopen=null; _dc.onclose=null; _dc.close(); } }catch(_){ }
     try{ if(_pc){ _pc.onconnectionstatechange=null; _pc.close(); } }catch(_){ }
     try{ if(_mic){ _mic.getTracks().forEach(tr=>{ try{tr.stop();}catch(_){}}); } }catch(_){ }
     try{ if(_audioEl){ _audioEl.srcObject=null; _audioEl.remove(); } }catch(_){ }
     _dc=null; _pc=null; _mic=null; _audioEl=null; _pendingCalls=0;
+    _settlingResponses=0;
     _activeAsk=null;
+    _replyGate=null;
+    _responseOpen=false;
+    _audioPlaying=false;
+    _activeResponseId=null;
+    _responseEventId=null;
+    _responseRetryCount=0;
+    _responseReasons.clear();
+    _seenTranscriptItems.clear();
+    _inputItems.length=0;
+    _transcripts.clear();
+    _completedResponses.clear();
+    _toolCalls.clear();
+    _pendingMirrorUsers=[];
+    _requestedMirrorUsers=[];
+    _deferredMirrorUsers=[];
+    _responseMirrorUsers.clear();
     const sid=_boundSid;
-    // Fire-and-forget cleanup; YOLO restore is idempotent server-side.
-    if(sid){ _unbindSession(); }
-    _lastUserTranscript='';
+    // Fire-and-forget cleanup; the next call waits for this restore before bind.
+    if(sid) _unbindPromise=_unbindSession(sid);
     _setState('off');
     if(!silent){
       try{ if(typeof showToast==='function') showToast('Live voice ended',2500,'info'); }catch(_){ }

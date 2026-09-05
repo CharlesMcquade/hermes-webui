@@ -13,11 +13,12 @@ Design notes:
 - The session config (model, tools, instructions) is constructed SERVER-side.
   The browser cannot inject instructions or tools; it may only pick a voice
   from a small allowlist.
-- The realtime model is deliberately given exactly one function tool,
-  ``ask_verity``, and instructed to route any substantive request through it.
-  The frontend executes that tool by calling the existing synchronous
-  /api/chat endpoint, so the voice layer is a thin conversational shim over
-  the full Hermes agent (tools, memory, skills intact).
+- The realtime model is the conversational surface over the full Hermes agent.
+  Its tools launch, inspect, steer, and stop the same run machinery as typed
+  chat. A local no-op tool lets it remain silent for non-addressed audio.
+- Turn creation and interruption are browser-owned. Provider VAD segments audio
+  but cannot cancel playback or speak on its own, which prevents speaker echo
+  and nearby conversation from constantly interrupting the assistant.
 - Auth mirrors /api/tts: when WebUI auth is enabled the session cookie is
   required. A small per-client rate limit bounds abuse.
 """
@@ -34,18 +35,35 @@ from pathlib import Path
 from api.helpers import j, bad, read_body
 
 REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls"
-REALTIME_MODEL = "gpt-realtime"
+REALTIME_MODEL = "gpt-realtime-2.1"
 ALLOWED_VOICES = ("marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse")
 DEFAULT_VOICE = "marin"
 
 VOICE_INSTRUCTIONS = (
-    "You are Verity, a warm, dry-witted voice assistant for Charles, speaking "
-    "through the Hermes WebUI. You are the AGENT SURFACE: you ARE the agent "
-    "for this conversation, and a full Hermes agent is your toolbox — it has "
-    "terminal, files, web, memory, email, smart home, everything.\n"
-    "CONTEXT: You are given a digest of the user's current chat session. Use "
-    "it — never ask what you were just talking about; you already know.\n"
-    "TOOLS — think of yourself as directing the agent, not waiting on it:\n"
+    "IDENTITY\n"
+    "You are Verity, Charles's warm, direct, dry-witted voice assistant in "
+    "Hermes WebUI. You are the agent surface. A full Hermes agent is your "
+    "toolbox, with terminal, files, web, memory, email, smart-home, and other "
+    "configured tools.\n\n"
+    "AUDIO AND TURN POLICY\n"
+    "- Treat TV audio, music, speaker echo, background noise, and conversation "
+    "between other people as not addressed to you. Call wait_for_user and say "
+    "nothing. When uncertain whether speech was addressed to you, wait.\n"
+    "- If Charles says not to reply, answer, speak, or respond until he says a "
+    "word or phrase, do not acknowledge the instruction aloud. Call "
+    "wait_for_user for every turn until that exact word or phrase is heard.\n"
+    "- Never interrupt your own audio merely because input audio was detected. "
+    "Finish the current response, then handle the completed user turn.\n"
+    "- If speech is clearly addressed to you but unintelligible, ask one short "
+    "clarifying question. Never guess.\n\n"
+    "CONTEXT\n"
+    "You are given a digest of the current chat session. Use it; never ask what "
+    "you were just discussing.\n\n"
+    "TOOLS\n"
+    "For facts that need checking, files, actions, current information, or "
+    "multi-step work, you MUST use the Hermes tools below instead of answering "
+    "from memory or pretending an action happened. Never claim success until "
+    "the tool result says it succeeded.\n"
     "(1) agent_ask: launch a task on the agent. Returns immediately with a "
     "run handle. Use for anything requiring facts, tools, files, actions, or "
     "multi-step work. Phrase it as a complete, self-contained instruction.\n"
@@ -53,15 +71,17 @@ VOICE_INSTRUCTIONS = (
     "recent tools). Call it when the user asks what's happening or you want "
     "an update before speaking.\n"
     "(3) agent_steer: refine the ACTIVE run mid-flight — 'actually only "
-    "direct flights', 'also check Tuesday'. Delivered at the next tool "
-    "boundary without restarting. If it fails, tell the user plainly.\n"
+    "direct flights', 'also check Tuesday'. Acknowledges delivery, not "
+    "application. If it fails, tell the user plainly.\n"
     "(4) agent_stop: cancel the active run ('never mind', 'actually stop').\n"
+    "(5) wait_for_user: remain silent because the audio was not addressed to "
+    "you or an explicit reply hold is active.\n"
     "Only ONE run per session at a time. agent_ask returns {busy:true} if "
     "one is already running — steer it instead of restarting.\n"
     "WHILE A RUN IS ACTIVE: narrate progress as it arrives ([voice progress] "
     "notes), keep chatting naturally, take refinements via agent_steer, and "
     "summarize the result conversationally when the run completes.\n"
-    "STYLE: sound like a person, not a report. Short by default. Errors: "
+    "STYLE\nSound like a person, not a report. Short by default. Errors: "
     "say what failed and suggest the next step."
 )
 
@@ -126,6 +146,66 @@ AGENT_STOP_TOOL = {
     ),
     "parameters": {"type": "object", "properties": {}},
 }
+
+WAIT_FOR_USER_TOOL = {
+    "type": "function",
+    "name": "wait_for_user",
+    "description": (
+        "Produce no spoken reply. Use when audio is background noise, speaker "
+        "echo, TV/music, a side conversation not addressed to Verity, or when "
+        "the user has explicitly asked for silence until a release phrase."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "reason": {
+                "type": "string",
+                "description": "Short internal reason for waiting; it is not spoken.",
+            }
+        },
+    },
+}
+
+
+def _build_realtime_session_config(voice: str, digest: str = "") -> dict:
+    """Build the authoritative Realtime session and turn-taking policy."""
+    instructions = VOICE_INSTRUCTIONS
+    digest = str(digest or "").strip()
+    if digest:
+        instructions += (
+            "\n\nCURRENT SESSION DIGEST (live context — you already know this):\n"
+            + digest[:6000]
+        )
+    return {
+        "type": "realtime",
+        "model": REALTIME_MODEL,
+        "instructions": instructions,
+        "tools": [
+            ASK_VERITY_TOOL,
+            AGENT_STATUS_TOOL,
+            AGENT_STEER_TOOL,
+            AGENT_STOP_TOOL,
+            WAIT_FOR_USER_TOOL,
+        ],
+        "tool_choice": "auto",
+        "parallel_tool_calls": True,
+        "reasoning": {"effort": "low"},
+        "audio": {
+            "input": {
+                "noise_reduction": {"type": "far_field"},
+                "transcription": {"model": "gpt-live-transcribe", "delay": "low"},
+                # Detection only. The browser applies reply holds and explicitly
+                # creates responses after completed transcripts/tool outputs.
+                "turn_detection": {
+                    "type": "semantic_vad",
+                    "eagerness": "low",
+                    "create_response": False,
+                    "interrupt_response": False,
+                },
+            },
+            "output": {"voice": voice},
+        },
+    }
 
 
 def _read_env_file_key(name: str) -> str:
@@ -208,37 +288,7 @@ def handle_voice_live_sdp(handler):
     if not api_key:
         return bad(handler, "no OpenAI API key configured on this server", 503)
 
-    # Optional session binding: the frontend binds the call first
-    # (/api/voice/live/connect) and can pass the digest to enrich instructions.
-    instructions = VOICE_INSTRUCTIONS
-    digest = str(data.get("digest") or "").strip()
-    if digest:
-        instructions = (
-            instructions
-            + "\n\nCURRENT SESSION DIGEST (live context — you already know this):\n"
-            + digest[:6000]
-        )
-
-    session_config = json.dumps(
-        {
-            "type": "realtime",
-            "model": REALTIME_MODEL,
-            "instructions": instructions,
-            "tools": [
-                ASK_VERITY_TOOL,
-                AGENT_STATUS_TOOL,
-                AGENT_STEER_TOOL,
-                AGENT_STOP_TOOL,
-            ],
-            "tool_choice": "auto",
-            "audio": {
-                "input": {
-                    "transcription": {"model": "gpt-4o-mini-transcribe"},
-                },
-                "output": {"voice": voice},
-            },
-        }
-    )
+    session_config = json.dumps(_build_realtime_session_config(voice, data.get("digest")))
 
     # multipart/form-data body: fields "sdp" and "session"
     boundary = "hermesvoice" + os.urandom(8).hex()
@@ -504,8 +554,8 @@ def handle_voice_live_ask(handler):
     Non-blocking deep lane: fires the session's real agent turn via the same
     machinery the composer uses (POST /api/chat/start), so the run uses the
     session's model, tools, skills, and memory — and returns {stream_id}
-    immediately. The bridge polls /api/chat/stream/status and fetches the
-    final answer via GET /api/session when the stream finishes.
+    immediately. The bridge retrieves the exact run's final answer from its
+    authoritative journal via /api/voice/live/status with the stream_id.
     """
     if handler.command != "POST":
         return bad(handler, "POST required", 405)
@@ -597,7 +647,14 @@ def handle_voice_live_ask(handler):
     if not resp.get("stream_id"):
         return j(handler, {"error": "chat start returned no stream_id"}, status=502)
 
-    return j(handler, {"ok": True, "stream_id": resp["stream_id"], "session_id": s.session_id})
+    return j(
+        handler,
+        {
+            "ok": True,
+            "stream_id": resp["stream_id"],
+            "session_id": s.session_id,
+        },
+    )
 
 
 # ── realtime-as-agent-surface: steer / status / cancel ────────────────────────
@@ -686,8 +743,86 @@ def handle_voice_live_steer(handler):
     })
 
 
+def _voice_run_status(handler, sid, stream_id):
+    """Read a single authorized journal snapshot; never consult session messages."""
+    from api.run_journal import (
+        find_run_summary, read_run_events, select_authoritative_terminal_event,
+    )
+
+    if not isinstance(stream_id, str) or not stream_id or stream_id != stream_id.strip():
+        return bad(handler, "invalid stream_id", 400)
+    try:
+        summary = find_run_summary(stream_id)
+        # Missing and foreign handles deliberately have the same public error.
+        if not summary or summary.get("session_id") != sid or summary.get("run_id") != stream_id:
+            return bad(handler, "Run not found", 404)
+        journal = read_run_events(sid, stream_id)
+    except ValueError:
+        return bad(handler, "invalid stream_id", 400)
+    except OSError:
+        return bad(handler, "Run journal unavailable", 503)
+
+    events = journal.get("events") or []
+    if not events:
+        return bad(handler, "Run not found", 404)
+    if journal.get("malformed") or any(
+        not isinstance(e, dict) or e.get("session_id") != sid or e.get("run_id") != stream_id
+        for e in events
+    ):
+        return bad(handler, "Run journal unavailable", 409)
+
+    # Derive both status and result from this read, not a stale summary or the
+    # session's (possibly newer) active stream. stream_end cannot override cancel.
+    terminal = select_authoritative_terminal_event(events)
+    answer = None
+    if terminal and terminal.get("event") == "done":
+        payload = terminal.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        snapshot = payload.get("session")
+        snapshot = snapshot if isinstance(snapshot, dict) else {}
+        messages = snapshot.get("messages")
+        if isinstance(messages, list):
+            for message in reversed(messages):
+                if not isinstance(message, dict):
+                    continue
+                if message.get("role") == "user":
+                    break  # Never reuse an earlier turn's answer.
+                if message.get("role") == "assistant":
+                    content = message.get("content")
+                    if (
+                        isinstance(content, str) and content.strip()
+                        and not any(message.get(key) for key in ("tool_calls", "_partial", "_interim", "_error"))
+                    ):
+                        answer = content
+                    break  # An empty final row is not permission to use interim prose.
+
+    tools = []
+    latest_step = ""
+    for event in events:
+        payload = event.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        if event.get("event") == "tool" and payload.get("name"):
+            tools.append(str(payload["name"]))
+        elif event.get("event") == "interim_assistant" and payload.get("text"):
+            latest_step = str(payload["text"])[:200]
+    return j(handler, {
+        "ok": True,
+        "session_id": sid,
+        "stream_id": stream_id,
+        "active": terminal is None,
+        "terminal": terminal is not None,
+        "terminal_state": terminal.get("terminal_state") if terminal else "running",
+        "answer": answer,
+        "result_available": answer is not None,
+        "last_event": events[-1].get("event"),
+        "last_seq": events[-1].get("seq"),
+        "recent_tools": tools[-5:],
+        "latest_step": latest_step,
+    })
+
+
 def handle_voice_live_status(handler):
-    """POST /api/voice/live/status — {session_id}
+    """POST /api/voice/live/status — {session_id, stream_id?}
 
     Compact orchestration view for the realtime model: is a run active, what
     step is it on (from the run journal), recent tool names.
@@ -706,6 +841,9 @@ def handle_voice_live_status(handler):
         return err
 
     sid = s.session_id
+    if "stream_id" in data:
+        return _voice_run_status(handler, sid, data["stream_id"])
+
     active_stream_id = getattr(s, "active_stream_id", None)
     running = False
     if active_stream_id:
@@ -768,7 +906,6 @@ def handle_voice_live_stop(handler):
     if err is not None:
         return err
 
-    sid = s.session_id
     active_stream_id = getattr(s, "active_stream_id", None)
     if not active_stream_id:
         return j(handler, {"ok": True, "cancelled": False, "message": "No active run"})
@@ -780,13 +917,14 @@ def handle_voice_live_stop(handler):
     if not running:
         return j(handler, {"ok": True, "cancelled": False, "message": "No active run"})
 
-    from api.streaming import cancel_stream
+    from urllib.parse import urlencode, urlparse
+    from api.routes import handle_get
 
     try:
-        result = cancel_stream(active_stream_id)
+        # The composer route also stops gateway-owned runs, checks ownership,
+        # and preserves persistence-failure warnings. Do not bypass it with a
+        # direct cancel_stream call.
+        return handle_get(handler, urlparse("/api/chat/cancel?" + urlencode({"stream_id": active_stream_id})))
     except Exception as e:
         print(f"[webui] voice live: stop failed: {e}", flush=True)
         return j(handler, {"ok": False, "error": "cancel failed"}, status=500)
-
-    cancelled = bool(result.get("cancelled")) if isinstance(result, dict) else bool(result)
-    return j(handler, {"ok": True, "cancelled": cancelled, "stream_id": active_stream_id})
