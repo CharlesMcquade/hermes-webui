@@ -6144,6 +6144,9 @@ def _csrf_rejection_error(handler) -> str:
 
 def _check_csrf(handler) -> bool:
     """Reject cross-origin or tokenless authenticated browser unsafe requests."""
+    from api.extension_auth import csrf_allowed
+    if getattr(handler, "_extension_principal", None):
+        return csrf_allowed(handler)
     if not _check_same_origin_browser_request(handler):
         # CSRF checks run before read_body(), so close rather than reusing an
         # HTTP/1.1 connection whose unread body would corrupt the next request --
@@ -13661,6 +13664,9 @@ def _handle_session_get(handler, parsed) -> bool:
         s = get_session(sid, metadata_only=(not load_messages))
         _session_profile = getattr(s, 'profile', None) or None
         if not _session_visible_to_active_profile(_session_profile, handler):
+            if getattr(handler, '_extension_principal', None):
+                if _diag: _diag.finish()
+                return bad(handler, "Session not found", 404)
             if _session_profile:
                 # Valid session owned by a KNOWN other profile: 409 so the
                 # client can offer to switch to it (#5419).
@@ -14140,6 +14146,8 @@ def _handle_session_get(handler, parsed) -> bool:
         # even though /api/sessions happily lists them. Exempt them.
         _profile_agnostic = _is_profile_agnostic_foreign_session(cli_meta)
         if not _profile_agnostic and not _session_visible_to_active_profile(_session_profile, handler):
+            if getattr(handler, '_extension_principal', None):
+                return bad(handler, "Session not found", 404)
             if _session_profile:
                 # Valid CLI/foreign session owned by a KNOWN other profile:
                 # 409 so the client can offer to switch to it (#5419).
@@ -14216,6 +14224,9 @@ def _handle_session_get(handler, parsed) -> bool:
 
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
+    from api import extension_auth
+    if parsed.path == "/extension-pair" or parsed.path.startswith(extension_auth.PREFIX):
+        return extension_auth.handle_get(handler, parsed)
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
     if proxy_result is not False:
         return proxy_result
@@ -14492,7 +14503,7 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/sidecar/cdp/relays":
         from api import sidecar_cdp
 
-        return j(handler, {"ok": True, "relays": sidecar_cdp.list_relays()})
+        return j(handler, {"ok": True, "relays": extension_auth.list_relays(handler)})
 
     # ── Insights / knowledge status ──
     if parsed.path == "/api/insights":
@@ -15841,6 +15852,9 @@ def _llm_update_summary(system_prompt: str, user_prompt: str, active_profile: st
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
+    from api import extension_auth
+    if parsed.path.startswith(extension_auth.PREFIX):
+        return extension_auth.handle_post(handler, parsed)
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
     if parsed.path == "/api/csp-report":
         if diag:
@@ -15981,14 +15995,18 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         raise
+    if not extension_auth.body_profile_allowed(handler, body):
+        return j(handler, {"error": "profile_forbidden"}, status=403)
     if not _guard_request_session_visibility(handler, parsed, body=body, method="POST"):
         if diag:
             diag.finish()
         return True
 
     if parsed.path.startswith("/api/sidecar/cdp/"):
-        from api import sidecar_cdp
+        from api import sidecar_cdp, extension_auth
 
+        if not extension_auth.relay_guard(handler, parsed.path, body):
+            return True
         try:
             if parsed.path == "/api/sidecar/cdp/register":
                 peer = ""
@@ -15996,7 +16014,7 @@ def handle_post(handler, parsed) -> bool:
                     peer = str(getattr(handler, "client_address", [""])[0] or "")
                 except Exception:
                     peer = ""
-                return j(handler, sidecar_cdp.register_relay(body, peer=peer))
+                return j(handler, extension_auth.register_relay(handler, body, peer=peer))
             if parsed.path == "/api/sidecar/cdp/unregister":
                 return j(handler, sidecar_cdp.unregister_relay(body.get("relay_id")))
             if parsed.path == "/api/sidecar/cdp/poll":
@@ -16021,7 +16039,7 @@ def handle_post(handler, parsed) -> bool:
             if parsed.path == "/api/sidecar/cdp/command":
                 method = str(body.get("method") or "").strip()
                 if method == "cdp.listRelays":
-                    return j(handler, {"ok": True, "relays": sidecar_cdp.list_relays()})
+                    return j(handler, {"ok": True, "relays": extension_auth.list_relays(handler)})
                 result = sidecar_cdp.send_command(
                     method=method,
                     params=body.get("params") or {},
@@ -21567,7 +21585,7 @@ def _handle_media(handler, parsed):
     _HERMES_HOME = Path(_os.getenv("HERMES_HOME", str(_HOME / ".hermes"))).expanduser()
 
     # Auth check
-    if is_auth_enabled():
+    if is_auth_enabled() and not getattr(handler, '_extension_principal', None):
         cv = parse_cookie(handler)
         if not (cv and verify_session(cv)):
             body = b'{"error":"Authentication required"}'
@@ -21588,6 +21606,13 @@ def _handle_media(handler, parsed):
         target = Path(raw_path).resolve()
     except Exception:
         return bad(handler, "Invalid path", 400)
+
+    device_root = None
+    if getattr(handler, '_extension_principal', None):
+        from api.extension_auth import media_root
+        device_root = media_root(handler, target, qs)
+        if device_root is None:
+            return bad(handler, "Path not in allowed location", 403)
 
     # Allowed roots: hermes home, /tmp, and active workspace.
     # Intentionally NOT the entire home dir — that would expose ~/.ssh,
@@ -21664,7 +21689,7 @@ def _handle_media(handler, parsed):
         return bad(handler, "Path not in allowed location", 403)
     # ── end #3234 deny ───────────────────────────────────────────────────────
 
-    if not within_allowed and not session_media_allowed:
+    if not within_allowed and not session_media_allowed and device_root is None:
         return bad(handler, "Path not in allowed location", 403)
 
     # Determine MIME type from the requested path's extension. Computed BEFORE
@@ -21701,7 +21726,7 @@ def _handle_media(handler, parsed):
     snap_digest = qs.get("snap", [""])[0].strip().lower()
     snapshot_file = None
     snap_dir = None
-    if snap_digest:
+    if snap_digest and not getattr(handler, '_extension_principal', None):
         from api.media_snapshots import (
             get_snapshot_dir,
             is_valid_digest,
@@ -21753,7 +21778,7 @@ def _handle_media(handler, parsed):
         cache_control = "no-store"
     else:
         cache_control = "private, no-cache"
-    return _serve_file_bytes(handler, target, mime, disposition, cache_control, csp=csp)
+    return _serve_file_bytes(handler, target, mime, disposition, cache_control, csp=csp, anchor_root=device_root)
 
 
 def _file_raw_target(session, sid: str, rel: str) -> tuple[Path, Path] | None:
