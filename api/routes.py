@@ -13394,8 +13394,6 @@ def handle_get(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/sidecar/cdp/relays":
-        from api import sidecar_cdp
-
         return j(handler, {"ok": True, "relays": extension_auth.list_relays(handler)})
 
     # ── Insights / knowledge status ──
