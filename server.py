@@ -337,6 +337,11 @@ class Handler(BaseHTTPRequestHandler):
         return _build_csp_report_only_policy(extra_connect_src, extra_frame_src, extra_img_src)
 
     def end_headers(self) -> None:
+        from api.extension_auth import cors
+        cors(self)
+        device_sse = (getattr(self, '_extension_principal', None) and any(
+            b'content-type: text/event-stream' in line.lower()
+            for line in getattr(self, '_headers_buffer', [])))
         extra_connect_src = getattr(self, "_csp_extra_connect_src", None)
         extra_frame_src = getattr(self, "_csp_extra_frame_src", None)
         extra_img_src = getattr(self, "_csp_extra_img_src", None)
@@ -344,6 +349,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Report-To", self._CSP_REPORT_TO)
         advertise_connection_close(self)  # tell the client when the socket dies
         super().end_headers()
+        if device_sse:
+            from api.extension_auth import AuthorizedStreamWriter
+            self.wfile = AuthorizedStreamWriter(self.wfile, self)
 
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
 
