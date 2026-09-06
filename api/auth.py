@@ -853,6 +853,7 @@ def _remember_trusted_auth_session(handler, info: dict | None, cookie_value: str
 
 def reset_trusted_auth_request_state(handler) -> None:
     for name in (
+        '_extension_principal',
         '_trusted_auth_session_reconciled',
         '_trusted_auth_session_rejected',
         '_trusted_auth_session_info',
@@ -1075,6 +1076,10 @@ def _safe_login_inner_next(query: str | None) -> str:
 def check_auth(handler, parsed) -> bool:
     """Check if request is authorized. Returns True if OK.
     If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
+    from api.extension_auth import authenticate
+    extension_result = authenticate(handler, parsed)
+    if extension_result is not None:
+        return extension_result
     if not is_auth_enabled():
         return True
     # Public paths don't require auth
