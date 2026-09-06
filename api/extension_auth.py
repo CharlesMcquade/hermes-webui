@@ -36,14 +36,14 @@ SCOPES = {'chat', 'control', 'cdp'}
 # Exact method/path grants: new server routes are denied until reviewed here.
 CHAT_GET = set(('session sessions sessions/search media sidecar/identity session/status '
     'session/usage session/export session/draft session/conversation-rounds '
-    'session/compress/status session/worktree/status chat/stream/status chat/stream '
+    'session/compress/status session/worktree/status chat/stream/status chat/stream chat/cancel '
     'models models/live models/catalog workspaces commands prompts personalities '
     'approval/pending clarify/pending background/status transcribe/capability '
     'profile/active').split())
 CHAT_POST = set(('session/new session/rename session/archive session/pin session/draft '
     'session/update session/delete session/duplicate session/branch session/clear '
     'session/retry session/undo session/truncate session/compress/start '
-    'session/title/regenerate chat/start chat/cancel chat/steer chat btw upload '
+    'session/title/regenerate chat/start chat/steer chat btw upload '
     'upload/extract approval/respond clarify/respond bg-task-complete-ack '
     'transcribe tts background').split())
 CONTROL_GET = set(('settings providers providers/self-hosted provider/quota '
