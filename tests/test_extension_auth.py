@@ -4,7 +4,7 @@ import hashlib
 import http.client
 import json
 import os
-from pathlib import Path
+
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
