@@ -438,12 +438,21 @@ class TestBaseHrefOrdering:
 
 
 class _FakeHandler:
-    """Minimal request handler stub for exercising handle_get() in tests."""
+    """Minimal request handler stub for exercising handle_get() in tests.
+
+    Carries the real BaseHTTPRequestHandler request API surface
+    (`headers` email.message.Message, `command`) because the auth/
+    extension-auth layers read them (Origin, Authorization, Cookie,
+    X-Hermes-Extension-Id). Empty headers = anonymous browser request.
+    """
     def __init__(self):
         self.status = None
         self.sent_headers = []
         self.body = bytearray()
         self.wfile = self
+        self.command = "GET"
+        import email.message as _em
+        self.headers = _em.Message()
 
     def send_response(self, status):
         self.status = status

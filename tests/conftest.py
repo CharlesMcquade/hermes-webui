@@ -231,6 +231,28 @@ def _reset_password_hash_cache():
         _invalidate_password_hash_cache()
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _strip_ambient_webui_password():
+    """Keep a developer's ambient HERMES_WEBUI_PASSWORD out of the pytest env.
+
+    The WebUI test suite assumes a fresh, unauthenticated environment: the
+    repo's own harnesses deliberately strip this var before booting the
+    out-of-process test server (see conftest's server-env construction), and
+    auth-shape tests (build_profile_cookie "requires a request handler when
+    auth is enabled", #4023 contract) only pass when auth is OFF.
+
+    But when tests run from a shell that inherits the LIVE server's
+    environment (e.g. an agent shell or a terminal under `./start.sh`), this
+    var arrives already set with the real login password. is_auth_enabled()
+    then reads True for every test, producing order-dependent "requires a
+    request handler" failures that never reproduce in a clean worktree.
+    Pop it once for the whole session — tests that specifically exercise
+    password auth set their own value explicitly.
+    """
+    os.environ.pop("HERMES_WEBUI_PASSWORD", None)
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _invalidate_providers_cache():
     """Clear the /api/providers TTL cache around every test (#6010).

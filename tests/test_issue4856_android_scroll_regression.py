@@ -124,7 +124,13 @@ def test_recent_render_scroll_artifact_window_suppresses_upward_unpin():
     assert "function _recentMessageRenderArtifactWindow" in UI_JS
     listener_idx = UI_JS.find("el.addEventListener('scroll'")
     assert listener_idx != -1, "messages scroll listener not found"
-    listener = UI_JS[listener_idx: listener_idx + 4000]
+    # Window covers the whole listener body up to the movedUp unpin branch.
+    # (0b1d19ab's aggressive-follow guards grew the listener past the old
+    # 4000-byte estimate; slice at the movedUp branch instead so the window
+    # tracks the code the artifact suppression actually fronts.)
+    moved_up_idx = UI_JS.find("if(movedUp){", listener_idx)
+    assert moved_up_idx != -1, "movedUp branch not found after scroll listener"
+    listener = UI_JS[listener_idx: moved_up_idx + len("if(movedUp){")]
     assert "_recentMessageRenderArtifactWindow(1400)" in listener
     assert "!_recentMessageTouchScrollIntent()" in listener
     assert "!_recentNonMessageScrollIntent()" in listener

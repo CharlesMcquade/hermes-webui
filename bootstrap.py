@@ -68,13 +68,22 @@ def _load_repo_dotenv() -> None:
         print(f"[bootstrap] Warning: could not load .env — {exc}", file=_sys.stderr)
 
 
-# Side effect: loads REPO_ROOT/.env into os.environ on import.
-# Must run before DEFAULT_HOST / DEFAULT_PORT so os.getenv() picks up
-# values from .env even when bootstrap.py is invoked directly (not via start.sh).
-_load_repo_dotenv()
+# NOTE: _load_repo_dotenv() is deliberately NOT called at import time.
+# Importing bootstrap must stay side-effect-free: the pytest suite imports
+# this module for its helpers, and an import-time .env load would dump real
+# secrets from the developer's repo .env into os.environ for the rest of the
+# test session — breaking every no-key / key-detection / auth-shape test with
+# ambient credentials (and making main-repo runs diverge from clean-worktree
+# runs). Direct execution still gets identical behavior because main() loads
+# .env before reading any launch defaults (matches start.sh's `set -a; source
+# .env` ordering).
 
-DEFAULT_HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
-DEFAULT_PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
+def _launch_default_host():
+    return os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
+
+
+def _launch_default_port():
+    return int(os.getenv("HERMES_WEBUI_PORT", "8787"))
 # Set HERMES_WEBUI_SKIP_ONBOARDING=1 to bypass the first-run wizard when
 # the environment is already fully configured (e.g. managed hosting).
 
@@ -466,8 +475,8 @@ def open_browser(url: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Bootstrap Hermes Web UI onboarding.")
-    parser.add_argument("port", nargs="?", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument("port", nargs="?", type=int, default=_launch_default_port())
+    parser.add_argument("--host", default=_launch_default_host())
     parser.add_argument(
         "--no-browser",
         action="store_true",
@@ -558,6 +567,11 @@ def _detect_supervisor() -> str | None:
 
 
 def main() -> int:
+    # Load REPO_ROOT/.env before any launch default is read (port/host/state
+    # dir etc.) — mirrors start.sh's `set -a; source .env` ordering. Runs here
+    # rather than at import so importing bootstrap stays side-effect-free
+    # (tests import this module; secrets must not leak into their os.environ).
+    _load_repo_dotenv()
     args = parse_args()
     ensure_supported_platform()
 

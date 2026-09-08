@@ -15,6 +15,7 @@ profile-tagged foreign rows stay fully scoped (the #5419 409 contract).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
 
@@ -95,8 +96,13 @@ def test_claude_code_detail_load_survives_named_active_profile(monkeypatch):
     cap = _capture(monkeypatch)
     synth = _synth_for(row)
 
-    handler = MagicMock()
-    parsed = urlparse("/api/session?session_id=%s&messages=0&resolve_model=0" % CLAUDE_SID)
+    # Plain object, NOT MagicMock: the detail-load profile gate consults
+    # `handler._extension_principal`, and a MagicMock would auto-create a
+    # truthy attribute — silently routing the assertion into the
+    # extension-principal 404 branch instead of the profile-mismatch 409
+    # under test. (Found when device-auth added that branch.)
+    handler = SimpleNamespace(_extension_principal=None)
+    parsed = urlparse("/api/session?session_id=%s&messages=0&resolve_model=0" % row["session_id"])
 
     with patch("api.routes.get_session", side_effect=KeyError(CLAUDE_SID)), \
          patch("api.routes._get_active_profile_name", return_value="feng-family"), \
@@ -133,7 +139,11 @@ def test_profile_tagged_foreign_session_still_scoped(monkeypatch):
     )
     cap = _capture(monkeypatch)
 
-    handler = MagicMock()
+    # Plain object, NOT MagicMock — see the note in
+    # test_profile_agnostic_claude_code_row_loads_under_named_profile: a
+    # MagicMock auto-creates a truthy `_extension_principal`, which routes the
+    # gate into the extension 404 branch instead of the #5419 profile 409.
+    handler = SimpleNamespace(_extension_principal=None)
     parsed = urlparse("/api/session?session_id=%s&messages=0&resolve_model=0" % row["session_id"])
 
     with patch("api.routes.get_session", side_effect=KeyError(row["session_id"])), \

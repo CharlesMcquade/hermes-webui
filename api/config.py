@@ -5088,6 +5088,12 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
 # ── TTL cache for get_available_models() ─────────────────────────────────────
 _available_models_cache: dict | None = None
 _available_models_cache_ts: float = 0.0
+# Generation fence (#4756): bumped on every invalidation; the bounded live
+# rebuild's daemon worker captures it at start and refuses to publish
+# out-of-band if it changed — otherwise a stale catalog (built from
+# pre-invalidation config) can land AFTER the invalidation with a fresh
+# timestamp and serve for the rest of the 24h TTL.
+_models_cache_generation: int = 0
 _available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
@@ -6501,11 +6507,13 @@ def invalidate_models_cache():
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
+    global _models_cache_generation
     with _available_models_cache_lock:
         _available_models_cache = None
         _available_models_cache_ts = 0.0
         _available_models_live_rebuild_ts = 0.0
         _available_models_cache_source_fingerprint = None
+        _models_cache_generation += 1
         _sync_models_cache_provenance()
         _cache_build_in_progress = False
         _cache_build_cv.notify_all()
@@ -8597,7 +8605,21 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # INSIDE this profile scope so the over-budget path writes
                     # the correct profile's cache file.
                     if budget_exceeded.is_set() and _claim_publish():
-                        if "result" in box:
+                        # #4756 generation fence: an invalidation during the
+                        # probe (config.yaml edit, test isolation, provider-key
+                        # change) must win over this stale publication.
+                        with _cache_build_cv:
+                            generation_valid = (
+                                _rebuild_generation == _models_cache_generation
+                            )
+                        if not generation_valid:
+                            logger.info(
+                                "models catalog rebuild finished after an "
+                                "invalidation — discarding stale out-of-band "
+                                "publication"
+                            )
+                            _clear_build_in_progress()
+                        elif "result" in box:
                             _publish_models_result(box["result"])
                         else:
                             _clear_build_in_progress()
@@ -8607,6 +8629,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             name="models-catalog-rebuild",
             daemon=True,
         )
+        # Generation fence (#4756): snapshot BEFORE starting the worker. If
+        # the cache is invalidated while the probe runs, the worker's
+        # out-of-band publication would land a catalog built from
+        # pre-invalidation config with a fresh timestamp — refuse it.
+        with _cache_build_cv:
+            _rebuild_generation = _models_cache_generation
         _worker.start()
 
         if build_done.wait(timeout=_LIVE_REBUILD_BUDGET_SECONDS):

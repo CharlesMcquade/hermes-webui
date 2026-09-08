@@ -76,9 +76,9 @@ def clean_env(monkeypatch):
 
     The resolved-vars stripping (HERMES_WEBUI_HOST etc.) prevents leakage
     where a previous test's ``main()`` mutated ``os.environ`` and a later
-    test re-imports ``bootstrap``, picking up the polluted defaults. With
-    these stripped, ``DEFAULT_HOST`` / ``DEFAULT_PORT`` fall back to their
-    hardcoded defaults at module load time.
+    test re-reads the launch defaults — which now resolve lazily from
+    ``os.environ`` (see ``_launch_default_host``/``_launch_default_port``),
+    so a clean env yields the hardcoded fallbacks.
     """
     for name in (
         # Supervisor-detection env vars
@@ -116,12 +116,13 @@ def import_bootstrap():
 
 class TestForegroundFlag:
 
-    def test_foreground_is_recognized_flag(self, import_bootstrap, monkeypatch):
+    def test_foreground_is_recognized_flag(self, import_bootstrap, clean_env, monkeypatch):
         monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--foreground"])
         args = import_bootstrap.parse_args()
         assert args.foreground is True
-        assert args.port == import_bootstrap.DEFAULT_PORT  # default preserved
-        assert args.host == import_bootstrap.DEFAULT_HOST
+        # Launch defaults are read lazily from the (stripped-clean) environment.
+        assert args.port == 8787  # hardcoded fallback, env stripped by clean_env
+        assert args.host == "127.0.0.1"
 
     def test_foreground_default_is_false(self, import_bootstrap, monkeypatch):
         monkeypatch.setattr(sys, "argv", ["bootstrap.py"])
@@ -237,6 +238,11 @@ class TestMainForegroundRouting:
         """Stub out everything main() calls except the routing decision."""
         import bootstrap as bs
         python_exe = sys.executable
+        # main() now loads REPO_ROOT/.env (moved from import time so importing
+        # bootstrap stays side-effect-free). Point REPO_ROOT at a .env-free
+        # tmp dir so a developer repo's real .env can never leak into these
+        # tests' os.environ and overwrite the stubbed launch vars.
+        monkeypatch.setattr(bs, "REPO_ROOT", tmp_path / "bootstrap-root")
         monkeypatch.setattr(bs, "ensure_supported_platform", lambda: None)
         monkeypatch.setattr(bs, "discover_agent_dir", lambda: tmp_path / "agent")
         monkeypatch.setattr(bs, "hermes_command_exists", lambda: True)

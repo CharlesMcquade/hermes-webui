@@ -12,6 +12,12 @@ from server import Handler
 def test_handler_adds_content_security_policy_report_only(monkeypatch):
     sent_headers = []
     handler = Handler.__new__(Handler)
+    # end_headers() → _security_headers(handler) reads the request-API surface
+    # (handler.headers, handler.command) via api.extension_auth — provide an
+    # anonymous-browser-shaped one.
+    import email.message as _em
+    handler.headers = _em.Message()
+    handler.command = "GET"
     handler.send_header = lambda key, value: sent_headers.append((key, value))
     monkeypatch.setattr(BaseHTTPRequestHandler, "end_headers", lambda self: None)
 

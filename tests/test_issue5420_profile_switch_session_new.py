@@ -24,6 +24,10 @@ def _post_session_new(body: dict, monkeypatch):
     handler = MagicMock()
     handler.command = "POST"
     handler.headers = {}
+    # Pin the extension-principal flag: a bare MagicMock auto-creates a truthy
+    # attribute for ANY name, which would route handle_post's session-visibility
+    # gates into the extension branch instead of the profile path under test.
+    handler._extension_principal = None
 
     monkeypatch.setattr(routes, "read_body", lambda _h: body)
     monkeypatch.setattr(routes, "_check_csrf", lambda _h: True)

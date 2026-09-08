@@ -24,12 +24,25 @@ def _strip_at_prefix(model_id):
 
 @pytest.fixture(autouse=True)
 def _isolate_models_cache():
-    """Invalidate the models TTL cache before and after every test in this file."""
+    """Invalidate the models TTL cache before and after every test in this file.
+
+    Also pins a synchronous (unbounded) live-rebuild budget: the default
+    4s bounded rebuild runs the catalog build on a daemon worker, so a slow
+    probe (e.g. an ambient provider key making the custom-base_url probe
+    attempt a real connection) makes get_available_models() return a
+    network-free FALLBACK — empty groups — instead of the config-derived
+    catalog these tests assert on. This module never exercises the
+    over-budget path, so force the legacy synchronous rebuild for
+    determinism (restored after each test).
+    """
     try:
         config.invalidate_models_cache()
     except Exception:
         pass
+    old_budget = config._LIVE_REBUILD_BUDGET_SECONDS
+    config._LIVE_REBUILD_BUDGET_SECONDS = 0.0
     yield
+    config._LIVE_REBUILD_BUDGET_SECONDS = old_budget
     try:
         config.invalidate_models_cache()
     except Exception:
