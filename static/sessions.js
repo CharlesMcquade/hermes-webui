@@ -5013,15 +5013,13 @@ function _openSessionActionMenu(session, anchorEl){
       ICONS.stop,
       async()=>{
         closeSessionActionMenu();
-        const result = await cancelSessionStream(session);
-        // Structured/tri-state cancellation status: when persistence_failed is
-        // true, cancelSessionStream already showed the incomplete-persistence
-        // warning toast.  Suppress both the generic success and generic
-        // failure toasts so the warning remains the final visible result
-        // (gate-certifier blocker #2: sidebar Stop overwrites persistence
-        // warning with success).
-        if(result && result.persistence_failed) return;
-        if(result && result.cancelled) showToast(t('stream_stopped'));
+        // #6008: cancelSessionStream returns {cancelled, persistence_failed}.
+        // On persistence failure the warning toast was already shown by
+        // cancelSessionStream itself — suppress stream_stopped/cancel_failed
+        // so the warning stays the final visible result.
+        const result=await cancelSessionStream(session);
+        if(result&&result.persistence_failed)return;
+        if(result&&result.cancelled)showToast(t('stream_stopped'));
         else showToast(t('cancel_failed'),null,'error');
       }
     ));
