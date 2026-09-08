@@ -6558,6 +6558,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           let _doneFinalAnswer='';
           try{ if(typeof _streamDisplay==='function') _doneFinalAnswer=_streamDisplay()||''; }catch(_){}
           const _preSettle=Array.isArray(S.messages)?S.messages:[];
+          // Preserve the loaded transcript window (virtualization): a full
+          // `done` snapshot only carries the server-side window, so re-attach
+          // the rows the reader already has loaded before assignment.
+          const _loadedWindow=typeof _captureLoadedMessageWindow==='function'
+            ? _captureLoadedMessageWindow(activeSid) : null;
+          if(typeof _preserveLoadedMessageWindow==='function'){
+            d.session=_preserveLoadedMessageWindow(d.session,_loadedWindow);
+          }
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           if(_pendingTitleUpdates.has(completedSid)){
             applySessionTitleUpdate(completedSid, _pendingTitleUpdates.get(completedSid), {expectedCurrent:_pendingTitleExpectedCurrent.get(completedSid)});
