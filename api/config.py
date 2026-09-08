@@ -6768,6 +6768,12 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
 # ── TTL cache for get_available_models() ─────────────────────────────────────
 _available_models_cache: dict | None = None
 _available_models_cache_ts: float = 0.0
+# Generation fence (#4756): bumped on every invalidation; the bounded live
+# rebuild's daemon worker captures it at start and refuses to publish
+# out-of-band if it changed — otherwise a stale catalog (built from
+# pre-invalidation config) can land AFTER the invalidation with a fresh
+# timestamp and serve for the rest of the 24h TTL.
+_models_cache_generation: int = 0
 _available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
@@ -11687,6 +11693,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             name="models-catalog-rebuild",
             daemon=True,
         )
+        # Generation fence (#4756): snapshot BEFORE starting the worker. If
+        # the cache is invalidated while the probe runs, the worker's
+        # out-of-band publication would land a catalog built from
+        # pre-invalidation config with a fresh timestamp — refuse it.
+        with _cache_build_cv:
+            _rebuild_generation = _models_cache_generation
         _worker.start()
 
         # Wait on the SAME absolute deadline the probe schedule draws its slices
