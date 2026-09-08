@@ -2743,8 +2743,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     : '';
   const _STREAM_FADE_MS=620;
   const _STREAM_FADE_MAX_MS=900;
-  const _STREAM_FADE_DONE_MAX_MS=1000;
-  const _STREAM_FADE_DONE_DRAIN_MAX_MS=1400;
   const _anchorApi=(typeof window!=='undefined'&&window.HermesAssistantTurnAnchors)
     ? window.HermesAssistantTurnAnchors
     : null;
@@ -5252,45 +5250,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeDomText=String(next.text||'');
     return next.caughtUp;
   }
-  function _streamFadeCurrentDisplayText(){
-    const parsed=_parseStreamState();
-    return segmentStart===0
-      ? parsed.displayText
-      : _stripXmlToolCalls(assistantText.slice(segmentStart));
-  }
-  function _drainStreamFadeBeforeDone(onDone){
-    const drainStartedAt=performance.now();
-    let forcedDone=false;
-    const step=()=>{
-      if(!assistantBody){onDone();return;}
-      const target=_streamFadeCurrentDisplayText();
-      const caughtUp=_renderStreamingFadeMarkdown(target);
-      const anchorProcessText=_streamFadeDomText||target;
-      if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText);
-      scrollIfPinned();
-      if(caughtUp){
-        // parser_end can flush pending markdown text; include that final text in
-        // the fade wait instead of replacing it immediately in renderMessages().
-        if(_smdParser) _smdEndParser();
-        // Let the last released words visibly finish their stagger + fade before
-        // the final renderMessages() DOM replacement removes the live spans.
-        const remainingAnimationMs=Math.max(_STREAM_FADE_MS, _streamFadeLatestAnimationEndAt-performance.now());
-        setTimeout(onDone, Math.min(remainingAnimationMs, _STREAM_FADE_DONE_MAX_MS));
-        return;
-      }
-      // Final SSE `done` means the canonical completed session is available.
-      // The optional word-fade playout must not keep that completed answer
-      // hidden behind the live Thinking state for large/bursty responses.
-      if(!forcedDone&&performance.now()-drainStartedAt>=_STREAM_FADE_DONE_DRAIN_MAX_MS){
-        forcedDone=true;
-        if(_smdParser) _smdEndParser();
-        onDone();
-        return;
-      }
-      setTimeout(()=>requestAnimationFrame(step), 33);
-    };
-    step();
-  }
   function _flushPendingSegmentRender(options={}){
     const force=!!(options&&options.force);
     const skipAnchorProcessProse=!!(options&&options.skipAnchorProcessProse);
@@ -6129,10 +6088,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_streamFinalized) return;
       _clearStreamEndRecovery();
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
-      // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
-      // a stream_end event arriving during the fade window sees
-      // _streamFinalized=false, calls _restoreSettledSession(), and overwrites
-      // S.messages with stale server data (issue #3195).
+      // Claim completion before settling, so a subsequent stream_end cannot
+      // restore stale server data over the completed session (issue #3195).
       _streamFinalized=true;
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -6433,11 +6390,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         });
         sendBrowserNotification('Response complete',_completionPreview||'Task finished',{forceHidden:_wasEverBackgrounded,sid:activeSid});
       };
-      if(_shouldUseLiveProseFade()&&assistantBody){
-        _cancelAnimationFramePendingStreamRender();
-        _drainStreamFadeBeforeDone(_finishDone);
-        return;
-      }
+      // The completed session is authoritative. Cosmetic word playout must not
+      // delay Markdown or idle state after the server is done.
       _finishDone();
     });
 
