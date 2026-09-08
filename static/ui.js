@@ -12709,8 +12709,11 @@ function _applyTransparentRowFading(turn){
     // Newest = full opacity; each step back drops by 1 (floors at 5).
     const stepsFromEnd=total-1-i;
     if(stepsFromEnd<=0){row.removeAttribute('data-transparent-fade');continue;}
-    const step=Math.min(5,stepsFromEnd);
-    row.setAttribute('data-transparent-fade',String(step));
+    const step=String(Math.min(5,stepsFromEnd));
+    // Prose updates do not change recency: avoid no-op attribute mutations.
+    if(row.getAttribute('data-transparent-fade')!==step){
+      row.setAttribute('data-transparent-fade',step);
+    }
   }
 }
 // Resolve the assistant message that carries a transparent turn's settled
