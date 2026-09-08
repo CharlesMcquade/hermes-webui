@@ -108,6 +108,12 @@ def test_report_only_policy_tracks_enforced_directives(monkeypatch):
 def test_report_only_csp_headers_still_point_to_collector(monkeypatch):
     sent_headers = []
     handler = Handler.__new__(Handler)
+    # end_headers() → _security_headers(handler) reads the request-API surface
+    # (handler.headers for Origin/Cookie/Authorization, handler.command) via
+    # api.extension_auth — provide an anonymous-browser-shaped one.
+    import email.message as _em
+    handler.headers = _em.Message()
+    handler.command = "GET"
     handler.send_header = lambda key, value: sent_headers.append((key, value))
     monkeypatch.setattr(BaseHTTPRequestHandler, "end_headers", lambda self: None)
 
@@ -131,6 +137,11 @@ def test_end_headers_reuses_cached_extra_connect_validation(monkeypatch, caplog)
 
     sent_headers = []
     handler = Handler.__new__(Handler)
+    # _security_headers(handler) reads the request-API surface (handler.headers,
+    # handler.command) via api.extension_auth — provide an anonymous one.
+    import email.message as _em
+    handler.headers = _em.Message()
+    handler.command = "GET"
     handler.send_header = lambda key, value: sent_headers.append((key, value))
     monkeypatch.setattr(BaseHTTPRequestHandler, "end_headers", lambda self: None)
 

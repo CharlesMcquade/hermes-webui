@@ -169,20 +169,36 @@ class TestBootstrapStructure:
             "python3 bootstrap.py loads REPO_ROOT/.env before reading env defaults"
         )
 
-    def test_dotenv_loaded_before_default_host_port(self):
-        """_load_repo_dotenv() call must appear before DEFAULT_HOST/DEFAULT_PORT in source."""
+    def test_dotenv_loaded_in_main_before_launch_defaults(self):
+        """_load_repo_dotenv() runs inside main() BEFORE parse_args() reads the
+        launch defaults — direct invocation picks up .env just like start.sh.
+
+        (The load used to run at import time; that was moved into main() so
+        importing bootstrap stays side-effect-free — the pytest suite imports
+        this module and must not inherit the developer repo's real .env
+        secrets into os.environ.)"""
         src = (REPO_ROOT / "bootstrap.py").read_text(encoding="utf-8")
-        load_pos = src.find("_load_repo_dotenv()")
-        host_pos = src.find("DEFAULT_HOST")
-        port_pos = src.find("DEFAULT_PORT")
-        assert load_pos != -1, "_load_repo_dotenv() call not found in bootstrap.py"
-        assert load_pos < host_pos, (
-            "_load_repo_dotenv() must be called before DEFAULT_HOST assignment "
-            "so that HERMES_WEBUI_HOST from .env is picked up"
+        main_pos = src.find("def main() -> int:")
+        assert main_pos != -1, "main() not found in bootstrap.py"
+        main_body = src[main_pos:]
+        load_pos = main_body.find("_load_repo_dotenv()")
+        args_pos = main_body.find("args = parse_args()")
+        assert load_pos != -1, "main() must call _load_repo_dotenv()"
+        assert args_pos != -1, "main() must call parse_args()"
+        assert load_pos < args_pos, (
+            "main() must load .env BEFORE parse_args() reads HERMES_WEBUI_HOST/PORT "
+            "launch defaults (start.sh-equivalent ordering)"
         )
-        assert load_pos < port_pos, (
-            "_load_repo_dotenv() must be called before DEFAULT_PORT assignment "
-            "so that HERMES_WEBUI_PORT from .env is picked up"
+        # And the import must stay side-effect-free: no module-level load call.
+        # (Match only bare call lines, not mentions inside comments/docstrings:
+        # a line starting with the call, optionally indented.)
+        import re as _re
+        call_re = _re.compile(r"^[ \t]*_load_repo_dotenv\(\)\s*$", _re.MULTILINE)
+        module_level_calls = call_re.findall(src[:main_pos])
+        assert not module_level_calls, (
+            "bootstrap.py must NOT call _load_repo_dotenv() at module/import level — "
+            "importing bootstrap must not leak repo .env secrets into the "
+            "caller's os.environ (pytest imports this module)"
         )
 
     def test_start_sh_and_bootstrap_equivalent_env_loading(self):

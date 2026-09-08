@@ -243,6 +243,20 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
             os.fsync(f.fileno())
         _verify_symlink_target()
         os.replace(tmp, write_path)
+        if mode is not None:
+            # Re-assert the full mode on the installed inode. On BSD/macOS,
+            # closing the last fd of a file whose group is not in the
+            # process's credential groups clears S_ISGID (and S_ISUID), so a
+            # pre-replace fchmod of an administrator's setgid policy (e.g.
+            # 0o2664 on a shared profile config) is silently stripped between
+            # the write and the rename. Post-replace chmod also lets the
+            # kernel validate the final state on the inode users actually see.
+            try:
+                os.chmod(write_path, mode)
+            except OSError:
+                # Directory may forbid chmod while still having allowed the
+                # rename; the pre-replace mode is the best we already have.
+                pass
         _fsync_directory(write_path.parent)
     except BaseException:
         if owns_fd:
