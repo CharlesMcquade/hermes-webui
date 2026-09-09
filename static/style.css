@@ -5996,7 +5996,8 @@ main.main > #mainPlugin{display:none;}
 .msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); overflow-wrap:normal; }
 .msg-body p,.msg-body li,.msg-body td{overflow-wrap:anywhere;}
 .msg-body code,
-.msg-body pre { font-family:var(--font-mono); }
+.msg-body pre,
+.msg-body table { font-family:var(--font-mono); }
 :root[data-skin="graphite"] .msg-body table,
 :root[data-skin="codex"] .msg-body table,
 :root[data-skin="terracotta"] .msg-body table,
