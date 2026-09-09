@@ -105,6 +105,7 @@ def _sync_session_title_to_insights(session) -> None:
             estimated_cost=getattr(session, "estimated_cost", 0.0),
             model=getattr(session, "model", ""),
             title=session.title,
+            title_source='user' if getattr(session, 'manual_title', False) is True else 'llm',
             message_count=len(messages),
             profile=getattr(session, "profile", None),
             cache_read_tokens=getattr(session, "cache_read_tokens", None) or 0,
@@ -120,10 +121,16 @@ def _persist_generated_session_title(
     *,
     event_reason: str,
     require_default_title: bool = False,
+    expected_title=None,
+    expected_db=None,
 ) -> str:
     normalized_title = str(next_title or "").strip()[:80] or "Untitled"
     sid = str(getattr(session, "session_id", "") or "")
     original_session = session
+    from api.state_sync import get_session_title_state
+    if expected_title is None:
+        expected_title = (session.title, getattr(session, 'manual_title', False))
+        expected_db = get_session_title_state(sid, profile=getattr(session, 'profile', None) or 'default')
     with _get_session_agent_lock(sid):
         with LOCK:
             latest = SESSIONS.get(sid)
@@ -149,17 +156,17 @@ def _persist_generated_session_title(
             }
             if not _looks_like_default_cli_title(latest_meta):
                 return session.title
-        session.title = normalized_title
-        from api.session_ops import mark_session_title_generated
+        if (session.title, getattr(session, 'manual_title', False)) != expected_title:
+            raise ValueError('Session title changed while generating; retry explicitly')
+        from api.streaming import _apply_generated_title
 
-        # mark_session_title_generated sets s.llm_title_generated = True and clears manual_title.
-        mark_session_title_generated(session)
+        _apply_generated_title(session, normalized_title, expected=expected_db,
+                               replace=True, explicit=not require_default_title)
         session.save(touch_updated_at=False)
         with LOCK:
             SESSIONS[sid] = session
             SESSIONS.move_to_end(sid)
             _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-    _sync_session_title_to_insights(session)
     _publish_session_list_changed(
         event_reason,
         profile=getattr(session, "profile", None),
@@ -198,6 +205,9 @@ def _queue_generated_title_for_imported_session(session, cli_meta: dict | None) 
                 }
                 if not _looks_like_default_cli_title(current_meta):
                     return
+                from api.state_sync import get_session_title_state
+                expected_title = (current.title, getattr(current, 'manual_title', False))
+                expected_db = get_session_title_state(sid, profile=getattr(current, 'profile', None) or 'default')
                 next_title, _reason, _raw_preview = generate_session_title_for_session(current)
                 normalized_current = str(getattr(current, "title", "") or "").strip()
                 normalized_next = str(next_title or "").strip()
@@ -208,6 +218,8 @@ def _queue_generated_title_for_imported_session(session, cli_meta: dict | None) 
                     normalized_next,
                     event_reason="session_title_regenerate",
                     require_default_title=True,
+                    expected_title=expected_title,
+                    expected_db=expected_db,
                 )
             except Exception:
                 logger.debug("Failed to generate imported session title for %s", sid, exc_info=True)
@@ -15642,10 +15654,20 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot regenerate titles", 403)
-        next_title, reason, raw_preview = generate_session_title_for_session(s, prefer_latest=prefer_latest)
-        if not next_title:
-            return bad(handler, f"Could not generate a better title ({reason or 'empty'})", 422)
-        _persist_generated_session_title(s, next_title, event_reason="session_title_regenerate")
+        from api.state_sync import get_session_title_state, TitleChangedError
+        expected_title = (s.title, getattr(s, 'manual_title', False))
+        try:
+            expected_db = get_session_title_state(sid, profile=getattr(s, 'profile', None) or 'default')
+            next_title, reason, raw_preview = generate_session_title_for_session(s, prefer_latest=prefer_latest)
+            if not next_title:
+                return bad(handler, f"Could not generate a better title ({reason or 'empty'})", 422)
+            _persist_generated_session_title(s, next_title, event_reason="session_title_regenerate",
+                                             expected_title=expected_title, expected_db=expected_db)
+        except (ValueError, TitleChangedError) as exc:
+            return bad(handler, str(exc), 409)
+        except Exception:
+            logger.warning('Could not persist regenerated title for %s', sid, exc_info=True)
+            return bad(handler, 'Could not persist session title', 503)
         return j(handler, {
             "session": s.compact(),
             "title": s.title,
