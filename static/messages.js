@@ -2458,6 +2458,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamEndRecoveryTimer=setTimeout(()=>{void _runStreamEndRecovery(source);},delay);
   }
   function _finalizeStreamEndFallback(source){
+    if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
     _clearStreamEndRecovery();
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _cancelThrottledSnapshotTimer();
@@ -2491,7 +2492,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     _streamEndRecoveryTimer=null;
     const status=await _restoreSettledSession(source,{status:true});
-    if(status==='restored'){
+    if(status==='restored'||status==='stale'){
       _clearStreamEndRecovery();
       return;
     }
@@ -2671,6 +2672,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{
         if(streamId){
           const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+          if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
           if(st.active){
             setComposerStatus('Reconnected',1000);
             _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
@@ -2680,7 +2682,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){
         if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
       }
-      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})||_bailOutOfTerminalEventsFromStaleStream(source)) return;
       if(_deferStreamErrorIfOffline()||_pageHiddenForStreamError()) return;
       _flushReasoningToAnchor();
       _scheduleAnchorRegistryCleanup(120000);
@@ -6421,7 +6423,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // assistant content until a later session switch. Settle from the persisted
       // session before closing so the pane converges on canonical state.
       const status=await _restoreSettledSession(source,{status:true});
-      if(status==='restored'){
+      if(status==='restored'||status==='stale'){
         return;
       }
       if(status==='active'&&S.activeStreamId===streamId){
@@ -6666,7 +6668,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(isRecoveryControlMessage){
           (async()=>{
-            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})||_bailOutOfTerminalEventsFromStaleStream(source)) return;
             if(S.session&&S.session.session_id===activeSid){
               S.messages=_filterRecoveryControlMessages(S.messages||[]);
               _markSessionViewed(activeSid, S.messages.length);
@@ -6751,6 +6753,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(!_isSessionCurrentPane(activeSid)) return;
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+            if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
             if(st&&st.active){
               setComposerStatus('Reconnected',1000);
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
@@ -6764,7 +6767,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }catch(_){
             if(_deferStreamErrorIfOffline()) return;
           }
-          if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+          if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})||_bailOutOfTerminalEventsFromStaleStream(source)) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden(source)) return;
           const nextDelay=_retryDelays[attempt+1];
@@ -6781,6 +6784,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           setComposerStatus('Restoring session…');
           let _restoreTimedOut=false;
           const _restoreTimer=setTimeout(()=>{
+            if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
             // If _restoreSettledSession hangs (flaky Tailscale), don't leave
             // the UI stuck on "Restoring session…" forever. Fall through to
             // _handleStreamError after 8s.
@@ -6794,7 +6798,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
           },8000);
           try{
-            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})){
+            if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})||_bailOutOfTerminalEventsFromStaleStream(source)){
               if(_restoreTimedOut) return; // timer already fired _handleStreamError
               clearTimeout(_restoreTimer);
               return;
@@ -6816,7 +6820,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         setTimeout(()=>{void _probeReconnect(0);},_retryDelays[0]);
         return;
       }
-      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
+      if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})||_bailOutOfTerminalEventsFromStaleStream(source)) return;
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden(source)) return;
       _flushReasoningToAnchor();
@@ -6995,7 +6999,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
       // we were awaiting the network roundtrip, bail out — done already settled.
       if(_streamFinalized) return returnStatus?'restored':true;
-      const session=data&&data.session;
+      // A successor can acquire this pane while the recovery GET is pending.
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return returnStatus?'stale':false;
+      let session=data&&data.session;
       if(!session) return returnStatus?'missing':false;
       if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -7021,6 +7027,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(isActiveSession){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
+        if(typeof _preserveLoadedMessageWindow==='function'){
+          session=_preserveLoadedMessageWindow(session,_captureLoadedMessageWindow(activeSid));
+        }
+        if(typeof _oldestIdx!=='undefined') _oldestIdx=session._messages_offset||0;
+        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!session._messages_truncated;
         S.session=session;
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
         const _currentMessages=Array.isArray(S.messages)?S.messages:[];
