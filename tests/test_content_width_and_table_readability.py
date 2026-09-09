@@ -72,7 +72,10 @@ def test_markdown_tables_use_a_scroll_surface_and_readable_wrapping():
     assert ".md-table-scroll{max-width:100%;overflow-x:auto" in style
     assert ".md-table-scroll table{width:max-content;min-width:100%" in style
     assert "overflow-wrap:normal;word-break:normal;hyphens:none" in style
-    assert ".msg-body table { font-family:var(--font-mono); }" not in style
+    # Default-skin tables keep the mono contract (upstream typography test); the prose skins
+    # intentionally override to conversation font for readability.
+    assert ".msg-body table { font-family:var(--font-mono); }" in style
+    assert ':root[data-skin="github"] .msg-body table { font-family:var(--font-conversation)!important; }' in style
     assert "table-layout:fixed" not in style
 
 
