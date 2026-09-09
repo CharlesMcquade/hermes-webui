@@ -186,12 +186,13 @@ class TestBlocker1PreStartWorkerRetirement:
         from pathlib import Path
         streaming_src = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text()
 
-        # Find the pre-start return block: "q = STREAMS.get(stream_id)" followed
-        # by "if q is None:" ... "return"
+        # Find the pre-start return block: the queue lookup ("q = peek_stream(stream_id)"
+        # since the lock-disciplined STREAMS reads release #7339) followed by
+        # "if q is None:" ... "return"
         import re
         # The pre-start block should contain _retire_worker_cancelled_state
         # between "if q is None:" and the first "return" after it
-        m = re.search(r'q = STREAMS\.get\(stream_id\)\s*\n\s*if q is None:.*?return', streaming_src, re.DOTALL)
+        m = re.search(r'q = (?:STREAMS\.get\(stream_id\)|peek_stream\(stream_id\))\s*\n\s*if q is None:.*?return', streaming_src, re.DOTALL)
         assert m, "pre-start return block not found in streaming.py"
         prestart_block = m.group()
         assert '_retire_worker_cancelled_state' in prestart_block, (
