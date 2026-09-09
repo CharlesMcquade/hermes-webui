@@ -29,7 +29,7 @@ def main():
                         context.add_init_script(INIT)
                         page = context.new_page()
                         errors = []
-                        page.on('pageerror', lambda e: errors.append(str(e)))
+                        page.on('pageerror', lambda e, errs=errors: errs.append(str(e)))
                         session = dict(session_id='fixture', title='Fade fixture', model='',
                                        workspace=temp, messages=[], message_count=0, tool_calls=[],
                                        active_stream_id='run-fixture', pending_user_message='Inspect fixture',
