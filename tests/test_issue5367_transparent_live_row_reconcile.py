@@ -321,7 +321,7 @@ eval(extractFunc('_refreshTransparentLiveRow'));
 eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
 eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
 document.documentElement = document.documentElement || Object.create(null);
-eval(extractFunc('_anchorSceneToolRenderSignature'));
+eval(extractFunc('_anchorSceneRetainedRowSignature'));
 eval(extractFunc('_anchorSceneDataRowKey'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 
@@ -1279,7 +1279,7 @@ eval(extractFunc('_refreshTransparentThinkingLiveRow'));
 eval(extractFunc('_refreshTransparentLiveRow'));
 eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
 document.documentElement = document.documentElement || Object.create(null);
-eval(extractFunc('_anchorSceneToolRenderSignature'));
+eval(extractFunc('_anchorSceneRetainedRowSignature'));
 eval(extractFunc('_anchorSceneDataRowKey'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 
@@ -1620,7 +1620,7 @@ eval(extractFunc('_refreshTransparentThinkingLiveRow'));
 eval(extractFunc('_refreshTransparentLiveRow'));
 eval(extractFunc('_restoreLiveAnchorScrollSnapshotAfterRebuild'));
 document.documentElement = document.documentElement || Object.create(null);
-eval(extractFunc('_anchorSceneToolRenderSignature'));
+eval(extractFunc('_anchorSceneRetainedRowSignature'));
 eval(extractFunc('_anchorSceneDataRowKey'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 global._copyEventToClipboard = (row) => {{
