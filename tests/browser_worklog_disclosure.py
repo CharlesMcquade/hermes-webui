@@ -27,7 +27,7 @@ def main():
                         context=browser.new_context(viewport={'width':390,'height':844},bypass_csp=True)
                         context.add_init_script(INIT)
                         page=context.new_page(); errors=[]
-                        page.on('pageerror',lambda e:errors.append(str(e)))
+                        page.on('pageerror',lambda e,errs=errors:errs.append(str(e)))
                         session=dict(session_id='fixture',title='Disclosure fixture',model='',workspace=temp,messages=[],message_count=0,tool_calls=[],active_stream_id='run-fixture',pending_user_message='Inspect fixture',pending_started_at=time.time(),runtime_journal_snapshot=fixture(3))
                         page.route('**/api/session?*',session_route(session,'fixture',temp))
                         page.route('**/api/chat/stream/status?*',lambda r:r.fulfill(json={'active':True}))
