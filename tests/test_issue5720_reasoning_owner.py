@@ -471,7 +471,7 @@ eval(anchorsSrc);
 for(const name of [
   'chatActivityMode','isTransparentStream','isFinalAnswerOnlyMode','isCompactWorklogMode','isSimplifiedToolCalling',
   '_anchorSceneIsSettledSuccessfulCompression','_anchorSceneRowsForRendering',
-  '_anchorSceneToolRenderSignature','_anchorSceneDataRowKey','_anchorScenePlaceChildren',
+  '_anchorSceneRetainedRowSignature','_anchorSceneDataRowKey','_anchorScenePlaceChildren',
   '_anchorSceneRowTimestampSeconds','_anchorSceneTransparentNodeForRow',
   '_transparentLiveRowKey','_transparentLiveRowsCompatible',
   '_transparentLiveRowAttributePairs','_transparentLiveRowInteractiveState',
