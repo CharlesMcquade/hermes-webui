@@ -3715,15 +3715,40 @@ def _sanitize_generated_title(text: str) -> str:
 
 
 _TITLE_OPTION_MENU_RE = re.compile(
-    r'^\s*(?:(?:here (?:are|is)|some|good|possible)\s+)?'
+    r'^\s*(?:(?:here (?:are|is)|some|good|possible)\s+)*(?:here (?:are|is)\s+some\s+|some\s+of\s+the\s+)?'
     r'(?:session\s+)?title\s+(?:options?|suggestions?|ideas?|candidates?)\s*:',
     flags=re.IGNORECASE,
 )
 
+# Evidence that a preamble introduces MULTIPLE candidates rather than one
+# selected title: numbered/bulleted list entries or several quoted strings.
+# Unanchored: callers may pass raw stored titles (multiline lists) OR the
+# whitespace-collapsed sanitize form, where list markers are inline.
+_TITLE_MENU_LIST_RE = re.compile(
+    r'(?:[-*\u2022\u2023]|\d{1,2}[).:])\s+\S',
+    flags=re.IGNORECASE,
+)
+_TITLE_MENU_QUOTED_RE = re.compile("[\u201c\u201d\"]{1,2}[^\u201c\u201d\"]{2,}[\u201c\u201d\"]{0,2}")
+
 
 def _looks_like_title_option_menu(text: str) -> bool:
-    """Return True for a title-model menu rather than one selected title."""
-    return bool(_TITLE_OPTION_MENU_RE.match(str(text or '')))
+    """Return True for a title-model menu rather than one selected title.
+
+    The preamble alone is not enough: legitimate single titles like
+    ``Title Suggestions: Migration Strategy`` or
+    ``Here Are Some Title Options for Session Naming`` exist and must not be
+    rejected. Classify as a menu only when multiple candidates follow —
+    two or more list entries, or two or more quoted items. Matching works on
+    both raw stored text and the whitespace-collapsed sanitize form.
+    """
+    s = str(text or '')
+    s_m = _TITLE_OPTION_MENU_RE.match(s)
+    if not s_m:
+        return False
+    rest = s[s_m.end():]
+    if len(_TITLE_MENU_LIST_RE.findall(rest)) >= 2:
+        return True
+    return len(_TITLE_MENU_QUOTED_RE.findall(rest)) >= 2
 
 
 def _looks_invalid_generated_title(text: str) -> bool:
@@ -4871,8 +4896,17 @@ def _is_generic_fallback_title(title: str) -> bool:
     return str(title or '').strip().lower() in {'conversation topic'}
 
 
-def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None):
-    """Generate and publish a better title after `done`, then end the stream."""
+def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None, stream_owner_id: str = None):
+    """Generate and publish a better title after `done`, then end the stream.
+
+    ``session_id`` is the title target (the canonical/continuation session the
+    title is loaded from and persisted to). ``stream_owner_id`` is the SSE
+    stream owner: when context compression rotated the session ID mid-stream,
+    the client captured the ORIGINAL ``_run_agent_streaming`` session id and
+    its ``stream_end`` fence (static/messages.js) rejects mismatched ids — so
+    ``stream_end`` must be emitted with the original id or the EventSource
+    never closes.
+    """
     try:
         # Read the canonical in-memory session while deciding whether this
         # automatic pass may run. A manual rename can race the background LLM
@@ -4996,7 +5030,7 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
         else:
             _put_title_status(put_event, session_id, 'skipped', source or 'unchanged', effective_title, raw_preview)
     finally:
-        put_event('stream_end', {'session_id': session_id})
+        put_event('stream_end', {'session_id': stream_owner_id or session_id})
 
 
 def _run_background_title_refresh(session_id: str, user_text: str, assistant_text: str, current_title: str, put_event, agent=None):
@@ -12517,6 +12551,7 @@ def _run_agent_streaming(
                 threading.Thread(
                     target=_run_background_title_update,
                     args=(s.session_id, *_bg_title_inputs, str(s.title or '').strip(), put, agent),
+                    kwargs={'stream_owner_id': session_id},
                     daemon=True,
                 ).start()
             else:
