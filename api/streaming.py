@@ -13783,8 +13783,7 @@ def _accept_and_publish_steer_event(
         "status": "delivered",
         "created_at": created_at,
     }
-    with STREAMS_LOCK:
-        stream = STREAMS.get(str(stream_id))
+    stream = peek_stream(str(stream_id))
     writer = RunJournalWriter(str(session_id), str(stream_id))
 
     def publish(journaled):
