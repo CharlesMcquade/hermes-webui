@@ -3221,7 +3221,21 @@ async function _ensureMessagesLoaded(sid, opts) {
   // captured window. Do not slice the response using an obsolete boundary.
   const unchangedWindow=S.messages===windowAtRequest.messages&&
     _messagesTruncated===windowAtRequest.truncated&&_oldestIdx===windowAtRequest.offset;
-  data.session=_preserveLoadedMessageWindow(data.session,unchangedWindow?loadedWindow:null);
+  if(!unchangedWindow&&S.session&&S.session.session_id===sid&&
+    Number.isInteger(_oldestIdx)&&_oldestIdx>=0&&
+    Number.isInteger(data.session._messages_offset)&&data.session._messages_offset>_oldestIdx){
+    // The reader expanded history while this bounded request was pending.
+    // Fetch canonical full history once instead of dropping their loaded head
+    // or merging possibly revised rows from the stale client snapshot.
+    data=await api(
+      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`,
+      {timeoutMs:120000}
+    );
+    if(!_ownsLoad()||!data||!data.session) return;
+    data.session=_preserveLoadedMessageWindow(data.session,_captureLoadedMessageWindow(sid));
+  }else{
+    data.session=_preserveLoadedMessageWindow(data.session,unchangedWindow?loadedWindow:null);
+  }
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
