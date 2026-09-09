@@ -4,7 +4,7 @@ from tests.test_background_completion_delivery import delivery, enqueue  # noqa:
 from tests.test_wakeup_defer_race import _wait_for, _install_fake_start_session_turn
 
 
-def test_all_consumed_completions_release_session_state(delivery):
+def test_all_consumed_completions_release_session_state(delivery):  # noqa: F811 - fixture re-export
     bp, cfg, fake, holder, sid = delivery
     enqueue(delivery, 2)
     fake._completion_consumed.update(['proc-0', 'proc-1'])
@@ -15,7 +15,7 @@ def test_all_consumed_completions_release_session_state(delivery):
     assert holder['calls'] == []
 
 
-def test_dispatch_keeps_pending_until_acceptance(delivery, monkeypatch):
+def test_dispatch_keeps_pending_until_acceptance(delivery, monkeypatch):  # noqa: F811 - fixture re-export
     bp, cfg, fake, holder, sid = delivery
     enqueue(delivery, 2)
     cfg.unregister_active_run('stream-delivery')
@@ -26,7 +26,7 @@ def test_dispatch_keeps_pending_until_acceptance(delivery, monkeypatch):
 
 
 @pytest.mark.parametrize('status', [500, 503])
-def test_failed_admission_retains_each_result_without_ack(delivery, monkeypatch, status):
+def test_failed_admission_retains_each_result_without_ack(delivery, monkeypatch, status):  # noqa: F811 - fixture re-export
     bp, cfg, fake, holder, sid = delivery
     _install_fake_start_session_turn(monkeypatch, status=status)
     enqueue(delivery, 2)
@@ -37,7 +37,7 @@ def test_failed_admission_retains_each_result_without_ack(delivery, monkeypatch,
     assert sid in cfg.PENDING_BG_TASK_COMPLETIONS
 
 
-def test_success_retires_session_state(delivery):
+def test_success_retires_session_state(delivery):  # noqa: F811 - fixture re-export
     bp, cfg, fake, holder, sid = delivery
     enqueue(delivery, 2)
     cfg.unregister_active_run('stream-delivery')

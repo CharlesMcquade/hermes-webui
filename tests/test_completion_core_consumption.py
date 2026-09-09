@@ -1,9 +1,9 @@
 """Verify bounded delivery against core consumption and repeated queue use."""
 from tests.test_background_completion_delivery import delivery, enqueue  # noqa: F401
-from tests.test_wakeup_defer_race import _install_fake_registry, _completion_evt, _wait_for
+from tests.test_wakeup_defer_race import _completion_evt, _wait_for
 
 
-def test_native_wait_suppresses_followup_but_poll_does_not(delivery, monkeypatch):
+def test_native_wait_suppresses_followup_but_poll_does_not(delivery, monkeypatch):  # noqa: F811 - fixture re-export
     bp, cfg, fake, holder, sid = delivery
     import sys
     from tests.conftest import HERMES_AGENT
@@ -37,7 +37,7 @@ def test_native_wait_suppresses_followup_but_poll_does_not(delivery, monkeypatch
     assert not cfg.BG_TASK_COMPLETE_EVENTS_SEEN
 
 
-def test_repeated_batches_leave_no_webui_queue_ownership(delivery):
+def test_repeated_batches_leave_no_webui_queue_ownership(delivery):  # noqa: F811 - fixture re-export
     bp, cfg, fake, holder, sid = delivery
     for i in range(100):
         cfg.ACTIVE_RUNS['stream-delivery'] = {'session_id':sid}
