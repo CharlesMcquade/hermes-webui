@@ -220,7 +220,7 @@ class TestInitialAuxTitleSucceeds(unittest.TestCase):
 
         self.assertEqual(s.title, 'Respect Workspace Order')
         self.assertTrue(s.llm_title_generated)
-        mock_aux_title.assert_called_once_with(user_text, assistant_text)
+        mock_aux_title.assert_called_once_with(user_text, assistant_text, conversation_id=s.session_id)
         self.assertEqual(
             [data['title'] for event, data in events if event == 'title'],
             ['Respect Workspace Order'],
@@ -744,3 +744,94 @@ class TestEligibilitySnapshotLockComposition(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class TestRotatedSessionStreamEndOwner(unittest.TestCase):
+    """After context compression rotates the session ID, the background title
+    worker must load and persist the title on the ROTATED (continuation)
+    session but emit stream_end with the ORIGINAL stream-owner session id —
+    the client captured activeSid = original id and its stream_end fence
+    (static/messages.js) rejects mismatched ids, so a rotated id would leave
+    the EventSource open forever."""
+
+    TIMEOUT = 15
+
+    def test_stream_end_uses_stream_owner_id_not_rotated_target(self):
+        import api.streaming as streaming_mod
+        from api.streaming import _run_background_title_update
+
+        user_text = 'Now explain session id rotation.'
+        assistant_text = 'Compression can rotate the session id mid-stream.'
+        s, provisional = _make_provisional_session(user_text, assistant_text)
+        s.session_id = 'rotated-continuation-id'
+
+        emitted = []
+        with \
+            patch('api.streaming.get_session', return_value=s), \
+            patch('api.streaming.SESSIONS', {}), \
+            patch('api.streaming.LOCK', threading.Lock()), \
+            patch('api.streaming._aux_title_configured', return_value=True), \
+            patch(
+                'api.streaming._generate_llm_session_title_via_aux',
+                return_value=('Session Id Rotation', 'llm_aux', 'Session Id Rotation'),
+            ):
+            done = threading.Event()
+
+            def run():
+                try:
+                    _run_background_title_update(
+                        session_id='rotated-continuation-id',
+                        user_text=user_text,
+                        assistant_text=assistant_text,
+                        placeholder_title=provisional,
+                        put_event=lambda event_type, data: emitted.append((event_type, data)),
+                        agent=None,
+                        stream_owner_id='original-stream-owner-id',
+                    )
+                finally:
+                    done.set()
+
+            worker = threading.Thread(target=run, daemon=True)
+            worker.start()
+            completed = done.wait(timeout=self.TIMEOUT)
+            worker.join(timeout=1)
+
+        self.assertTrue(completed, 'background title update did not complete')
+        self.assertEqual(s.title, 'Session Id Rotation')
+        end_events = [d for e, d in emitted if e == 'stream_end']
+        self.assertEqual(
+            [d['session_id'] for d in end_events],
+            ['original-stream-owner-id'],
+            'stream_end must carry the original stream-owner id, not the rotated '
+            'title-target id, or the client SSE fence never closes the stream',
+        )
+        title_events = [d for e, d in emitted if e == 'title']
+        self.assertEqual([d['session_id'] for d in title_events], ['rotated-continuation-id'])
+
+    def test_stream_end_defaults_to_session_id_without_rotation(self):
+        from api.streaming import _run_background_title_update
+
+        user_text = 'Plain single-session title run.'
+        assistant_text = 'No rotation happened here.'
+        s, provisional = _make_provisional_session(user_text, assistant_text)
+
+        emitted = []
+        with \
+            patch('api.streaming.get_session', return_value=s), \
+            patch('api.streaming.SESSIONS', {}), \
+            patch('api.streaming.LOCK', threading.Lock()), \
+            patch('api.streaming._aux_title_configured', return_value=True), \
+            patch(
+                'api.streaming._generate_llm_session_title_via_aux',
+                return_value=('Plain Title Run', 'llm_aux', 'Plain Title Run'),
+            ):
+            _run_background_title_update(
+                session_id=s.session_id,
+                user_text=user_text,
+                assistant_text=assistant_text,
+                placeholder_title=provisional,
+                put_event=lambda event_type, data: emitted.append((event_type, data)),
+                agent=None,
+            )
+
+        end_events = [d for e, d in emitted if e == 'stream_end']
+        self.assertEqual([d['session_id'] for d in end_events], [s.session_id])
