@@ -756,7 +756,6 @@ class TestRotatedSessionStreamEndOwner(unittest.TestCase):
     TIMEOUT = 15
 
     def test_stream_end_uses_stream_owner_id_not_rotated_target(self):
-        import api.streaming as streaming_mod
         from api.streaming import _run_background_title_update
 
         user_text = 'Now explain session id rotation.'
