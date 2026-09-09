@@ -13626,12 +13626,18 @@ function _anchorSceneWorklogGroup(blocks, opts){
   if(opts&&opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
   return group;
 }
-// Tool DOM is expensive and usually immutable while prose streams. Keep the
+// Tool and completed thinking DOM are usually unchanged while prose streams. Keep the
 // signature on the node, not in a global cache: removing a turn drops its cache,
 // and HTML-restored nodes take the normal build/rehydration path once. Include
 // the full row so in-place result/argument corrections cannot reuse stale HTML.
-function _anchorSceneToolRenderSignature(row, opts){
-  if(!row||row.role!=='tool') return null;
+function _anchorSceneRetainedRowSignature(row, opts){
+  if(!row) return null;
+  if(row.role==='thinking'){
+    if(row.status!=='completed'||window._showThinking===false) return null;
+    return JSON.stringify([row,opts||{},document.documentElement.lang,
+      _worklogDetailsExpandedDefault()]);
+  }
+  if(row.role!=='tool') return null;
   return JSON.stringify([row,opts||{},document.documentElement.lang,
     typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling()]);
 }
@@ -13641,14 +13647,16 @@ function _anchorSceneDataRowKey(row, streamId){
   return `${String(streamId||'').trim()}\u0000${id}\u0000${String(row.role||'activity').trim()}\u0000${String(row.source_event_type||'').trim()}`;
 }
 function _anchorScenePlaceChildren(parent, nodes){
+  const keep=new Set(nodes);
+  // Remove obsolete siblings first: otherwise a replacement prose row makes
+  // an already-positioned tool group look misplaced and detaches selection.
+  Array.from(parent.children).forEach(node=>{if(!keep.has(node)) node.remove();});
   let next=null;
   for(let i=nodes.length-1;i>=0;i--){
     const node=nodes[i];
     if(node.parentNode!==parent||node.nextSibling!==next) parent.insertBefore(node,next);
     next=node;
   }
-  const keep=new Set(nodes);
-  Array.from(parent.children).forEach(node=>{if(!keep.has(node)) node.remove();});
 }
 function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   const list=_toolWorklogListEl(group);
@@ -13665,7 +13673,10 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
     if(currentTools){
       const mounted=Array.from(currentTools.querySelectorAll('[data-anchor-row-role="tool"]'));
       const unchanged=mounted.length===toolNodes.length&&mounted.every((node,i)=>node===toolNodes[i]);
-      if(!unchanged) _anchorScenePlaceChildren(currentTools,toolNodes);
+      if(!unchanged){
+        const groupedRows=currentTools.querySelector(':scope > .tool-worklog-tool-group .tg-rows,:scope > .tool-group[data-tool-worklog-tool-group="1"] .tg-rows');
+        _anchorScenePlaceChildren(groupedRows&&toolNodes.length>1?groupedRows:currentTools,toolNodes);
+      }
       currentTools._anchorSceneToolsStable=unchanged;
     }
     currentTools=null;
@@ -13674,11 +13685,11 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   for(const row of rows){
     const key=_anchorSceneDataRowKey(row,'');
     const previous=key?existing.get(key):null;
-    const signature=_anchorSceneToolRenderSignature(row,opts);
-    const node=signature&&previous&&previous._anchorToolRenderSignature===signature
+    const signature=_anchorSceneRetainedRowSignature(row,opts);
+    const node=signature&&previous&&previous._anchorRowRenderSignature===signature
       ? previous : _anchorSceneNodeForRow(row,opts);
     if(!node) continue;
-    if(signature) node._anchorToolRenderSignature=signature;
+    node._anchorRowRenderSignature=signature;
     if(row.role==='tool'){
       if(!currentTools){
         const parent=previous&&previous.closest('.wl-step-tools[data-worklog-tools="1"]');
@@ -14050,10 +14061,10 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       streamId:streamId||S.activeStreamId||'',
       sessionId:S.session&&S.session.session_id,
     };
-    const signature=_anchorSceneToolRenderSignature(row,rowOpts);
+    const signature=_anchorSceneRetainedRowSignature(row,rowOpts);
     const dataKey=_anchorSceneDataRowKey(row,activeStreamId);
     const cached=dataKey?preserveByKey.get(dataKey):null;
-    if(signature&&cached&&cached._anchorToolRenderSignature===signature){
+    if(signature&&cached&&cached._anchorRowRenderSignature===signature){
       preserveByKey.delete(dataKey);
       renderedRows.push(cached);
       continue;
@@ -14069,9 +14080,11 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
       : node;
     if(existing) preserveByKey.delete(key);
     if(!renderedNode) continue;
-    if(signature) renderedNode._anchorToolRenderSignature=signature;
+    renderedNode._anchorRowRenderSignature=signature;
     renderedRows.push(renderedNode);
   }
+  // Stale replacement rows must not force every retained predecessor to move.
+  preserveByKey.forEach(stale=>stale.remove());
   const transparentLiveRowAlreadyPositioned=(node, expectedNextSibling)=>{
     if(!node||node.parentElement!==blocks) return false;
     let next=node.nextSibling;
@@ -14092,7 +14105,6 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     else blocks.appendChild(renderedNode);
     expectedNextSibling=renderedNode;
   }
-  preserveByKey.forEach(stale=>stale.remove());
   if(renderedRows.length) _syncTransparentEventControls(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
@@ -19044,6 +19056,23 @@ function _syncToolRowsContainer(tools, isLiveWorklog){
   const existingGroup=tools.querySelector(':scope > .tool-worklog-tool-group,:scope > .tool-group[data-tool-worklog-tool-group="1"]');
   const wasOpen=!!(existingGroup&&existingGroup.classList&&existingGroup.classList.contains('open'));
   const rows=_directWorklogToolRows(tools);
+  if(existingGroup&&rows.length>1&&tools.classList.contains('wl-step-tools')&&
+    tools.querySelectorAll(':scope > .tool-worklog-tool-group,:scope > .tool-group').length===1){
+    // Reconcile the existing disclosure instead of detaching every historical
+    // row when one tool is appended or corrected. Selection and scroll live
+    // on these nodes; the summary alone is derived from the updated rows.
+    const body=existingGroup.querySelector('.tg-rows');
+    const label=existingGroup.querySelector('.tg-sum');
+    const icon=existingGroup.querySelector('.tg-icon');
+    if(body&&label&&icon){
+      _anchorScenePlaceChildren(body,rows);
+      const summary=_toolWorklogSummary(rows,{live:isLiveWorklog,toolCount:rows.length});
+      if(label.textContent!==summary) label.textContent=summary;
+      const iconHtml=_toolGroupIcon(rows);
+      if(icon.innerHTML!==iconHtml) icon.innerHTML=iconHtml;
+      return;
+    }
+  }
   _unwrapNestedToolGroups(tools);
   rows.forEach(row=>{ if(row.parentElement) row.remove(); });
   tools.querySelectorAll(':scope > .tool-card-row').forEach(row=>row.remove());

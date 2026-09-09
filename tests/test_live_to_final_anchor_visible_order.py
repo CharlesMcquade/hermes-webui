@@ -1423,7 +1423,7 @@ global._syncToolCallGroupSummary=()=>{{}};
     eval(extractFunc('_refreshTransparentThinkingLiveRow'));
     eval(extractFunc('_refreshTransparentLiveRow'));
     document.documentElement = document.documentElement || Object.create(null);
-eval(extractFunc('_anchorSceneToolRenderSignature'));
+eval(extractFunc('_anchorSceneRetainedRowSignature'));
 eval(extractFunc('_anchorSceneDataRowKey'));
 eval(extractFunc('_renderLiveAnchorActivitySceneTransparent'));
 

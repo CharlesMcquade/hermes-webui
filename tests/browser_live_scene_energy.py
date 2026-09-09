@@ -37,7 +37,7 @@ def main():
                             context.add_init_script(INIT)
                             page = context.new_page()
                             errors = []
-                            page.on('pageerror', lambda e: errors.append(str(e)))
+                            page.on('pageerror', lambda e, errors=errors: errors.append(str(e)))
                             snapshot = fixture(100)
                             session = dict(session_id='fixture', title='Energy regression', model='',
                                            workspace=temp, messages=[], message_count=0, tool_calls=[],
@@ -83,7 +83,7 @@ def main():
                               if(mutations.length)throw new Error('unchanged tool detached '+JSON.stringify(mutations));
                               if(!selectedText||selection.toString()!==selectedText)throw new Error('selection lost');
                               if(detail&&(!detail.isConnected||detail.style.display!=='block'))throw new Error('detail lost');
-                              selection.removeAllRanges();
+                              const stableGroup=nestedGroup;
                               const snapshots=[];
                               const snapshot=window.snapshotLiveTurnHtmlForSession;
                               window.snapshotLiveTurnHtmlForSession=function(...args){snapshots.push(document.querySelector('#liveAssistantTurn').textContent);return snapshot(...args)};
@@ -92,6 +92,9 @@ def main():
                               window._renderLiveAnchorActivitySceneForStream=function(...args){paints++;return paint(...args)};
                               source.emit('tool',{name:'terminal',tid:'later',args:{command:'printf later'},preview:'later'},'run-fixture:1006');
                               source.emit('tool_complete',{name:'terminal',tid:'later',preview:'LATER RESULT',duration:1},'run-fixture:1007');
+                              if(stableGroup&&(!stableGroup.isConnected||before[0].closest('.tool-group')!==stableGroup))throw new Error('tool append rebuilt existing disclosure group');
+                              if(!before[0].isConnected||selection.toString()!==selectedText)throw new Error('tool append lost selected historical row');
+                              selection.removeAllRanges();
                               const completed=select().length===101&&document.querySelector('#liveAssistantTurn').textContent.includes('LATER RESULT');
                               if(paints!==2)throw new Error('tool pair scene paints: '+paints+' (expected 2)');
                               if(!snapshots.at(-1).includes('LATER RESULT'))throw new Error('snapshot preceded completed paint');
@@ -135,6 +138,40 @@ def main():
                               window._chatActivityDisplayMode=chatActivityMode()==='compact_worklog'?'transparent_stream':'compact_worklog';
                               renderLiveAnchorActivityScene('run-fixture',scene,{sessionId:'fixture'});
                               if(document.querySelectorAll('#liveAssistantTurn [data-anchor-row-role="tool"]').length!==3)throw new Error('mode switch duplicated rows');
+                            }""")
+                            # Changing a grouped tool run must retain its existing wrapper
+                            # and historical rows, but shrinking to one removes grouping.
+                            page.evaluate("""()=>{
+                              window._chatActivityDisplayMode='compact_worklog';
+                              const original=_anchorSceneRowsForRendering(_projectLiveAnchorActivitySceneForStream('run-fixture',chatActivityMode()),{settled:false});
+                              const tools=JSON.parse(JSON.stringify(original.filter(r=>r.role==='tool').slice(0,3)));
+                              const scene={..._projectLiveAnchorActivitySceneForStream('run-fixture',chatActivityMode()),activity_rows:tools.slice(0,2)};
+                              renderLiveAnchorActivityScene('run-fixture',scene,{sessionId:'fixture'});
+                              const row=document.querySelector('#liveAssistantTurn [data-anchor-row-role="tool"]');
+                              const group=row.closest('.tool-group');
+                              if(!group)throw new Error('group fixture missing');
+                              group.querySelector('.tool-group-head').click();
+                              const range=document.createRange();range.selectNodeContents(row);
+                              const selection=getSelection();selection.removeAllRanges();selection.addRange(range);
+                              const selected=selection.toString();
+                              // Older snapshots can use the legacy group marker.
+                              group.removeAttribute('data-tool-worklog-tool-group');
+                              group.classList.add('tool-worklog-tool-group');
+                              scene.activity_rows=tools;
+                              renderLiveAnchorActivityScene('run-fixture',scene,{sessionId:'fixture'});
+                              if(!group.isConnected||row.closest('.tool-group')!==group||selection.toString()!==selected)throw new Error('group append detached history');
+                              tools[2].tool.snippet='GROUP CORRECTION';tools[2].tool.preview='GROUP CORRECTION';
+                              renderLiveAnchorActivityScene('run-fixture',scene,{sessionId:'fixture'});
+                              if(!group.textContent.includes('GROUP CORRECTION')||selection.toString()!==selected)throw new Error('group correction stale or detached');
+                              selection.removeAllRanges();
+                              const container=group.parentElement;
+                              container.appendChild(group.cloneNode(false));
+                              container._anchorSceneToolsStable=false;
+                              _syncToolRowsContainer(container,true);
+                              if(container.querySelectorAll(':scope > .tool-group,:scope > .tool-worklog-tool-group').length!==1)throw new Error('legacy sibling group stranded');
+                              scene.activity_rows=tools.slice(0,1);
+                              renderLiveAnchorActivityScene('run-fixture',scene,{sessionId:'fixture'});
+                              if(document.querySelectorAll('#liveAssistantTurn [data-anchor-row-role="tool"]').length!==1||document.querySelector('#liveAssistantTurn .tool-group'))throw new Error('group shrink retained stale rows');
                             }""")
                             # Check computed animation behavior, not merely CSS source.
                             page.evaluate("""()=>{
