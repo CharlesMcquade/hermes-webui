@@ -13132,6 +13132,19 @@ def handle_get(handler, parsed) -> bool:
     from api import extension_auth
     if parsed.path == "/extension-pair" or parsed.path.startswith(extension_auth.PREFIX):
         return extension_auth.handle_get(handler, parsed)
+    # Paired-device preference-sync routes (bearer + narrow scopes only).
+    # authenticate() already answered non-bearer requests for /api/client/*.
+    if parsed.path == "/api/client/capabilities":
+        from api.client_preferences import get_capabilities
+        return j(handler, get_capabilities())
+    if parsed.path == "/api/client/preferences":
+        from api.client_preferences import get_preferences
+        from urllib.parse import parse_qs as _parse_qs
+        authority = (_parse_qs(parsed.query).get("authority") or [None])[0]
+        payload, error = get_preferences(authority)
+        if error is not None:
+            return j(handler, error, status=400)
+        return j(handler, payload)
     proxy_result = _handle_extension_sidecar_proxy(handler, parsed, "GET")
     if proxy_result is not False:
         return proxy_result
@@ -17997,6 +18010,27 @@ def handle_post(handler, parsed) -> bool:
 
 def handle_patch(handler, parsed) -> bool:
     """Handle all PATCH routes. Returns True if handled, False for 404."""
+    # Paired-device conditional preference writes. The CSRF gate below is the
+    # extension path's authorization for device bearers (csrf_allowed rechecks
+    # scope/path for the principal), and browser-cookie PATCHes to /api/client/*
+    # are impossible: authenticate() rejects cookie-borne extension-origin
+    # requests before any route dispatch.
+    if parsed.path == "/api/client/preferences":
+        from api.client_preferences import patch_preferences
+        from api.helpers import read_body as _read_body
+        try:
+            body = _read_body(handler)
+        except ValueError as exc:
+            status = 413 if "too large" in str(exc).lower() else 400
+            return bad(handler, str(exc), status=status)
+        if not isinstance(body, dict):
+            return j(handler, {"error": "invalid_request"}, status=400)
+        payload, status = patch_preferences(
+            body.get("authority"),
+            body.get("expected_revision"),
+            body.get("changes"),
+        )
+        return j(handler, payload, status=status)
     if not _check_csrf(handler):
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     proxy_result = _handle_extension_sidecar_proxy(

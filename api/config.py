@@ -9763,6 +9763,18 @@ _SETTINGS_SKIN_VALUES = {
     "verdigris",
     "neon-soft",
     "neon-paint",
+    # Frontend parity: boot.js `_SKINS` offers these (entries without an
+    # explicit `value` key are keyed by display name lowercased) and
+    # style.css ships `[data-skin="…"]` token blocks for each. Dropping them
+    # here made the picker offer skins the server silently rewrote to a
+    # legacy default on save (#1 frontend-vs-server registry disagreement in
+    # docs/PREFERENCE-CONTRACT.md). Registered plain `neon` alongside
+    # `neon-soft` exactly as boot.js does.
+    "github",
+    "codex",
+    "terracotta",
+    "hepburn",
+    "neon",
 }
 _SETTINGS_LEGACY_THEME_MAP = {
     # Legacy full themes now map onto the closest supported theme + accent skin pair.

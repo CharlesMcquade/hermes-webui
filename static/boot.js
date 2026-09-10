@@ -3553,14 +3553,24 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     _applyTheme(theme);
     localStorage.setItem('hermes-skin',skin);
     _applySkin(skin);
-    // Reconcile: if localStorage and server disagree, push localStorage
-    // values to the server so the next refresh won't revert. Skip the push for a
-    // still-pending extension skin (don't persist it server-side until it's a
-    // confirmed-registered skin — avoids writing a skin the server can't validate).
-    if((lsHasExplicitTheme||lsHasExplicitSkin)&&!lsSkinIsPendingExt&&(theme!==srvAppearance.theme||skin!==srvAppearance.skin)){
-      try{
-        api('/api/settings',{method:'POST',body:JSON.stringify({theme,skin})});
-      }catch(_){}
+    // Reconcile: the server is the authoritative store; localStorage is a
+    // render cache. On disagreement the cached values were pushed back to the
+    // server — but a stale cache (another device saved since, or the server
+    // default changed) then overwrote newer server settings on every page
+    // load. Now the server value WINS and is re-applied to localStorage;
+    // a failed autosave reverts to the last server-known choice rather than
+    // silently rewriting the server. Skip when the local skin is a
+    // still-pending extension skin (never persist one the server can't
+    // validate), and when the server has NO explicit stored appearance
+    // (first visit: don't fabricate a choice the user never made — #6808).
+    if((lsHasExplicitTheme||lsHasExplicitSkin)&&!lsSkinIsPendingExt&&(theme!==srvAppearance.theme||skin!==srvAppearance.skin)
+        &&(s.theme||s.skin)){
+      _applyTheme(srvAppearance.theme);
+      _applySkin(srvAppearance.skin);
+      localStorage.setItem('hermes-theme',srvAppearance.theme);
+      localStorage.setItem('hermes-skin',srvAppearance.skin);
+      _syncThemePicker&&_syncThemePicker(srvAppearance.theme);
+      _syncSkinPicker&&_syncSkinPicker(srvAppearance.skin);
     }
     const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');
     localStorage.setItem('hermes-font-size',fontSize);
@@ -3573,8 +3583,16 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     localStorage.setItem('hermes-content-width',contentWidth);
     _applyContentWidth(contentWidth);
     _syncContentWidthPicker(contentWidth);
+    // Same authority rule as theme/skin: the server value wins on boot.
+    // The old writeback let a stale browser cache overwrite a newer server
+    // content_width on every page load. (Server-applied only when the server
+    // actually stores a value — same first-visit guard as appearance.)
     if(contentWidth!==serverContentWidth){
-      try{api('/api/settings',{method:'POST',body:JSON.stringify({content_width:contentWidth})});}catch(_){}
+      if(s.content_width){
+        _applyContentWidth(serverContentWidth);
+        localStorage.setItem('hermes-content-width',serverContentWidth);
+        _syncContentWidthPicker(serverContentWidth);
+      }
     }
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'

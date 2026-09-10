@@ -31,7 +31,7 @@ LOCK = threading.RLock()
 MAX_PENDING = 256
 MAX_PER_IP = 8
 MAX_DEVICES = 256
-SCOPES = {'chat', 'control', 'cdp'}
+SCOPES = {'chat', 'control', 'cdp', 'preferences:read', 'preferences:write'}
 
 # Exact method/path grants: new server routes are denied until reviewed here.
 CHAT_GET = set(('session sessions sessions/search media sidecar/identity session/status '
@@ -91,6 +91,12 @@ def allowed(method, path, scopes):
         (method == 'GET' and re.fullmatch(r'kanban/tasks/[A-Za-z0-9_-]{1,128}', route))
         or (method == 'POST' and re.fullmatch(r'kanban/tasks/[A-Za-z0-9_-]{1,128}/patch', route))
     ):
+        return True
+    # Narrow preference-sync scopes: exactly the client/capabilities +
+    # client/preferences routes, never implied by chat/control/cdp and never
+    # implying any control route. Existing grants keep their old behavior.
+    from api.extension_scopes import preferences_allowed
+    if preferences_allowed(method, path, scopes):
         return True
     return ((('chat' in scopes or 'control' in scopes) and route in
              (CHAT_GET if method == 'GET' else CHAT_POST if method == 'POST' else set()))
@@ -199,12 +205,13 @@ def authenticate(handler, parsed):
     handler._extension_principal = None
     auth = handler.headers.get('Authorization')
     if auth is None:
-        if parsed.path in PUBLIC:
+        if parsed.path in PUBLIC or parsed.path.startswith('/api/client/'):
             if public_request(handler):
                 return True
             reply(handler, {'error': 'invalid_request'}, 403)
             return False
         # Extension origins must never ride ambient cookies, even with auth off.
+        # /api/client/* is served only to paired devices (bearer required).
         if (handler.headers.get('Origin', '').startswith('chrome-extension:')
                 or handler.headers.get('X-Hermes-Extension-Id') is not None):
             reply(handler, {'error': 'bearer_required'}, 401)
@@ -320,7 +327,7 @@ def cors(handler):
     handler.send_header('Access-Control-Allow-Origin', o)
     handler.send_header('Vary', 'Origin')
     if handler.command == 'OPTIONS':
-        handler.send_header('Access-Control-Allow-Methods', 'GET, POST')
+        handler.send_header('Access-Control-Allow-Methods', 'GET, POST, PATCH')
         handler.send_header('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Hermes-Profile, X-Hermes-Extension-Id')
 
 
