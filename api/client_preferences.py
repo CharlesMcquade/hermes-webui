@@ -245,11 +245,14 @@ def patch_preferences(authority, expected_revision, changes):
         for key in canonical:
             merged.pop('_set_password', None)
             merged.pop('_clear_password', None)
-        saved = config.save_settings(merged)
+        # Sentinel source: save_settings' revision hook is a no-op for this
+        # save — the single authoritative bump happens right below, so the
+        # extension PATCH bumps exactly once with source 'extension'.
+        saved = config.save_settings(merged, config._PATCH_SENTINEL_SOURCE)
         forbidden = _FORBIDDEN_KEYS & set(canonical)
         assert not forbidden
         revisions[authority] = current_revision + 1
-        sources[authority] = {'updated_at': time.time(), 'source': 'instance'}
+        sources[authority] = {'updated_at': time.time(), 'source': 'extension'}
         state['revisions'] = revisions
         state['sources'] = sources
         _save_revisions(state)

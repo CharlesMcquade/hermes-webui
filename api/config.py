@@ -10123,11 +10123,102 @@ def _coerce_provider_cost_budget(value: Any) -> float | None:
     return rounded
 
 
-def save_settings(settings: dict) -> dict:
-    """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
+def _default_preference_state() -> dict:
+    return {"revisions": {}, "sources": {}}
+
+
+def _load_preference_state() -> dict:
+    """Read STATE_DIR/client-preferences.json (best-effort)."""
+    import json as _json
+    path = STATE_DIR / 'client-preferences.json'
+    try:
+        data = _json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return _default_preference_state()
+    if not isinstance(data, dict):
+        return _default_preference_state()
+    state = _default_preference_state()
+    if isinstance(data.get('revisions'), dict):
+        state['revisions'] = {
+            k: v for k, v in data['revisions'].items()
+            if isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
+        }
+    if isinstance(data.get('sources'), dict):
+        state['sources'] = {
+            k: v for k, v in data['sources'].items()
+            if isinstance(k, str) and isinstance(v, dict)
+        }
+    return state
+
+
+def _save_preference_state(state: dict) -> None:
+    import json as _json
+    path = STATE_DIR / 'client-preferences.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_settings_text(path, _json.dumps(state, ensure_ascii=False, indent=2))
+
+
+def bump_preference_revisions_for_save(changed_keys, source: str) -> None:
+    """Bump the authority revision of every preference authority touched by a
+    settings.json save.
+
+    Called from the canonical save path (``save_settings``) so a WebUI-side
+    edit invalidates any extension's conditional-write lease: an extension
+    holding the pre-save expected_revision now gets a 409 carrying the newer
+    record instead of silently winning over the newer WebUI edit.
+
+    ``source`` records who produced the change ('webui' for frontend/server
+    saves, 'extension' when the PATCH service itself saves — the PATCH path
+    passes a sentinel so its single revision bump is not doubled).
+    """
+    keys = set(changed_keys or ())
+    if not keys:
+        return
+    # Imported lazily to avoid a module-level circular import: this module is
+    # api.config, and api.client_preferences imports api.config at top level.
+    from api.client_preferences import _AUTHORITIES
+    touched = {}
+    for authority, authority_keys in _AUTHORITIES.items():
+        changed_here = keys.intersection(authority_keys)
+        if not changed_here:
+            continue
+        if source == _PATCH_SENTINEL_SOURCE:
+            # The PATCH service bumps exactly once, itself, after save_settings
+            # returns — this hook records nothing for it.
+            continue
+        touched[authority] = changed_here
+    if not touched:
+        return
+    with _PREFERENCE_REVISION_LOCK:
+        state = _load_preference_state()
+        revisions = state.setdefault('revisions', {})
+        sources = state.setdefault('sources', {})
+        now = time.time()
+        for authority in touched:
+            revisions[authority] = int(revisions.get(authority, 1)) + 1
+            sources[authority] = {'updated_at': now, 'source': source}
+        _save_preference_state(state)
+
+
+# Sentinel source passed by the PATCH service so save_settings' revision hook
+# is a no-op there (the service performs the one authoritative bump itself).
+_PATCH_SENTINEL_SOURCE = '__extension_patch__'
+
+_PREFERENCE_REVISION_LOCK = threading.Lock()
+
+
+def save_settings(settings: dict, source: str = "webui") -> dict:
+    """Save settings to disk. Returns the merged settings. Ignores unknown keys.
+
+    ``source`` records which surface produced this save ('webui' for
+    frontend/server saves, the PATCH sentinel for extension conditional
+    writes); it feeds the client-preference revision hook so stale extension
+    leases conflict instead of silently overwriting newer WebUI edits.
+    """
     raw_settings = _read_raw_settings_file()
     persisted_speech_keys = _extract_persisted_speech_keys(raw_settings)
     current = load_settings()
+    _pre_save_snapshot = dict(current)
     applied_speech_keys: set[str] = set()
     if (
         "worklog_details_expanded_default" not in settings
@@ -10288,6 +10379,14 @@ def save_settings(settings: dict) -> dict:
     global DEFAULT_WORKSPACE
     if "default_workspace" in current:
         DEFAULT_WORKSPACE = resolve_default_workspace(current["default_workspace"])
+    _changed_keys = {
+        k for k, v in current.items()
+        if _pre_save_snapshot.get(k) != v
+    }
+    try:
+        bump_preference_revisions_for_save(_changed_keys, source)
+    except Exception:
+        logger.debug("preference revision bump failed", exc_info=True)
     current["default_model"] = get_effective_default_model()
     return current
 

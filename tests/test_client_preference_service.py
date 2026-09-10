@@ -28,6 +28,10 @@ def prefs_app(tmp_path, monkeypatch):
     state = tmp_path / 'state'
     state.mkdir()
     monkeypatch.setattr(config, 'STATE_DIR', state)
+    # SETTINGS_FILE is bound at module import to the FIRST test's tmp state
+    # dir; without this rebind every later test's save_settings reads/writes
+    # that stale file and saved values bleed across tests.
+    monkeypatch.setattr(config, 'SETTINGS_FILE', state / 'settings.json')
     monkeypatch.setattr(auth, 'STATE_DIR', state)
     monkeypatch.setattr(auth, '_SESSIONS_FILE', state / '.sessions.json')
     monkeypatch.setattr(auth, '_sessions', {})
@@ -70,7 +74,8 @@ def prefs_app(tmp_path, monkeypatch):
         assert s == 200, result
         return result, {'Origin': ORIGIN, 'Authorization': 'Bearer ' + result['access_token']}
 
-    yield dict(call=call, pair=pair, config=config, ext=ext, state=state)
+    yield dict(call=call, pair=pair, config=config, ext=ext, state=state,
+               port=httpd.server_port)
     httpd.shutdown()
     httpd.server_close()
     worker.join(timeout=5)
@@ -287,3 +292,113 @@ def test_github_skin_survives_save_roundtrip(prefs_app):
 def test_unknown_skin_still_falls_back(prefs_app):
     from api.config import _normalize_appearance
     assert _normalize_appearance('dark', 'not-a-skin') == ('dark', 'default')
+
+
+# ── WebUI-side saves bump authority revisions (source-attributed) ──────────
+
+def _prefs_file(state):
+    return state / 'client-preferences.json'
+
+
+def _read_prefs(state):
+    import json as _json
+    try:
+        return _json.loads(_prefs_file(state).read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def test_webui_settings_save_bumps_revision_with_webui_source(prefs_app):
+    config = prefs_app['config']
+    # Fresh fixture state: point config at the fixture's STATE_DIR and save a
+    # preference-owned key directly through the canonical save path.
+    config.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    config.SETTINGS_FILE.write_text('{}', encoding='utf-8')
+    config.save_settings({'theme': 'light'})
+    state = _read_prefs(prefs_app['state'])
+    assert state['revisions']['appearance'] == 2
+    assert state['sources']['appearance']['source'] == 'webui'
+    # Non-appearance authorities were not touched by this save.
+    assert 'revisions' not in state or 'conversation' not in state.get('revisions', {})
+
+
+def test_unrelated_key_save_does_not_bump_any_authority(prefs_app):
+    config = prefs_app['config']
+    config.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    config.SETTINGS_FILE.write_text('{}', encoding='utf-8')
+    config.save_settings({'bot_name': 'Hermes X'})
+    state = _read_prefs(prefs_app['state'])
+    assert state.get('revisions', {}) == {}
+
+
+def test_extension_patch_bumps_exactly_once_with_extension_source(prefs_app):
+    _, headers = prefs_app['pair'](['preferences:read', 'preferences:write'])
+    s, body = prefs_app['call']('PATCH', '/api/client/preferences', dict(
+        authority='appearance', expected_revision=1, changes={'theme': 'light'}), headers=headers)
+    assert s == 200, body
+    assert body['authorities']['appearance']['revision'] == 2
+    assert body['authorities']['appearance']['source'] == 'extension'
+    state = _read_prefs(prefs_app['state'])
+    assert state['revisions']['appearance'] == 2
+    assert state['sources']['appearance']['source'] == 'extension'
+
+
+def test_extension_conditional_write_conflicts_after_webui_save(prefs_app):
+    _, headers = prefs_app['pair'](['preferences:read', 'preferences:write'])
+    # The extension reads revision 1...
+    s, before = prefs_app['call']('GET', '/api/client/preferences?authority=appearance', headers=headers)
+    assert s == 200 and before['authorities']['appearance']['revision'] == 1
+    # ...then the WebUI frontend saves a NEWER theme through POST /api/settings
+    # (cookie session — extension bearers are scope-limited and cannot save
+    # settings, so the frontend's own credentials are used, exactly as the
+    # browser does).
+    auth = __import__('api.auth', fromlist=['auth'])
+    cookie = auth.create_session()
+    webui_headers = {'Cookie': auth._resolve_cookie_name() + '=' + cookie,
+                     'Origin': 'http://127.0.0.1:' + str(prefs_app['port']),
+                     auth.CSRF_HEADER_NAME: auth.csrf_token_for_session(cookie)}
+    s, body = prefs_app['call']('POST', '/api/settings',
+                                {'theme': 'light'}, webui_headers)
+    assert s == 200, body
+    state = _read_prefs(prefs_app['state'])
+    assert state['revisions']['appearance'] == 2
+    assert state['sources']['appearance']['source'] == 'webui'
+    # ...then the extension's stale conditional write must conflict, not win.
+    s, body = prefs_app['call']('PATCH', '/api/client/preferences', dict(
+        authority='appearance', expected_revision=1, changes={'theme': 'dark'}), headers=headers)
+    assert s == 409
+    assert body['error'] == 'revision_conflict'
+    assert body['current']['revision'] == 2
+    assert body['current']['source'] == 'webui'
+    assert body['current']['values']['theme'] == 'light'
+    # And the newer WebUI edit was not clobbered.
+    s, after = prefs_app['call']('GET', '/api/client/preferences?authority=appearance', headers=headers)
+    assert after['authorities']['appearance']['values']['theme'] == 'light'
+
+
+def test_webui_save_routes_cannot_bypass_revision_bump(prefs_app):
+    """Any settings.json mutation of a preference key bumps the authority —
+    direct save_settings() calls (the chokepoint behind POST /api/settings,
+    onboarding, and the settings tab) are all covered by the same hook."""
+    config = prefs_app['config']
+    config.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    config.SETTINGS_FILE.write_text('{}', encoding='utf-8')
+    from api.client_preferences import _AUTHORITIES
+    _distinct = {
+        'theme': 'light', 'skin': 'github',
+        'font_size': 'large', 'content_width': 'wide',
+        'send_key': 'ctrl+enter',
+        'default_message_mode': 'queue',
+        'show_thinking': False, 'auto_scroll_follow': False,
+        'render_user_markdown': True, 'large_text_paste_as_attachment': False,
+        'show_token_usage': True, 'show_fallback_notices': False,
+        'chat_activity_display_mode': 'hide_all_activity',
+        'transparent_stream_event_timestamps': False,
+        'worklog_details_expanded_default': True,
+    }
+    for authority, keys in _AUTHORITIES.items():
+        before = _read_prefs(prefs_app['state']).get('revisions', {}).get(authority, 1)
+        changes = {k: _distinct[k] for k in keys if k in _distinct}
+        config.save_settings(changes)
+        after = _read_prefs(prefs_app['state']).get('revisions', {}).get(authority, 1)
+        assert after == before + 1, authority
