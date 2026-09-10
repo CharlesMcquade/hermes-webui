@@ -1756,7 +1756,28 @@ def _schedule_restart(delay: float = 2.0) -> None:
     import os
     import sys
 
+    from api.config import enter_restart_drain, exit_restart_drain
+
     def _do():
+        import time
+        # Enter the drain state BEFORE waiting: from this moment new local and
+        # Gateway run admission is refused (RunAdmissionDrainingError /
+        # 503 restart_draining), so no work can start that this process would
+        # abandon at re-exec. The marker is pid-keyed to THIS process, so the
+        # replacement generation admits normally from birth; on success the
+        # old image dies holding the marker, which is exactly the lifecycle
+        # contract (marker active until replacement or rollback).
+        enter_restart_drain(reason="supervised_restart")
+        try:
+            _drain_and_reexec(delay)
+        finally:
+            # Success never returns here: os.execv replaces the image and the
+            # Windows path exits the process, so a RETURN means the restart
+            # did not happen (wait exception, spawn failure). Roll the drain
+            # back so this still-running process resumes admitting work.
+            exit_restart_drain()
+
+    def _drain_and_reexec(delay: float) -> None:
         import time
         time.sleep(delay)
         # Hold _apply_lock through os.execv so no new update can start between
