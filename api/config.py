@@ -9570,6 +9570,32 @@ def restart_drain_active() -> bool:
     return _restart_drain_marker_path().exists()
 
 
+def enter_restart_drain(reason: str = "restart") -> None:
+    """Atomically create this process's drain marker.
+
+    Admission (local chat starts, gateway run starts, health-side capability
+    consumers) treats the marker as closed for new work from the moment it
+    exists, so the wait/re-exec window of a supervised restart cannot accept
+    turns that the replacement generation will never see.
+    """
+    path = _restart_drain_marker_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + f".tmp{os.getpid()}.{uuid.uuid4().hex[:8]}")
+        tmp.write_text(json.dumps({"pid": os.getpid(), "reason": str(reason or "restart"), "entered_at": time.time()}) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        logger.warning("failed to write restart-drain marker %s", path, exc_info=True)
+
+
+def exit_restart_drain() -> None:
+    """Remove this process's drain marker (rollback/failure cleanup)."""
+    try:
+        _restart_drain_marker_path().unlink(missing_ok=True)
+    except OSError:
+        logger.debug("failed to remove restart-drain marker", exc_info=True)
+
+
 def register_active_run(stream_id: str, **metadata) -> None:
     """Mark a WebUI agent worker as alive until its outer finally exits."""
     if not stream_id:

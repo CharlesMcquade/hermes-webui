@@ -149,3 +149,94 @@ def test_health_advertises_restart_drain_capability(monkeypatch):
     assert routes._handle_health(object(), parsed) is True
     assert observed["status"] == 200
     assert observed["payload"]["restart_drain_supported"] is True
+
+
+def test_schedule_restart_enters_drain_before_wait(monkeypatch, tmp_path):
+    """The real restart producer enters drain BEFORE waiting and keeps the
+    marker active through the replacement. Manufactured-marker tests above
+    prove admission behavior; this one proves the lifecycle edge: marker
+    appears at _schedule_restart() call time, is still present through the
+    wait/exec handoff, and is rolled back if the restart aborts."""
+    from api import config, updates
+
+    monkeypatch.setenv("HERMES_WEBUI_RESTART_DRAIN_DIR", str(tmp_path))
+    marker = tmp_path / f"{os.getpid()}.json"
+    assert not config.restart_drain_active()
+
+    milestones = []
+
+    def fake_wait():
+        milestones.append("wait_marker_present=%s" % config.restart_drain_active())
+        return {"active_streams": 0, "active_runs": 0, "restart_blocked": False}
+
+    monkeypatch.setattr(updates, "_wait_until_restart_safe", fake_wait)
+    monkeypatch.setattr(updates, "_purge_agent_pycache", lambda *_a, **_k: None)
+
+    def fake_execv(*_a, **_k):
+        milestones.append("execv_marker_present=%s" % config.restart_drain_active())
+        # A real execv never returns; returning here simulates the handoff
+        # completing, which routes _do into the finally-rollback (correct:
+        # in-test the process survives, so the marker must be cleaned up).
+
+    monkeypatch.setattr(updates.os, "execv", fake_execv)
+    monkeypatch.setattr(updates.sys, "frozen", False, raising=False)
+
+    updates._schedule_restart(delay=0)
+    # _do is a daemon thread — poll for the execv milestone.
+    import time as _time
+    deadline = _time.monotonic() + 10
+    while not any(m.startswith("execv_") for m in milestones):
+        assert _time.monotonic() < deadline, milestones
+        _time.sleep(0.05)
+    deadline = _time.monotonic() + 10
+    while config.restart_drain_active():
+        assert _time.monotonic() < deadline, "drain marker not rolled back after handoff"
+        _time.sleep(0.05)
+    # Drain was active THROUGH the wait and at the exec handoff...
+    assert milestones[0] == "wait_marker_present=True", milestones
+    assert milestones[1] == "execv_marker_present=True", milestones
+    # ...and the rollback cleaned it up once the handoff returned in-test.
+    assert not config.restart_drain_active(), "marker leaked after handoff"
+
+
+def test_schedule_restart_rolls_back_drain_on_spawn_failure(monkeypatch, tmp_path):
+    """If the restart never happens (spawn failure / wait exception), the
+    still-running process must resume admitting work — no stuck marker."""
+    from api import config, updates
+
+    monkeypatch.setenv("HERMES_WEBUI_RESTART_DRAIN_DIR", str(tmp_path))
+    assert not config.restart_drain_active()
+
+    def boom():
+        raise RuntimeError("simulated wait failure")
+
+    monkeypatch.setattr(updates, "_wait_until_restart_safe", boom)
+    updates._schedule_restart(delay=0)
+    import time as _time
+    deadline = _time.monotonic() + 10
+    while config.restart_drain_active():
+        assert _time.monotonic() < deadline, "drain marker never rolled back"
+        _time.sleep(0.05)
+    # Admission works again after rollback.
+    config.register_active_run("post-rollback-run", session_id="s")
+    with config.ACTIVE_RUNS_LOCK:
+        assert "post-rollback-run" in config.ACTIVE_RUNS
+        config.ACTIVE_RUNS.pop("post-rollback-run", None)
+
+
+def test_enter_and_exit_drain_marker_roundtrip(monkeypatch, tmp_path):
+    from api import config
+
+    monkeypatch.setenv("HERMES_WEBUI_RESTART_DRAIN_DIR", str(tmp_path))
+    assert not config.restart_drain_active()
+    config.enter_restart_drain(reason="test")
+    assert config.restart_drain_active()
+    marker = tmp_path / f"{os.getpid()}.json"
+    payload = json.loads(marker.read_text())
+    assert payload["pid"] == os.getpid()
+    assert payload["reason"] == "test"
+    config.exit_restart_drain()
+    assert not config.restart_drain_active()
+    # Exit is idempotent.
+    config.exit_restart_drain()
+    assert not config.restart_drain_active()
