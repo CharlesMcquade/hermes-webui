@@ -14231,6 +14231,25 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if not active_stream_id:
         return j(handler, {"accepted": False, "fallback": "not_running",
                            "stream_id": None})
+    # RC-12 stale-precondition: a caller addressing a specific run
+    # (expected_stream_id) must match the session's current active stream.
+    # A mismatch means the addressed run was retired — deliver nothing and
+    # fail with an explicit precondition rejection. Omitting the field keeps
+    # the legacy deliver-to-current behavior for older callers.
+    expected_stream_id = str((body or {}).get("expected_stream_id", "") or "").strip()
+    if expected_stream_id and expected_stream_id != active_stream_id:
+        logger.info(
+            "Rejected stale steer precondition: session_id=%s expected_stream_id=%s "
+            "active_stream_id=%s",
+            sid,
+            expected_stream_id,
+            active_stream_id,
+        )
+        return j(handler, {"accepted": False,
+                           "fallback": "stale_stream_precondition",
+                           "stream_id": active_stream_id,
+                           "active_stream_id": active_stream_id,
+                           "expected_stream_id": expected_stream_id})
     with _cfg.STREAMS_LOCK:
         stream_alive = active_stream_id in _cfg.STREAMS
         agent = _cfg.AGENT_INSTANCES.get(str(active_stream_id))

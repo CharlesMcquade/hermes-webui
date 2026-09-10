@@ -218,6 +218,13 @@ def patch_preferences(authority, expected_revision, changes):
     canonical, error = _validate(authority, changes)
     if error is not None:
         return error, 400
+    # RC-13 transaction boundary: ALL revision-state mutations (this PATCH's
+    # bump and save_settings' webui-save hook) serialize on _PREFS_LOCK, and
+    # the values write serializes on save_settings' own save lock. The PATCH
+    # must NOT hold _PREFS_LOCK across save_settings — a concurrent WebUI save
+    # of a disjoint field has to be able to land (and bump) while the PATCH's
+    # save is in flight; both writers merge against fresh disk state, so no
+    # edit is lost and the revision reflects both writes.
     with _PREFS_LOCK:
         state = _load_revisions()
         revisions = state.setdefault('revisions', {})
@@ -229,29 +236,22 @@ def patch_preferences(authority, expected_revision, changes):
                 'error': 'revision_conflict',
                 'current': _record(authority, settings, revisions, sources),
             }, 409
-        settings = config.load_settings()
-        merged = dict(settings)
-        merged.update(canonical)
-        if 'theme' in canonical or 'skin' in canonical:
-            theme = merged.get('theme') if 'theme' in canonical else None
-            skin = merged.get('skin') if 'skin' in canonical else None
-            if theme is None:
-                theme = merged.get('theme')
-            if skin is None:
-                skin = merged.get('skin')
-            merged['theme'], merged['skin'] = config._normalize_appearance(
-                theme, skin,
-            )
-        for key in canonical:
-            merged.pop('_set_password', None)
-            merged.pop('_clear_password', None)
-        # Sentinel source: save_settings' revision hook is a no-op for this
-        # save — the single authoritative bump happens right below, so the
-        # extension PATCH bumps exactly once with source 'extension'.
-        saved = config.save_settings(merged, config._PATCH_SENTINEL_SOURCE)
-        forbidden = _FORBIDDEN_KEYS & set(canonical)
-        assert not forbidden
-        revisions[authority] = current_revision + 1
+    # Save ONLY the canonical keys: save_settings re-reads the on-disk state
+    # under its save lock and merges, so a writer that landed meanwhile
+    # survives — we never persist a stale full snapshot.
+    # Sentinel source: save_settings' revision hook is a no-op for this save —
+    # the single authoritative bump happens below, so the extension PATCH
+    # bumps exactly once with source 'extension'.
+    saved = config.save_settings(dict(canonical), config._PATCH_SENTINEL_SOURCE)
+    forbidden = _FORBIDDEN_KEYS & set(canonical)
+    assert not forbidden
+    with _PREFS_LOCK:
+        # Re-read under the boundary lock so intermediate webui bumps that
+        # landed during the save are preserved, not overwritten.
+        state = _load_revisions()
+        revisions = state.setdefault('revisions', {})
+        sources = state.setdefault('sources', {})
+        revisions[authority] = int(revisions.get(authority, 1)) + 1
         sources[authority] = {'updated_at': time.time(), 'source': 'extension'}
         state['revisions'] = revisions
         state['sources'] = sources

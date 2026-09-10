@@ -10189,7 +10189,11 @@ def bump_preference_revisions_for_save(changed_keys, source: str) -> None:
         touched[authority] = changed_here
     if not touched:
         return
-    with _PREFERENCE_REVISION_LOCK:
+    # RC-13: this hook is part of the SAME transaction boundary as the
+    # client-preferences service (api.client_preferences._PREFS_LOCK), so a
+    # WebUI-side revision bump and an extension PATCH can never interleave.
+    from api.client_preferences import _PREFS_LOCK
+    with _PREFS_LOCK:
         state = _load_preference_state()
         revisions = state.setdefault('revisions', {})
         sources = state.setdefault('sources', {})
@@ -10210,11 +10214,27 @@ _PREFERENCE_REVISION_LOCK = threading.Lock()
 def save_settings(settings: dict, source: str = "webui") -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys.
 
-    ``source`` records which surface produced this save ('webui' for
-    frontend/server saves, the PATCH sentinel for extension conditional
-    writes); it feeds the client-preference revision hook so stale extension
-    leases conflict instead of silently overwriting newer WebUI edits.
+    RC-13: every writer path — legacy WebUI saves and extension PATCHes —
+    serializes through this single lock so a read-merge-write cycle can never
+    interleave with another writer's. The preference-revision bump runs
+    OUTSIDE the save lock (it takes the client-preferences boundary itself),
+    so a save in flight never blocks a concurrent conditional writer's
+    revision accounting.
     """
+    with _SETTINGS_SAVE_LOCK:
+        current, changed_keys = _save_settings_unlocked(settings, source)
+    try:
+        bump_preference_revisions_for_save(changed_keys, source)
+    except Exception:
+        logger.debug("preference revision bump failed", exc_info=True)
+    return current
+
+
+_SETTINGS_SAVE_LOCK = threading.RLock()
+
+
+def _save_settings_unlocked(settings: dict, source: str = "webui") -> tuple:
+    """save_settings body under _SETTINGS_SAVE_LOCK. Returns (merged, changed)."""
     raw_settings = _read_raw_settings_file()
     persisted_speech_keys = _extract_persisted_speech_keys(raw_settings)
     current = load_settings()
@@ -10383,12 +10403,8 @@ def save_settings(settings: dict, source: str = "webui") -> dict:
         k for k, v in current.items()
         if _pre_save_snapshot.get(k) != v
     }
-    try:
-        bump_preference_revisions_for_save(_changed_keys, source)
-    except Exception:
-        logger.debug("preference revision bump failed", exc_info=True)
     current["default_model"] = get_effective_default_model()
-    return current
+    return current, _changed_keys
 
 
 # Apply saved settings on startup (override env-derived defaults)
