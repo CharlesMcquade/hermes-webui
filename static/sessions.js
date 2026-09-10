@@ -3094,6 +3094,16 @@ function _preserveLoadedMessageWindow(session, loaded){
   if(start>=session.messages.length||
     session.messages.length+offset<loaded.message_count||!loaded.first||
     _loadedMessageBoundarySignature(session.messages[start])!==loaded.first) return session;
+  // Rows about to be sliced out of the resident transcript still carry
+  // mutation evidence (write/patch tool calls, diff fences). Harvest them into
+  // a per-session registry BEFORE dropping them, so the workspace Artifacts
+  // projection (which scans only resident state) keeps surfacing files changed
+  // before the loaded boundary. Once the reader loads full history, the head
+  // rows become resident again and the registry entry is cleared.
+  if(typeof _noteHeadArtifactsForSession==='function'){
+    try{ _noteHeadArtifactsForSession(session.session_id, session.messages.slice(0,start)); }
+    catch(_){ /* harvest is best-effort; never block the settlement slice */ }
+  }
   return {...session,messages:session.messages.slice(start),
     _messages_offset:loaded.offset,_messages_truncated:true};
 }
@@ -3239,6 +3249,11 @@ async function _ensureMessagesLoaded(sid, opts) {
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
   _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
+  // Full history is resident again — the harvested head registry is redundant
+  // (its rows now live in S.messages and would double-count otherwise).
+  if(!_messagesTruncated && typeof _clearHeadArtifactsForSession==='function'){
+    _clearHeadArtifactsForSession(sid);
+  }
   // #3162: `msgs` is reassigned below by the #3018 ephemeral-field carry-forward,
   // so it must be `let`, not `const`. The `const` form threw a TypeError inside
   // _ensureMessagesLoaded() that surfaced as a "Failed to load conversation messages"
