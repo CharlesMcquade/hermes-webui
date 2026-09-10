@@ -9219,13 +9219,23 @@ const _promptNotifySeen = new Map();
 // the 1.5s fallback poll, the post-respond "next approval" refresh, and a
 // page reload while a prompt is still pending. The chokepoint is the card
 // renderer itself (showApprovalCard / showClarifyCard); this helper dedupes
-// per prompt id so repeated poll ticks, re-renders, and session switches
-// ping exactly once per unique prompt.
+// per logical OWNER - kind + session id + prompt id (+ gateway run id and
+// mirror token when present) - so repeated poll ticks, re-renders, and
+// session switches ping exactly once per owner. The gateway owner fields
+// mirror the approval-owner identity used elsewhere in this file
+// (_approvalOwnerForPending): the same externally supplied approval_id may
+// legitimately be pending in two sessions, or in two gateway runs within one
+// session, and each owner must notify on its own.
 function _notifyPromptCard(kind, sid, pending){
   const p = pending || {};
   const id = p.approval_id || p.clarify_id || '';
   if (!id) return;
-  const key = kind + ':' + id;
+  const runId = String(p.run_id || '').trim();
+  const mirrorToken = String(p._gateway_mirror_token || '').trim();
+  const ownerFields = runId && mirrorToken
+    ? ' ' + runId + ' ' + mirrorToken
+    : '';
+  const key = kind + ':' + String(sid || '') + ':' + String(id) + ownerFields;
   const now = Date.now();
   for (const [staleKey, seenAt] of _promptNotifySeen) {
     if (now - Number(seenAt || 0) > _PROMPT_NOTIFY_TTL_MS) _promptNotifySeen.delete(staleKey);

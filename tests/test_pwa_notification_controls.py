@@ -69,8 +69,9 @@ def test_prompt_notifications_fire_from_card_renderer_chokepoint():
         assert "_notifyPromptCard(" in body, f"{fn_name} must route notifications through _notifyPromptCard"
     assert "_notifyPromptCard('approval', sid, pending);" in MESSAGES_JS
     assert "_notifyPromptCard('clarify', sid, pending);" in MESSAGES_JS
-    # Dedupe gate: per prompt id, with TTL cleanup of stale keys.
-    assert "const key = kind + ':' + id;" in MESSAGES_JS
+    # Dedupe gate: per logical owner (kind + sid + prompt id + gateway owner
+    # fields), with TTL cleanup of stale keys.
+    assert "const key = kind + ':' + String(sid || '') + ':' + String(id) + ownerFields;" in MESSAGES_JS
     assert "if (_promptNotifySeen.has(key)) return;" in MESSAGES_JS
     assert "_PROMPT_NOTIFY_TTL_MS" in MESSAGES_JS
     # Visibility gate: suppress only while the prompt's session is actively
@@ -133,7 +134,9 @@ def _run_node(source: str) -> dict:
 
 def test_notify_prompt_card_executed_gate_behavior():
     """Executed node-VM proof of _notifyPromptCard's runtime gates:
-    (1) dedupes per prompt id — a second call for the same id is a no-op;
+    (1) dedupes per logical owner (kind + session id + prompt id + gateway
+    run owner) — a second call for the same owner is a no-op, while the same
+    prompt id under a different session or gateway run owner notifies again;
     (2) suppresses only when the prompt's session is ACTIVELY VIEWED (open in
     the pane + tab visible + tab focused) WITHOUT recording, so the same id
     still notifies the moment the user looks away (blocking prompt semantics);
@@ -169,6 +172,25 @@ document.hidden = false; document.visibilityState = 'visible'; document.hasFocus
 // Case 1: prompt for a NON-active session while tab is fully focused → notifies.
 _notifyPromptCard('approval', 'sid-2', {{ approval_id: 'a1', description: 'other session' }});
 CASES.otherSession = sent.length; // 3
+// Owner-scope regression: same approval_id in a DIFFERENT session must
+// notify again — the dedupe key is owner-scoped (kind + sid + id), not
+// prompt-id-only.
+document.hidden = false; document.visibilityState = 'visible'; document.hasFocus = () => true;
+_notifyPromptCard('approval', 'sid-2', {{ approval_id: 'a3', description: 'same id, other session' }});
+CASES.sameIdOtherSession = sent.length; // 4 (a3 was already sent for sid-1)
+// Gateway owner-scope regression: same session + same approval_id but a
+// distinct gateway run owner (run_id + _gateway_mirror_token) must notify
+// again; repeating the SAME full owner stays deduped. Window blurred so the
+// actively-viewed gate (which would suppress an ACTIVE-session prompt the
+// user is looking at) does not interfere with the owner-scope assertions.
+document.hasFocus = () => false;
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a3', run_id: 'run-A', _gateway_mirror_token: 'tok-A', description: 'gateway run A' }});
+CASES.gatewayRunA = sent.length; // 5
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a3', run_id: 'run-B', _gateway_mirror_token: 'tok-B', description: 'gateway run B' }});
+CASES.gatewayRunB = sent.length; // 6
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a3', run_id: 'run-A', _gateway_mirror_token: 'tok-A', description: 'gateway run A repeat' }});
+CASES.gatewayRunARepeat = sent.length; // still 6 (same full owner deduped)
+document.hasFocus = () => true;
 // Suppressed case: prompt for the ACTIVE session with tab visible+focused —
 // the user is literally looking at the card. NOT recorded, so...
 _notifyPromptCard('approval', 'sid-1', {{ approval_id: 'a4', description: 'watching' }});
@@ -195,16 +217,20 @@ process.stdout.write(JSON.stringify({{ CASES, sent }}));
     assert cases["tabHidden"] == 2, f"case 2 (tab hidden) must notify (got {cases['tabHidden']})"
     assert cases["otherSession"] == 3, f"case 1 (non-active session, tab focused) must notify (got {cases['otherSession']})"
     # Suppression only while actively viewing; the suppressed id fires after blur.
-    assert cases["activelyViewed"] == 3, f"no ping while actively viewing the card (got {cases['activelyViewed']})"
-    assert cases["afterBlur"] == 4, f"the suppressed id must ping exactly once after blur (got {cases['afterBlur']})"
-    assert cases["clarify"] == 5, f"clarify routes its own title/body (got {cases['clarify']})"
-    assert len(sent) == 5, f"expected exactly 5 pings, got {len(sent)}: {sent}"
+    assert cases["activelyViewed"] == 6, f"no ping while actively viewing the card (got {cases['activelyViewed']})"
+    assert cases["afterBlur"] == 7, f"the suppressed id must ping exactly once after blur (got {cases['afterBlur']})"
+    assert cases["clarify"] == 8, f"clarify routes its own title/body (got {cases['clarify']})"
+    assert cases["sameIdOtherSession"] == 4, f"same approval_id in another session must notify again (got {cases['sameIdOtherSession']})"
+    assert cases["gatewayRunA"] == 5, f"distinct gateway run owner must notify again (got {cases['gatewayRunA']})"
+    assert cases["gatewayRunB"] == 6, f"second distinct gateway run owner must notify again (got {cases['gatewayRunB']})"
+    assert cases["gatewayRunARepeat"] == 6, f"repeated calls for the same full owner must stay deduped (got {cases['gatewayRunARepeat']})"
+    assert len(sent) == 8, f"expected exactly 8 pings, got {len(sent)}: {sent}"
     assert sent[0]["title"] == "Approval required"
     assert sent[0]["options"] == {"sid": "sid-1", "forceHidden": True}
     assert sent[2]["options"] == {"sid": "sid-2", "forceHidden": True}
     assert sent[2]["body"] == "other session"
-    assert sent[4]["title"] == "Clarification needed"
-    assert sent[4]["body"] == "Which one?"
+    assert sent[7]["title"] == "Clarification needed"
+    assert sent[7]["body"] == "Which one?"
     # forceHidden must be set: _notifyPromptCard already made the visibility
     # decision, and sendBrowserNotification's live gate ("notify only when
     # document.hidden") would otherwise veto the unfocused-but-visible case.
