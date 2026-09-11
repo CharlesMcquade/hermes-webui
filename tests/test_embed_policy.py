@@ -203,38 +203,29 @@ def test_embed_route_disabled_has_no_flag_in_normal_shell(monkeypatch):
 # ── Authentication posture ───────────────────────────────────────────────────
 
 
-def test_embed_route_not_added_to_public_paths():
-    """The embed route must NOT be in the auth-exempt PUBLIC_PATHS set."""
+def test_embed_route_is_public_static_shell():
+    """Parent integration decision (Candidate-A contract, plan §4): the embed
+    shell is a PUBLIC, data-free static page — same trust class as /static/*
+    and /login. Cookie-gating the shell would force a cookie-login for the
+    frame, reintroducing exactly the ambient-credential model the extension
+    retired. The security boundary stays at the API layer: every /api/* route
+    remains auth-gated (bearer or session), the shell itself carries no data,
+    and the route still 404s unless frame-ancestors are configured."""
     from api.auth import PUBLIC_PATHS
 
-    assert "/embed" not in PUBLIC_PATHS
+    assert "/embed" in PUBLIC_PATHS
 
 
-def test_embed_route_denied_without_session_when_auth_enabled(monkeypatch, tmp_path):
-    """With auth enabled and no valid session, /embed must not serve the shell
-    (redirect to login, same as `/`) — no auth weakening for the embed route."""
+def test_embed_api_routes_remain_auth_gated(monkeypatch):
+    """The embed shell being public must not weaken API auth: bearer-less
+    /api/* requests still fail closed (extension authenticate → 401, session
+    check → 401). The frame renders with empty state and no data."""
     from api import auth as auth_mod
 
-    monkeypatch.setenv(ENV_VAR, "chrome-extension://japhcdiodeephocbijenihodhnglmfao")
-    monkeypatch.setattr(auth_mod, "is_auth_enabled", lambda: True)
-    monkeypatch.setattr(auth_mod, "parse_cookie", lambda handler: "")
-    # ensure_trusted_auth_session with no cookie/session must not authorize.
-    monkeypatch.setattr(auth_mod, "ensure_trusted_auth_session", lambda handler: None)
-
-    from server import Handler as ServerHandler
-
-    monkeypatch.setattr(
-        ServerHandler, "do_GET",
-        lambda self: None if not auth_mod.check_auth(self, urlparse(self.path)) else None,
-    )
-
-    class _Self:
+    class _Req:
         command = "GET"
-        path = "/embed"
-        headers = {}
-        request = None
-        client_address = ("127.0.0.1", 0)
-        _req_t0 = 0.0
+        path = "/api/sessions"
+        headers = {}  # no Authorization header, no Cookie
 
         def send_response(self, status):
             self.status = status
@@ -245,10 +236,38 @@ def test_embed_route_denied_without_session_when_auth_enabled(monkeypatch, tmp_p
         def end_headers(self):
             pass
 
-        def _safe_webui_print(self, msg):
-            pass
+        def wfile(self):  # pragma: no cover - class attr set below
+            raise NotImplementedError
 
-    s = _Self()
-    s.path = "/embed"
-    ServerHandler.do_GET(s)
-    assert s.status == 302  # page redirect to login, same posture as `/`
+    import io
+
+    req = _Req()
+    req.wfile = io.BytesIO()  # 401 body writer target
+    # Fixture env has no password → auth disabled → everything passes; force
+    # the enabled posture this test is about.
+    monkeypatch.setattr(auth_mod, "is_auth_enabled", lambda: True)
+    # Device-auth authenticate() runs first and must reject a bearer-less
+    # extension-origin request; even if it passes through (no Origin header
+    # here), the cookie session check must still 401 /api/*.
+    assert auth_mod.check_auth(req, urlparse("/api/sessions")) is False
+
+
+def test_embed_route_denied_without_session_when_auth_enabled(monkeypatch, tmp_path):
+    """Fail-closed posture is unchanged for the FRAME POLICY: with auth
+    enabled the embed shell serves no cookies and an empty CSRF token (the
+    frame is cookie-less by design); every data request it makes is 401
+    until the parent broker presents the device bearer."""
+    from api import auth as auth_mod
+
+    monkeypatch.setenv(ENV_VAR, "chrome-extension://japhcdiodeephocbijenihodhnglmfao")
+    monkeypatch.setattr(auth_mod, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth_mod, "parse_cookie", lambda handler: "")
+
+    from server import Handler as ServerHandler
+
+    # Public-path dispatch for /embed must reach the route handler (shell
+    # served), while /api/* on the same anonymous request stays 401.
+    _embed_req = type(
+        "R", (), {"path": "/embed", "headers": {}, "command": "GET"}
+    )()
+    assert auth_mod.check_auth(_embed_req, urlparse("/embed")) is True
