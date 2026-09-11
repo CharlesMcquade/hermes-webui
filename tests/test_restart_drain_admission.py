@@ -12,6 +12,23 @@ def _clear_run(config, stream_id: str) -> None:
         config.ACTIVE_RUNS.pop(stream_id, None)
 
 
+def _join_restart_thread(thread, timeout: float = 15.0) -> None:
+    """Join the _schedule_restart daemon thread.
+
+    Waiting for the drain MARKER to disappear is not enough: monkeypatch
+    teardown can restore the real _wait_until_restart_safe/env before the
+    daemon reaches them (the thread then runs the REAL wait + a full
+    REPO_ROOT/agent pycache purge while still holding _apply_lock, and
+    exit_restart_drain unlinks the wrong directory). Joining the thread is the
+    only wait that covers the entire unwind. The thread is daemon=True, so the
+    join is bounded by the thread's own work (wait is mocked or registry-empty;
+    execv is the conftest no-op in tests).
+    """
+    if thread is not None:
+        thread.join(timeout=timeout)
+        assert not thread.is_alive(), "restart thread did not finish in time"
+
+
 def test_current_process_drain_marker_refuses_new_run(monkeypatch, tmp_path):
     from api import config
 
@@ -181,7 +198,7 @@ def test_schedule_restart_enters_drain_before_wait(monkeypatch, tmp_path):
     monkeypatch.setattr(updates.os, "execv", fake_execv)
     monkeypatch.setattr(updates.sys, "frozen", False, raising=False)
 
-    updates._schedule_restart(delay=0)
+    _thread = updates._schedule_restart(delay=0)
     # _do is a daemon thread — poll for the execv milestone.
     import time as _time
     deadline = _time.monotonic() + 10
@@ -197,6 +214,7 @@ def test_schedule_restart_enters_drain_before_wait(monkeypatch, tmp_path):
     assert milestones[1] == "execv_marker_present=True", milestones
     # ...and the rollback cleaned it up once the handoff returned in-test.
     assert not config.restart_drain_active(), "marker leaked after handoff"
+    _join_restart_thread(_thread)
 
 
 def test_schedule_restart_rolls_back_drain_on_spawn_failure(monkeypatch, tmp_path):
@@ -211,12 +229,13 @@ def test_schedule_restart_rolls_back_drain_on_spawn_failure(monkeypatch, tmp_pat
         raise RuntimeError("simulated wait failure")
 
     monkeypatch.setattr(updates, "_wait_until_restart_safe", boom)
-    updates._schedule_restart(delay=0)
+    _thread = updates._schedule_restart(delay=0)
     import time as _time
     deadline = _time.monotonic() + 10
     while config.restart_drain_active():
         assert _time.monotonic() < deadline, "drain marker never rolled back"
         _time.sleep(0.05)
+    _join_restart_thread(_thread)
     # Admission works again after rollback.
     config.register_active_run("post-rollback-run", session_id="s")
     with config.ACTIVE_RUNS_LOCK:
