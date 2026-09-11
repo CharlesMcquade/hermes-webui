@@ -13501,6 +13501,51 @@ def handle_get(handler, parsed) -> bool:
         except Exception as exc:
             return _serve_shell_unavailable(handler, exc)
 
+    # ── Dedicated embed route (Phase 1 spike; HOST-CONTRACT §11 rule 7) ──
+    # Serves the same index.html shell with an embed-flag token. Disabled
+    # entirely (404) when no frame-ancestors are configured (fail closed).
+    # Only this route may omit X-Frame-Options / relax frame-ancestors; all
+    # other routes keep the global DENY/'none' policy from _security_headers.
+    if parsed.path == "/embed":
+        from api import embed_policy
+
+        if not embed_policy.embed_enabled():
+            return j(handler, {"error": "not found"}, status=404)
+        try:
+            from api.extensions import inject_extension_tags
+
+            csrf_token = ""
+            try:
+                from api.auth import csrf_token_for_session, is_auth_enabled, parse_cookie, verify_session
+
+                if is_auth_enabled():
+                    cookie_val = parse_cookie(handler)
+                    if not cookie_val:
+                        cookie_val = getattr(handler, "_trusted_auth_session_cookie_value", None)
+                    if cookie_val and verify_session(cookie_val):
+                        csrf_token = csrf_token_for_session(cookie_val) or ""
+            except Exception:
+                csrf_token = ""
+
+            html = _render_index_shell_base().replace(
+                "__CSRF_TOKEN_JSON__", json.dumps(csrf_token)
+            )
+            # Embed boot flag: server-templated so the frontend (owner B) can
+            # branch on window.__HERMES_CONFIG__.embed without any request.
+            html = html.replace(
+                "window.__HERMES_CONFIG__=",
+                "window.__HERMES_CONFIG__={embed:1,",
+                1,
+            )
+            return t(
+                handler,
+                inject_extension_tags(html),
+                content_type="text/html; charset=utf-8",
+                skip_frame_protection=True,
+            )
+        except Exception as exc:
+            return _serve_shell_unavailable(handler, exc)
+
     if parsed.path == "/share" or parsed.path.startswith("/share/"):
         share_path = (Path(__file__).parent.parent / "static" / "share.html").resolve()
         return t(
