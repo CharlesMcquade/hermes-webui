@@ -66,6 +66,13 @@ def test_embed_loader_gates_on_embed_flag():
     assert "__HERMES_EMBED__" in INDEX_HTML
 
 
+def test_embed_loader_gates_on_dedicated_embed_route():
+    """Parent integration: the server /embed route (A) serves this page at
+    pathname /embed with __HERMES_CONFIG__.embed — the loader must activate
+    the adapter there too (route-based activation, not just query param)."""
+    assert "location.pathname==='/embed'" in INDEX_HTML
+
+
 def test_embed_storage_wrapper_intercepts_localstorage():
     """embed-host.js must redefine window.localStorage (wrapper install)."""
     assert "installEmbedStorage" in EMBED_JS
