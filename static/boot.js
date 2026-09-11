@@ -1,6 +1,12 @@
 // Early boot initialization that must run before any other code.
 // These run during script evaluation to handle server-stopped state
 // and cross-tab shutdown broadcasts as early as possible.
+
+// Embed boot policy (HOST-CONTRACT.md §7 New-by-default): in an embedded
+// frame the panel boots to a fresh session — no localStorage session
+// restore, no URL deep-link, no checkInflightOnBoot auto-reattach.
+function _isEmbedBoot(){ return window.__HERMES_EMBED__===true; }
+
 (function(){
   // Clear stale stop-server flag on successful page load (server is reachable)
   try{localStorage.removeItem('hermes-webui-server-stopped');}catch(_){}
@@ -3886,7 +3892,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
   if (typeof syncSessionSearchClear === 'function') syncSessionSearchClear();
   if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
-  const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
+  // Embed policy: force the New-session path — never restore from the URL
+  // deep link or localStorage (contract §7), so `saved` is null and boot
+  // falls through to the no-saved-session empty state below.
+  const _embedSkipRestore=_isEmbedBoot();
+  const urlSession=_embedSkipRestore?null:((typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null);
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
     ? window.HermesPWA.launchAction()
     : null;
@@ -3911,7 +3921,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       if(localStorage.getItem('hermes-webui-session')===_savedLocalBeforeProfileSwitch) localStorage.removeItem('hermes-webui-session');
     }catch(_){}
   }
-  const savedLocal=localStorage.getItem('hermes-webui-session');
+  const savedLocal=_embedSkipRestore?null:localStorage.getItem('hermes-webui-session');
   const saved=urlSession||savedLocal;
   if(saved){
     try{
@@ -3988,7 +3998,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         _workspacePanelMode='browse';
       }
       S._bootReady=true;
-      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);return;}
+      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();if(!_isEmbedBoot())await checkInflightOnBoot(saved);await _finalizeComposerPrefillOnBoot(prefillIntent);return;}
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
   // no saved session - show empty state, wait for user to hit +
@@ -4040,7 +4050,7 @@ window.addEventListener('pageshow', async (event) => {
   if (S.session && S.session.session_id && typeof loadSession === 'function') {
     try {
       await loadSession(S.session.session_id);
-      if (S.session && S.session.session_id && typeof checkInflightOnBoot === 'function') {
+      if (!_isEmbedBoot() && S.session && S.session.session_id && typeof checkInflightOnBoot === 'function') {
         try { await checkInflightOnBoot(S.session.session_id); } catch (_) {}
       }
     } catch (_) {}
