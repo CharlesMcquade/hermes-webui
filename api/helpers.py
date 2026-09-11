@@ -185,16 +185,35 @@ def _build_csp_report_only_policy(
     )
 
 
-def _security_headers(handler):
-    """Add security headers to every response."""
+def _security_headers(handler, skip_frame_protection: bool = False):
+    """Add security headers to every response.
+
+    *skip_frame_protection*: ONLY the dedicated embed route may set this, and
+    only when an embed-ancestor allowlist is configured (api/embed_policy.py).
+    It omits X-Frame-Options (which cannot express an allowlist) and replaces
+    the enforced CSP with the embed policy whose frame-ancestors is exactly the
+    configured allowlist + 'self'. Every other response keeps DENY + 'none'.
+    """
     extra_connect_src = _csp_extra_connect_src()
     extra_frame_src = _csp_extra_frame_src()
     handler._csp_extra_connect_src = extra_connect_src
     handler._csp_extra_frame_src = extra_frame_src
     handler.send_header('X-Content-Type-Options', 'nosniff')
-    handler.send_header('X-Frame-Options', 'DENY')
+    if skip_frame_protection:
+        from api.embed_policy import embed_enabled, embed_route_headers
+
+        if embed_enabled():
+            for name, value in embed_route_headers().items():
+                handler.send_header(name, value)
+        else:
+            # Fail closed: if embed got disabled between route check and here,
+            # fall back to the locked-down global policy.
+            handler.send_header('X-Frame-Options', 'DENY')
+            handler.send_header(_CSP_HEADER_NAME, _build_csp_enforced_policy(extra_connect_src, extra_frame_src))
+    else:
+        handler.send_header('X-Frame-Options', 'DENY')
+        handler.send_header(_CSP_HEADER_NAME, _build_csp_enforced_policy(extra_connect_src, extra_frame_src))
     handler.send_header('Referrer-Policy', 'same-origin')
-    handler.send_header(_CSP_HEADER_NAME, _build_csp_enforced_policy(extra_connect_src, extra_frame_src))
     handler.send_header(
         'Permissions-Policy',
         'camera=(), microphone=(self), geolocation=(), clipboard-write=(self)'
@@ -285,14 +304,20 @@ def t(
     status: int=200,
     content_type: str='text/plain; charset=utf-8',
     extra_headers: dict=None,
+    *,
+    skip_frame_protection: bool=False,
 ) -> None:
-    """Send a plain text or HTML response."""
+    """Send a plain text or HTML response.
+
+    *skip_frame_protection* is reserved for the dedicated embed route only
+    (see _security_headers); all other callers get DENY + 'none'.
+    """
     body = payload if isinstance(payload, bytes) else str(payload).encode('utf-8')
     handler.send_response(status)
     handler.send_header('Content-Type', content_type)
     handler.send_header('Content-Length', str(len(body)))
     handler.send_header('Cache-Control', 'no-store')
-    _security_headers(handler)
+    _security_headers(handler, skip_frame_protection=skip_frame_protection)
     if extra_headers:
         for k, v in extra_headers.items():
             handler.send_header(k, v)
