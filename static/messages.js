@@ -7484,7 +7484,9 @@ function _rememberApprovalPending(pending, pendingCount) {
 
 function _clearApprovalPendingForSession(sid) {
   if (sid) {
+    const entry = _approvalPendingBySession.get(sid);
     _approvalPendingBySession.delete(sid);
+    if (entry && entry.pending) _retirePromptNotifyKey('approval', sid, entry.pending);
     if (typeof syncTopbar === 'function') syncTopbar();
   }
 }
@@ -8454,7 +8456,9 @@ function _rememberClarifyPending(pending) {
 
 function _clearClarifyPendingForSession(sid) {
   if (sid) {
+    const entry = _clarifyPendingBySession.get(sid);
     _clarifyPendingBySession.delete(sid);
+    if (entry && entry.pending) _retirePromptNotifyKey('clarify', sid, entry.pending);
     if (typeof syncTopbar === 'function') syncTopbar();
   }
 }
@@ -9212,34 +9216,47 @@ function requestNotificationPermission(){
     return p;
   });
 }
-const _PROMPT_NOTIFY_TTL_MS = 600000;
 const _promptNotifySeen = new Map();
 // Prompt-card notifications: an approval or clarify card BLOCKS the run until
 // it is answered, so every surfacing path must notify — the live SSE event,
 // the 1.5s fallback poll, the post-respond "next approval" refresh, and a
 // page reload while a prompt is still pending. The chokepoint is the card
 // renderer itself (showApprovalCard / showClarifyCard); this helper dedupes
-// per logical OWNER - kind + session id + prompt id (+ gateway run id and
-// mirror token when present) - so repeated poll ticks, re-renders, and
-// session switches ping exactly once per owner. The gateway owner fields
-// mirror the approval-owner identity used elsewhere in this file
-// (_approvalOwnerForPending): the same externally supplied approval_id may
-// legitimately be pending in two sessions, or in two gateway runs within one
-// session, and each owner must notify on its own.
+// per logical OWNER - the typed tuple [kind, sid, prompt id, run owner id,
+// mirror token] serialized with JSON.stringify so delimiter-bearing producer
+// strings cannot collide (the gateway accepts approval_id as an unrestricted
+// string) - so repeated poll ticks, re-renders, and session switches ping
+// exactly once per owner. The run-owner fields mirror the approval-owner
+// identity used elsewhere in this file (_approvalOwnerForPending): the same
+// externally supplied approval_id may legitimately be pending in two
+// sessions, or in two gateway runs within one session, and each owner must
+// notify on its own. Seen entries are retired by PROMPT LIFECYCLE, not by
+// wall-clock age: _clearApprovalPendingForSession() and
+// _clearClarifyPendingForSession() (the resolution/dismissal/terminal
+// chokepoints) call _retirePromptNotifyKey(), so a prompt left pending for
+// hours never re-notifies, while a resolved prompt whose ID is later reused
+// legitimately notifies again. Entries are also NOT recorded when
+// notifications are disabled, so enabling mid-prompt re-notifies that owner.
+function _promptNotifyKey(kind, sid, pending){
+  const p = pending || {};
+  const id = p.approval_id || p.clarify_id || '';
+  const runId = String(p.run_id || '').trim();
+  const mirrorToken = String(p._gateway_mirror_token || '').trim();
+  return JSON.stringify([kind, String(sid || ''), String(id),
+    runId && mirrorToken ? runId : '',
+    runId && mirrorToken ? mirrorToken : '']);
+}
+function _retirePromptNotifyKey(kind, sid, pending){
+  if (!pending) return;
+  const id = pending.approval_id || pending.clarify_id || '';
+  if (!id) return;
+  _promptNotifySeen.delete(_promptNotifyKey(kind, sid, pending));
+}
 function _notifyPromptCard(kind, sid, pending){
   const p = pending || {};
   const id = p.approval_id || p.clarify_id || '';
   if (!id) return;
-  const runId = String(p.run_id || '').trim();
-  const mirrorToken = String(p._gateway_mirror_token || '').trim();
-  const ownerFields = runId && mirrorToken
-    ? ' ' + runId + ' ' + mirrorToken
-    : '';
-  const key = kind + ':' + String(sid || '') + ':' + String(id) + ownerFields;
-  const now = Date.now();
-  for (const [staleKey, seenAt] of _promptNotifySeen) {
-    if (now - Number(seenAt || 0) > _PROMPT_NOTIFY_TTL_MS) _promptNotifySeen.delete(staleKey);
-  }
+  const key = _promptNotifyKey(kind, sid, p);
   if (_promptNotifySeen.has(key)) return;
   // Suppress ONLY when the user is effectively looking at this prompt right
   // now: it belongs to the session open in the pane AND the tab is visible
@@ -9250,8 +9267,9 @@ function _notifyPromptCard(kind, sid, pending){
   // Suppression is NOT recorded, so the same prompt still pings exactly once
   // the moment the user is no longer looking at it.
   if (typeof _isSessionActivelyViewed === 'function' && _isSessionActivelyViewed(sid)) return;
-  _promptNotifySeen.set(key, now);
   if (typeof sendBrowserNotification !== 'function') return;
+  if (typeof window !== 'undefined' && !window._notificationsEnabled) return;
+  _promptNotifySeen.set(key, Date.now());
   // forceHidden: this caller already made the visibility decision (the
   // actively-viewed gate above). sendBrowserNotification's own live gate
   // ("notify only when document.hidden") would otherwise veto the

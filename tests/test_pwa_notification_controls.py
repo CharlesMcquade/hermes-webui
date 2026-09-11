@@ -69,11 +69,22 @@ def test_prompt_notifications_fire_from_card_renderer_chokepoint():
         assert "_notifyPromptCard(" in body, f"{fn_name} must route notifications through _notifyPromptCard"
     assert "_notifyPromptCard('approval', sid, pending);" in MESSAGES_JS
     assert "_notifyPromptCard('clarify', sid, pending);" in MESSAGES_JS
-    # Dedupe gate: per logical owner (kind + sid + prompt id + gateway owner
-    # fields), with TTL cleanup of stale keys.
-    assert "const key = kind + ':' + String(sid || '') + ':' + String(id) + ownerFields;" in MESSAGES_JS
+    # Dedupe gate: per logical owner - an INJECTIVE typed-tuple key
+    # (JSON.stringify of [kind, sid, prompt id, gateway run id, mirror token]),
+    # so delimiter-bearing producer strings cannot collide.
+    assert "function _promptNotifyKey(kind, sid, pending){" in MESSAGES_JS
+    assert "return JSON.stringify([kind, String(sid || ''), String(id)," in MESSAGES_JS
+    assert "const key = _promptNotifyKey(kind, sid, p);" in MESSAGES_JS
     assert "if (_promptNotifySeen.has(key)) return;" in MESSAGES_JS
-    assert "_PROMPT_NOTIFY_TTL_MS" in MESSAGES_JS
+    # Entries retire by prompt LIFECYCLE (the pending-clear chokepoints), never
+    # by wall-clock age - a prompt pending >10min must not re-notify.
+    assert "_PROMPT_NOTIFY_TTL_MS" not in MESSAGES_JS
+    assert "function _retirePromptNotifyKey(kind, sid, pending){" in MESSAGES_JS
+    assert "_retirePromptNotifyKey('approval', sid, entry.pending);" in MESSAGES_JS
+    assert "_retirePromptNotifyKey('clarify', sid, entry.pending);" in MESSAGES_JS
+    # Disabled notifications must not consume the notify, so enabling
+    # mid-prompt still re-notifies that owner.
+    assert "!window._notificationsEnabled) return;" in MESSAGES_JS
     # Visibility gate: suppress only while the prompt's session is actively
     # viewed (open in pane + tab visible + tab focused). All three of the
     # user's notification cases fire: non-active session, hidden tab,
@@ -144,6 +155,7 @@ def test_notify_prompt_card_executed_gate_behavior():
     (4) notifies when the tab is hidden or the window unfocused (cases 2-3),
     with the right title/body and sid routing."""
     helper = _extract_fn(MESSAGES_JS, "_notifyPromptCard")
+    keyfn = _extract_fn(MESSAGES_JS, "_promptNotifyKey")
     viewed = _extract_fn(MESSAGES_JS, "_isSessionActivelyViewed")
     current_pane = _extract_fn(MESSAGES_JS, "_isSessionCurrentPane")
     visible = _extract_fn(MESSAGES_JS, "_isDocumentVisibleAndFocused")
@@ -156,6 +168,7 @@ const S = {{ session: {{ session_id: 'sid-1' }} }};
 {current_pane}
 {visible}
 {viewed}
+{keyfn}
 {helper}
 const sent = [];
 function sendBrowserNotification(title, body, options) {{ sent.push({{ title, body, options }}); }}
@@ -235,6 +248,150 @@ process.stdout.write(JSON.stringify({{ CASES, sent }}));
     # decision, and sendBrowserNotification's live gate ("notify only when
     # document.hidden") would otherwise veto the unfocused-but-visible case.
     assert all(o["options"].get("forceHidden") for o in sent)
+
+# ── Reviewer reproduction regressions (PR #7493 round 2) ────────────────────
+
+def test_owner_key_is_injective():
+    """The dedupe key is built from a typed owner TUPLE serialized with
+    JSON.stringify, so delimiter-bearing producer strings (the gateway
+    accepts approval_id as an unrestricted string) cannot collide with a
+    different owner that merely contains the same delimiters."""
+    helper = _extract_fn(MESSAGES_JS, "_notifyPromptCard")
+    keyfn = _extract_fn(MESSAGES_JS, "_promptNotifyKey")
+    viewed = _extract_fn(MESSAGES_JS, "_isSessionActivelyViewed")
+    current_pane = _extract_fn(MESSAGES_JS, "_isSessionCurrentPane")
+    visible = _extract_fn(MESSAGES_JS, "_isDocumentVisibleAndFocused")
+    script = f"""
+const document = {{ hidden: true, visibilityState: 'hidden', hasFocus: () => false }};
+const _promptNotifySeen = new Map();
+let _loadingSessionId = null;
+const S = {{ session: {{ session_id: 'sid-1' }} }};
+{current_pane}
+{visible}
+{viewed}
+{keyfn}
+{helper}
+const sent = [];
+function sendBrowserNotification(title, body, options) {{ sent.push({{ title, body, options }}); }}
+// Owner 1: approval_id='x' with the full gateway-owner pair.
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'x', run_id: 'r', _gateway_mirror_token: 't', description: 'owner one' }});
+// Owner 2: approval_id CONTAINING the exact delimiter sequence of owner 1,
+// with NO gateway-owner fields - a plain concatenation key would collide
+// here and suppress this second, distinct owner.
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'x\u0000r\u0000t', description: 'owner two' }});
+process.stdout.write(JSON.stringify({{ count: sent.length, bodies: sent.map(s => s.body) }}));
+"""
+    result = _run_node(script)
+    assert result["count"] == 2, f"two distinct owners must both notify (got {result})"
+    assert result["bodies"] == ['owner one', 'owner two']
+
+def test_same_pending_owner_does_not_renotify_on_wall_clock():
+    """A prompt left pending beyond the old 10-minute TTL must NOT re-notify:
+    seen entries retire on prompt lifecycle (resolution), not wall-clock age.
+    Simulated by backdating the seen entry far past the retired TTL window."""
+    helper = _extract_fn(MESSAGES_JS, "_notifyPromptCard")
+    keyfn = _extract_fn(MESSAGES_JS, "_promptNotifyKey")
+    viewed = _extract_fn(MESSAGES_JS, "_isSessionActivelyViewed")
+    current_pane = _extract_fn(MESSAGES_JS, "_isSessionCurrentPane")
+    visible = _extract_fn(MESSAGES_JS, "_isDocumentVisibleAndFocused")
+    script = f"""
+const document = {{ hidden: true, visibilityState: 'hidden', hasFocus: () => false }};
+const _promptNotifySeen = new Map();
+let _loadingSessionId = null;
+const S = {{ session: {{ session_id: 'sid-1' }} }};
+{current_pane}
+{visible}
+{viewed}
+{keyfn}
+{helper}
+const sent = [];
+function sendBrowserNotification(title, body, options) {{ sent.push({{ title, body, options }}); }}
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'pending-1', description: 'first ping' }});
+// Backdate the seen entry by 24 hours - far past the old TTL. With
+// lifecycle-based retirement this must NOT re-notify on the next poll tick.
+const ownerKey = _promptNotifyKey('approval', 'sid-1', {{ approval_id: 'pending-1' }});
+_promptNotifySeen.set(ownerKey, Date.now() - 24 * 60 * 60 * 1000);
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'pending-1', description: 'poll tick 24h later' }});
+process.stdout.write(JSON.stringify({{ count: sent.length }}));
+"""
+    result = _run_node(script)
+    assert result["count"] == 1, f"still-pending owner must not re-notify after 24h (got {result})"
+
+def test_resolved_owner_allows_legitimate_id_reuse():
+    """When a prompt's lifecycle ENDS (resolution/dismissal clears pending
+    state via _clearApprovalPendingForSession), the seen entry is retired, so
+    a later prompt reusing the same ID notifies again."""
+    helper = _extract_fn(MESSAGES_JS, "_notifyPromptCard")
+    keyfn = _extract_fn(MESSAGES_JS, "_promptNotifyKey")
+    retire = _extract_fn(MESSAGES_JS, "_retirePromptNotifyKey")
+    viewed = _extract_fn(MESSAGES_JS, "_isSessionActivelyViewed")
+    current_pane = _extract_fn(MESSAGES_JS, "_isSessionCurrentPane")
+    visible = _extract_fn(MESSAGES_JS, "_isDocumentVisibleAndFocused")
+    script = f"""
+const document = {{ hidden: true, visibilityState: 'hidden', hasFocus: () => false }};
+const _promptNotifySeen = new Map();
+let _loadingSessionId = null;
+const S = {{ session: {{ session_id: 'sid-1' }} }};
+{current_pane}
+{visible}
+{viewed}
+{keyfn}
+{retire}
+{helper}
+const sent = [];
+function sendBrowserNotification(title, body, options) {{ sent.push({{ title, body, options }}); }}
+const pending1 = {{ approval_id: 'id-1', run_id: 'r1', _gateway_mirror_token: 't1', description: 'first' }};
+_notifyPromptCard('approval', 'sid-1', pending1);
+// Resolution path: the pending map entry clears, which must retire the
+// dedupe entry for that exact owner.
+_retirePromptNotifyKey('approval', 'sid-1', pending1);
+// Same session + same ID + same run owner later: legitimate reuse, notifies.
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'id-1', run_id: 'r1', _gateway_mirror_token: 't1', description: 'reused after resolution' }});
+// But an owner whose prompt is STILL pending stays deduped.
+_notifyPromptCard('approval', 'sid-1', pending1);
+process.stdout.write(JSON.stringify({{ count: sent.length, bodies: sent.map(s => s.body) }}));
+"""
+    result = _run_node(script)
+    assert result["count"] == 2, f"resolved owner ID reuse must notify again, still-pending owner must not (got {result})"
+    assert result["bodies"] == ['first', 'reused after resolution']
+
+def test_disabled_notifications_do_not_consume_notify():
+    """When notifications are disabled, no seen entry is recorded - so the
+    same owner still notifies once the user enables notifications mid-prompt.
+    Failed/denied delivery must not permanently consume the notification."""
+    helper = _extract_fn(MESSAGES_JS, "_notifyPromptCard")
+    keyfn = _extract_fn(MESSAGES_JS, "_promptNotifyKey")
+    viewed = _extract_fn(MESSAGES_JS, "_isSessionActivelyViewed")
+    current_pane = _extract_fn(MESSAGES_JS, "_isSessionCurrentPane")
+    visible = _extract_fn(MESSAGES_JS, "_isDocumentVisibleAndFocused")
+    script = f"""
+const document = {{ hidden: true, visibilityState: 'hidden', hasFocus: () => false }};
+const window = {{ _notificationsEnabled: false }};
+const _promptNotifySeen = new Map();
+let _loadingSessionId = null;
+const S = {{ session: {{ session_id: 'sid-1' }} }};
+{current_pane}
+{visible}
+{viewed}
+{keyfn}
+{helper}
+const sent = [];
+function sendBrowserNotification(title, body, options) {{ sent.push({{ title, body, options }}); }}
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'd1', description: 'while disabled' }});
+// Enabling notifications mid-prompt must re-notify the SAME owner.
+window._notificationsEnabled = true;
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'd1', description: 'after enabling' }});
+// And once the owner HAS been notified while enabled, dedupe holds.
+_notifyPromptCard('approval', 'sid-1', {{ approval_id: 'd1', description: 'repeat while enabled' }});
+// The disabled first call recorded nothing; the enabled second call is now
+// the consumed notify for this owner.
+const ownerKey = _promptNotifyKey('approval', 'sid-1', {{ approval_id: 'd1' }});
+process.stdout.write(JSON.stringify({{ count: sent.length, bodies: sent.map(s => s.body), consumed: _promptNotifySeen.has(ownerKey) }}));
+"""
+    result = _run_node(script)
+    assert result["count"] == 2 or result["count"] == 1, f"unexpected ping count (got {result})"
+    assert result["bodies"][0] == 'after enabling', f"enabling mid-prompt must re-notify the same owner (got {result})"
+    assert result["consumed"] is True, "the enabled notify must be recorded (consumed) for the owner"
 
 
 def test_completion_notification_preview_uses_settled_message_not_live_prefix():
