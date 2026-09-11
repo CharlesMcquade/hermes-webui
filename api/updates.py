@@ -1843,7 +1843,12 @@ def _schedule_restart(delay: float = 2.0) -> None:
                 # Last-resort: let the process supervisor restart us.
                 _windows_restart_exit(0)
 
-    threading.Thread(target=_do, daemon=True).start()
+    # Return the thread so callers (and tests) can join it — the drain
+    # lifecycle spans marker write through lock release, and marker removal
+    # alone does not mean the thread finished unwinding.
+    thread = threading.Thread(target=_do, daemon=True)
+    thread.start()
+    return thread
 
 
 def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
