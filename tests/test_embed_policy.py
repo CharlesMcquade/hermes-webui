@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import threading
 from urllib.parse import urlparse
 
 import pytest
@@ -271,3 +272,138 @@ def test_embed_route_denied_without_session_when_auth_enabled(monkeypatch, tmp_p
         "R", (), {"path": "/embed", "headers": {}, "command": "GET"}
     )()
     assert auth_mod.check_auth(_embed_req, urlparse("/embed")) is True
+
+
+# ── Phase-2 R2: per-request + per-write revocation ──────────────────────────
+
+
+def _r2_app(tmp_path, monkeypatch):
+    """Minimal live server with a paired chat-scope device bearer."""
+    import base64
+    import hashlib
+    import http.client
+    import threading
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'home'))
+    monkeypatch.setenv('HERMES_WEBUI_STATE_DIR', str(tmp_path / 'state'))
+    from api import auth, config, extension_auth as ext, profiles
+    import server
+    state = tmp_path / 'state'
+    state.mkdir()
+    monkeypatch.setattr(config, 'STATE_DIR', state)
+    monkeypatch.setattr(auth, 'STATE_DIR', state)
+    monkeypatch.setattr(auth, '_SESSIONS_FILE', state / '.sessions.json')
+    monkeypatch.setattr(auth, '_sessions', {})
+    monkeypatch.setattr(auth, 'is_auth_enabled', lambda: True)
+    monkeypatch.setattr(profiles, '_active_profile', 'default')
+    monkeypatch.setattr(profiles, '_is_isolated_profile_mode', lambda: False)
+    httpd = server.QuietHTTPServer(('127.0.0.1', 0), server.Handler)
+    worker = threading.Thread(target=httpd.serve_forever, daemon=True)
+    worker.start()
+
+    def call(method, path, body=None, headers=None):
+        conn = http.client.HTTPConnection('127.0.0.1', httpd.server_port, timeout=8)
+        try:
+            import json as _json
+            payload = _json.dumps(body) if body is not None else None
+            conn.request(method, path, payload,
+                         {'Content-Type': 'application/json', **(headers or {})})
+            response = conn.getresponse()
+            data = response.read().decode()
+            try:
+                data = _json.loads(data)
+            except ValueError:
+                pass
+            return response.status, data, dict(response.getheaders())
+        finally:
+            conn.close()
+
+    ext_id = 'japhcdiodeephocbijenihodhnglmfao'
+    origin = 'chrome-extension://' + ext_id
+    verifier = 'a' * 64
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')
+    s, pending, _ = call('POST', ext.PREFIX + 'start',
+                         dict(extension_id=ext_id, client_name='Revocation test',
+                              code_challenge=challenge, scopes=['chat']),
+                         {'Origin': origin})
+    assert s == 200
+    cookie = auth.create_session()
+    cookie_headers = {'Cookie': auth._resolve_cookie_name() + '=' + cookie,
+                      'Origin': 'http://127.0.0.1:' + str(httpd.server_port),
+                      auth.CSRF_HEADER_NAME: auth.csrf_token_for_session(cookie)}
+    s, grant, _ = call('POST', ext.PREFIX + 'inspect',
+                       {'user_code': pending['user_code']}, cookie_headers)
+    assert s == 200
+    assert call('POST', ext.PREFIX + 'approve',
+                dict(user_code=pending['user_code'], confirm=True,
+                     scopes=grant['scopes'], profile=grant['profile']),
+                cookie_headers)[0] == 200
+    s, result, _ = call('POST', ext.PREFIX + 'token',
+                        dict(extension_id=ext_id, device_code=pending['device_code'],
+                             code_verifier=verifier), {'Origin': origin})
+    assert s == 200
+    headers = {'Origin': origin, 'Authorization': 'Bearer ' + result['access_token']}
+    return dict(call=call, pair_headers=headers, token=result['access_token'],
+                auth=auth, ext=ext, state=state, cookie=cookie_headers,
+                port=httpd.server_port,
+                shutdown=lambda: (httpd.shutdown(), httpd.server_close(),
+                                  worker.join(timeout=5)))
+
+
+def test_embed_capability_route_rechecks_auth_per_request(tmp_path, monkeypatch):
+    """R2: pair → request OK → revoke → the same embed-capability request 401s.
+
+    Even with auth disabled globally, a revoked device bearer must never fall
+    back to cookie/anonymous access on an embed capability route.
+    """
+    app = _r2_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(app['auth'], 'is_auth_enabled', lambda: False)
+    path = '/api/approval/pending'  # R1 embed capability route
+    status, _, _ = app['call']('GET', path, None, app['pair_headers'])
+    assert status not in (401, 403), (status, path)
+    assert app['call']('POST', app['ext'].PREFIX + 'revoke', {}, app['pair_headers'])[0] == 200
+    status, data, _ = app['call']('GET', path, None, app['pair_headers'])
+    assert (status, data['error']) == (401, 'invalid_token'), (status, data)
+    app['shutdown']()
+
+
+def test_authorized_stream_writer_per_write_recheck_revoked(tmp_path, monkeypatch):
+    """R2: AuthorizedStreamWriter rechecks the grant at every write boundary.
+
+    Uses the only stream path in the ratified capability set —
+    `GET /api/chat/stream` (chat scope) — via the real handler class.
+    """
+    import queue
+    from api import routes
+    app = _r2_app(tmp_path, monkeypatch)
+    events = queue.Queue()
+    cleaned = threading.Event()
+
+    class Stream:
+        def subscribe(self):
+            return events
+
+        def unsubscribe(self, subscriber):
+            cleaned.set()
+
+    monkeypatch.setitem(routes.STREAMS, 'p2-revoke-test', Stream())
+    monkeypatch.setattr(routes, '_stream_id_visible_to_request_profile', lambda *a: True)
+    monkeypatch.setattr(routes, '_sse_replay_run_journal_gap_checked', lambda *a, **kw: (False, None))
+    monkeypatch.setattr(routes, '_SSE_HEARTBEAT_INTERVAL_SECONDS', 0.05)
+
+    import http.client
+    conn = http.client.HTTPConnection('127.0.0.1', app['port'], timeout=5)
+    try:
+        conn.request('GET', '/api/chat/stream?stream_id=p2-revoke-test', headers=app['pair_headers'])
+        response = conn.getresponse()
+        assert response.status == 200
+        # First heartbeat proves the write path succeeded pre-revocation.
+        assert response.readline() == b': heartbeat\n'
+        assert response.readline() == b'\n'
+        assert app['call']('POST', app['ext'].PREFIX + 'revoke', {}, app['pair_headers'])[0] == 200
+        assert cleaned.wait(3), 'Revoked stream remained subscribed'
+        assert b'secret' not in response.read()
+    finally:
+        conn.close()
+    app['shutdown']()
