@@ -166,10 +166,16 @@
     build:(function(){ try{ return String(window.__HERMES_WEBUI_BUNDLE_VERSION__||'spike'); }catch(_){ return 'spike'; } })()
   };
 
-  function _post(msg){ try{ PARENT_TARGET.postMessage(msg,'*'); }catch(_){} }
-  /* '*' target origin on postMessage is safe here: the payload carries no
-   * secrets (bearer never enters the frame, §11.8) and the shell validates us.
-   * Inbound messages ARE origin-checked strictly below. */
+  function _post(msg){
+    /* S3 (SEC-AUDIT-P2): before the handshake the only outbound message is
+     * `ready` in reply to a verified-shape hello, and the payload carries no
+     * secrets (bearer never enters the frame, §11.8) — '*' is the bootstrap
+     * target. After the pin exists, every postMessage is restricted to the
+     * pinned shell origin (defense-in-depth: a same-origin XSS can no longer
+     * observe broker traffic addressed to the real parent). */
+    var target = broker.pinnedOrigin || '*';
+    try{ PARENT_TARGET.postMessage(msg, target); }catch(_){}
+  }
 
   function _uuid(){
     try{ return crypto.randomUUID(); }
@@ -190,7 +196,12 @@
       try{
         var declared=null;
         try{ declared=new URLSearchParams(location.search).get('embed_parent'); }catch(_){}
-        if(declared && ev.origin!==declared) return;              // pin to declared ancestor
+        /* S4 (SEC-AUDIT-P2): a declared embed_parent is authoritative — the
+         * first hello MUST match it, not merely fail to contradict it. The
+         * shell always passes it, so a same-origin forgery that omits or
+         * mismatched the declaration is rejected instead of pinned. */
+        if(declared && ev.origin!==declared) return;
+        if(declared) broker.declaredParent=declared;
       }catch(_){}
     }
     broker.usedNonces[d.nonce]=true;
