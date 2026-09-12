@@ -67,8 +67,32 @@
     'hermes-webui-server-stopped',
     'hermes-webui-model'
   ];
+  /* R4 (PHASE2-CONTRACT-DELTAS): settings mirrors are WRITE-suppressed in
+   * embed mode even when GET /api/settings succeeds — boot applies settings
+   * read-only, never persisting them back to the embed namespace. Reads still
+   * resolve (namespaced, normally absent → shipped defaults). */
+  var SETTINGS_MIRROR_WRITE_KEYS = [
+    'hermes-lang',
+    'hermes-default-message-mode',
+    'hermes-busy-input-mode',
+    'hermes-auto-scroll-follow',
+    'hermes-tts-engine',
+    'hermes-tts-voice',
+    'hermes-tts-rate',
+    'hermes-tts-pitch',
+    'hermes-voice-silence-ms',
+    'hermes-raw-audio-mode',
+    'hermes-tts-enabled',
+    'hermes-dictation-append',
+    'hermes-mic-continuous',
+    'hermes-voice-mode-button',
+    'hermes-voice-continuous',
+    'mic_force_mediarecorder'
+  ];
   var SUPPRESSED_WRITE_SET = {};
   for(var _i=0;_i<SUPPRESSED_WRITE_KEYS.length;_i++) SUPPRESSED_WRITE_SET[SUPPRESSED_WRITE_KEYS[_i]]=true;
+  var SETTINGS_MIRROR_WRITE_SET = {};
+  for(var _j=0;_j<SETTINGS_MIRROR_WRITE_KEYS.length;_j++) SETTINGS_MIRROR_WRITE_SET[SETTINGS_MIRROR_WRITE_KEYS[_j]]=true;
 
   function _nsKey(key){ return STORAGE_PREFIX+String(key); }
 
@@ -80,13 +104,26 @@
       },
       setItem: function(key,value){
         if(SUPPRESSED_WRITE_SET[String(key)]) return; // suppress legacy-migration + mirror writes
+        if(SETTINGS_MIRROR_WRITE_SET[String(key)]) return; // R4: settings read-only, no mirror writes
         try{ nativeStorage.setItem(_nsKey(key),String(value)); }catch(_){}
       },
       removeItem: function(key){
         if(SUPPRESSED_WRITE_SET[String(key)]) return;
+        if(SETTINGS_MIRROR_WRITE_SET[String(key)]) return; // R4: no mirror eviction either
         try{ nativeStorage.removeItem(_nsKey(key)); }catch(_){}
       },
-      clear: function(){ try{ nativeStorage.clear(); }catch(_){} },
+      /* Prefixed clear: must never wipe keys belonging to the ordinary WebUI
+       * tab or another embed generation (R6 storage fencing). */
+      clear: function(){
+        try{
+          var doomed=[];
+          for(var i=0;i<nativeStorage.length;i++){
+            var k=nativeStorage.key(i);
+            if(k!==null && String(k).indexOf(STORAGE_PREFIX)===0) doomed.push(k);
+          }
+          for(var j=0;j<doomed.length;j++){ try{ nativeStorage.removeItem(doomed[j]); }catch(_){} }
+        }catch(_){}
+      },
       key: function(i){
         try{ return nativeStorage.key(i); }catch(_){ return null; }
       },
@@ -124,7 +161,8 @@
     ready:false,
     pinnedOrigin:null,
     usedNonces:{},          // §11.3 single-use nonce
-    caps:['stream','settings-read'],
+    caps:['stream','settings-read'], // R7: caps the frame actually provides (media/upload deferred to Phase 3)
+    capsSource:'static',    // R7: where the caps list came from (static adapter contract, not negotiated)
     build:(function(){ try{ return String(window.__HERMES_WEBUI_BUNDLE_VERSION__||'spike'); }catch(_){ return 'spike'; } })()
   };
 
@@ -143,7 +181,9 @@
     if(!d||d.t!=='hello'||d.v!==1) return;
     if(typeof d.gen!=='string'||d.gen!==GEN) return;              // generation fence (§2)
     if(typeof d.nonce!=='string'||!d.nonce) return;
-    if(broker.usedNonces[d.nonce]) return;                        // §11.3 replay
+    if(broker.usedNonces[d.nonce]) return;                        // §11.3 replay — rejected even after a completed handshake
+    /* Record EVERY nonce we see, including post-handshake hellos, so nonce
+     * reuse is permanently rejected regardless of handshake state. */
     if(broker.ready) return;                                      // single handshake
     if(broker.pinnedOrigin!==null && ev.origin!==broker.pinnedOrigin) return; // §11.1
     if(typeof broker.pinnedOrigin!=='string'){
@@ -159,6 +199,24 @@
     _post({t:'ready',v:1,gen:GEN,nonce:d.nonce,server:{build:broker.build,caps:broker.caps.slice()}});
     _drainPending();
   }
+
+  /* R3 degraded-mode disclosure: broker-policy failures are surfaced as a
+   * small non-intrusive notice instead of silent deadness. The 5 fail-closed
+   * feed families (R1: SSE event feeds are NOT device-auth routes in Phase 2)
+   * emit broker:policy errors; every distinct degraded feature path is
+   * disclosed once, no toast spam. */
+  var _degradedPaths={};
+  function _recordDegraded(kind,reason){
+    try{
+      var key=String(kind||'unknown')+'|'+String(reason||'policy');
+      if(_degradedPaths[key]) return;
+      _degradedPaths[key]=true;
+      if(typeof window.__hermesEmbedDegradedNotice==='function'){
+        window.__hermesEmbedDegradedNotice(kind,reason);
+      }
+    }catch(_){}
+  }
+  window.__hermesEmbedRecordDegraded=_recordDegraded;
 
   window.addEventListener('message',function(ev){
     if(broker.pinnedOrigin!==null && ev.origin!==broker.pinnedOrigin) return; // §11.1 strict after pin
@@ -241,6 +299,10 @@
     if(d.status===0){
       var err=new Error('broker:'+(d.error||'network'));
       err.brokerError=d.error||'network';
+      /* R3: broker policy failures (fail-closed feeds) must be disclosed, not
+       * silently swallowed by the caller. Only the policy family counts as a
+       * degraded-mode signal — timeouts/network are retried paths. */
+      if(d.error==='policy') _recordDegraded('request:'+String(entry.url||''),'policy');
       entry.reject(err);
       return;
     }
@@ -291,7 +353,10 @@
     var p=String(path).replace(/^\/+/,'');
     var best=null;
     for(var k in SUB_KINDS){ if(p===k||p.indexOf(k+'?')===0||p.indexOf(k)===0){ if(!best||k.length>best.length) best=k; } }
-    return best?SUB_KINDS[best]:'chat';
+    /* Defense in depth (R7 hardening): unknown feed paths get NO kind — the
+     * stream-sub is never even posted parent-side, so a frame cannot smuggle
+     * a subscription for a feed the shell never allowlisted. */
+    return best?SUB_KINDS[best]:null;
   }
 
   function EmbedEventSource(url,cfg){
@@ -312,6 +377,14 @@
     /* Subscription is queued until the handshake completes; _drainPending
      * flushes it. Streams to feeds outside the allowlist fail closed
      * parent-side (§4) — we surface that as an error event. */
+    /* R7 hardening: refuse construction up front for paths outside SUB_KINDS —
+     * independent of handshake state — so an unknown feed never queues, never
+     * posts a stream-sub, and is disclosed as degraded (R3), not silent. */
+    if(_kindFor(this._path)===null){
+      _recordDegraded(String(this._path||'unknown'),'policy');
+      this._fail();
+      return;
+    }
     this._subscribe();
   }
   EmbedEventSource.CONNECTING=0;
@@ -319,7 +392,16 @@
   EmbedEventSource.CLOSED=2;
   EmbedEventSource.prototype._subscribe=function(){
     if(this._closed) return;
-    _post({t:'stream-sub',sub:this._sub,kind:_kindFor(this._path),url:this._urlWithQuery(),lastEventId:this.lastEventId||''});
+    var kind=_kindFor(this._path);
+    /* R7 hardening: refuse to construct (post) streams whose kind is not in
+     * SUB_KINDS. Unknown feed paths fail closed frame-side AND are disclosed
+     * as a degraded feature rather than left silently dead (R3). */
+    if(kind===null){
+      _recordDegraded(String(this._path||'unknown'),'policy');
+      this._fail();
+      return;
+    }
+    _post({t:'stream-sub',sub:this._sub,kind:kind,url:this._urlWithQuery(),lastEventId:this.lastEventId||''});
     this._markOpen();
   };
   EmbedEventSource.prototype._urlWithQuery=function(){
@@ -423,6 +505,10 @@
     storage:__embedStorage,
     suppressedWriteKeys:SUPPRESSED_WRITE_KEYS.slice(),
     broker:broker,
+    capsSource:'static',   // R7: honest caps provenance on the inspection surface
+    caps:broker.caps.slice(),
+    degradedPaths:_degradedPaths,
+    recordDegraded:_recordDegraded,
     EmbedEventSource:EmbedEventSource,
     isBrokerable:function(u){ return _brokerable(u); }
   };

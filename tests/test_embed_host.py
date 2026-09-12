@@ -464,3 +464,276 @@ console.log(JSON.stringify({{ firstReady, afterReplay, afterEvil, afterGen }}));
     assert result["afterReplay"] == 1, "replayed nonce must be refused (§11.3)"
     assert result["afterEvil"] == 1, "wrong-origin hello must be refused (§11.1)"
     assert result["afterGen"] == 1, "generation-mismatched hello must be refused (§2)"
+
+
+# ── Phase 2 (B2): degraded disclosure, settings read-only, hardening ────────
+
+
+def test_embed_caps_source_is_static_and_caps_accurate():
+    """R7: caps provenance must be exposed as capsSource:'static'; ready caps
+    stay stream + settings-read only (media is Phase 3)."""
+    assert "capsSource:'static'" in EMBED_JS
+    assert "caps:['stream','settings-read']" in EMBED_JS
+    # no invented caps client-side (R5: no new scope names)
+    assert "'media'" not in EMBED_JS
+    assert "'cdp'" not in EMBED_JS
+    assert "'control'" not in EMBED_JS
+
+
+def test_embed_settings_mirror_keys_are_write_suppressed():
+    """R4: settings mirrors must be write-suppressed even when GET /api/settings
+    succeeds — boot applies settings read-only."""
+    assert "SETTINGS_MIRROR_WRITE_KEYS" in EMBED_JS
+    for key in ("hermes-default-message-mode", "hermes-auto-scroll-follow",
+                "hermes-tts-engine", "hermes-lang", "hermes-raw-audio-mode"):
+        assert f"'{key}'" in EMBED_JS, f"missing R4 settings-mirror key: {key}"
+    host = _extract_fn(EMBED_JS, "installEmbedStorage")
+    # setItem AND removeItem both gate settings mirrors (assert prefix enforced
+    # on both paths, plus explicit R4 gating on both write paths)
+    assert host.count("SETTINGS_MIRROR_WRITE_SET[String(key)]") >= 2
+
+
+def test_embed_storage_clear_is_prefixed():
+    """R6 hardening: clear() must only remove keys carrying the embed prefix —
+    never the ordinary WebUI tab's keys or another generation's keys."""
+    fn = _extract_fn(EMBED_JS, "installEmbedStorage")
+    # Anchor on the method definition ("clear: function()"), not the comment
+    # text ("Prefixed clear: ..."), which also contains "clear:".
+    clear_body = fn.split("clear: function()")[1].split("key: function()")[0]
+    assert "indexOf(STORAGE_PREFIX)===0" in clear_body, (
+        "clear() must remove only keys carrying the embed prefix"
+    )
+    assert "nativeStorage.clear()" not in fn, "clear() must not nuke the whole native store"
+
+
+def test_embed_kind_for_unknown_path_returns_null():
+    """R7 hardening: unknown feed paths must get no kind (no stream-sub posted)."""
+    assert "return best?SUB_KINDS[best]:null" in EMBED_JS
+    assert "if(kind===null)" in EMBED_JS
+    assert "_recordDegraded" in EMBED_JS
+
+
+def test_embed_policy_errors_are_disclosed():
+    """R3: broker policy failures must hit the degraded-disclosure listener."""
+    assert "function _recordDegraded" in EMBED_JS
+    assert "__hermesEmbedDegradedNotice" in EMBED_JS
+    assert "d.error==='policy'" in EMBED_JS
+    # boot.js hook exists and is embed-gated
+    assert "__hermesEmbedDegradedNotice" in BOOT_JS
+    assert "window.__HERMES_EMBED__!==true) return" in BOOT_JS
+
+
+@_node_tests
+def test_vm_settings_mirror_writes_never_reach_storage():
+    """Executed: R4 — settings mirror setItem/removeItem are suppressed in embed
+    mode even though reads succeed; ordinary keys still persist namespaced."""
+    source = f"""
+const EMBED_JS = {EMBED_JS!r};
+const nativeBacked = {{}};
+const nativeStorage = {{
+  getItem: k => (k in nativeBacked ? nativeBacked[k] : null),
+  setItem: (k, v) => {{ nativeBacked[k] = String(v); }},
+  removeItem: k => {{ delete nativeBacked[k]; }},
+  clear: () => {{ for (const k of Object.keys(nativeBacked)) delete nativeBacked[k]; }},
+  key: i => Object.keys(nativeBacked)[i] || null,
+  get length() {{ return Object.keys(nativeBacked).length; }},
+}};
+const window = {{ localStorage: nativeStorage }};
+const document = {{ baseURI: 'http://x/' }};
+window.document = document;
+const crypto = {{ randomUUID: () => 'uuid-1' }};
+const start = EMBED_JS.indexOf('var GEN =');
+const end = EMBED_JS.indexOf('var __embedStorage');
+const prelude = EMBED_JS.slice(start, end);
+const fnSrc = EMBED_JS.slice(EMBED_JS.indexOf('function installEmbedStorage'));
+const fnEnd = fnSrc.indexOf(String.fromCharCode(10) + '  var __embedStorage');
+eval(prelude);
+eval(fnSrc.slice(0, fnEnd));
+const store = installEmbedStorage(nativeStorage);
+
+// R4: settings fetch SUCCEEDS in embed mode, boot then mirrors the settings —
+// every mirror write must be swallowed. Assert per-key.
+const settingsKeys = ['hermes-default-message-mode','hermes-auto-scroll-follow',
+  'hermes-tts-engine','hermes-lang','hermes-raw-audio-mode','hermes-tts-rate',
+  'hermes-tts-voice','mic_force_mediarecorder'];
+const written = [];
+const origSet = nativeStorage.setItem;
+nativeStorage.setItem = (k,v) => {{ written.push(k); origSet(k,v); }};
+settingsKeys.forEach(k => store.setItem(k, 'x'));
+settingsKeys.forEach(k => store.removeItem(k));
+const settingsWrites = written.length;
+// ordinary view-local key still persists, namespaced
+store.setItem('hermes-panel-w', '320');
+const ordinaryOk = nativeBacked['hermes-embed-0-hermes-panel-w'] === '320';
+// reads of settings mirrors still resolve from the (empty) namespace → null
+const settingsRead = store.getItem('hermes-default-message-mode');
+console.log(JSON.stringify({{ settingsWrites, ordinaryOk, settingsRead }}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["settingsWrites"] == 0, (
+        "R4: no settings mirror setItem/removeItem may reach native storage "
+        "in embed mode even when the settings fetch succeeds"
+    )
+    assert result["ordinaryOk"] is True
+    assert result["settingsRead"] is None
+
+
+@_node_tests
+def test_vm_clear_only_removes_prefixed_keys():
+    """Executed: R6 — clear() removes only hermes-embed-<gen>- keys."""
+    source = f"""
+const EMBED_JS = {EMBED_JS!r};
+const nativeBacked = {{
+  'hermes-embed-0-own-key': 'own',
+  'hermes-embed-1-other-gen': 'othergen',
+  'hermes-webui-tab-order': 'chat,kanban',
+  'hermes-theme': 'dark',
+}};
+const nativeStorage = {{
+  getItem: k => (k in nativeBacked ? nativeBacked[k] : null),
+  setItem: (k, v) => {{ nativeBacked[k] = String(v); }},
+  removeItem: k => {{ delete nativeBacked[k]; }},
+  clear: () => {{ for (const k of Object.keys(nativeBacked)) delete nativeBacked[k]; }},
+  key: i => Object.keys(nativeBacked)[i] || null,
+  get length() {{ return Object.keys(nativeBacked).length; }},
+}};
+const window = {{ localStorage: nativeStorage }};
+const document = {{ baseURI: 'http://x/' }};
+window.document = document;
+const crypto = {{ randomUUID: () => 'uuid-1' }};
+const start = EMBED_JS.indexOf('var GEN =');
+const end = EMBED_JS.indexOf('var __embedStorage');
+const prelude = EMBED_JS.slice(start, end);
+const fnSrc = EMBED_JS.slice(EMBED_JS.indexOf('function installEmbedStorage'));
+const fnEnd = fnSrc.indexOf(String.fromCharCode(10) + '  var __embedStorage');
+eval(prelude);
+eval(fnSrc.slice(0, fnEnd));
+const store = installEmbedStorage(nativeStorage);
+store.clear();
+console.log(JSON.stringify({{
+  ownGone: !('hermes-embed-0-own-key' in nativeBacked),
+  otherGenKept: nativeBacked['hermes-embed-1-other-gen'] === 'othergen',
+  ordinaryTabKept: nativeBacked['hermes-webui-tab-order'] === 'chat,kanban',
+  themeKept: nativeBacked['hermes-theme'] === 'dark',
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["ownGone"] is True, "clear() must remove own generation's keys"
+    assert result["otherGenKept"] is True, "clear() must not touch other generations (R6 fencing)"
+    assert result["ordinaryTabKept"] is True, "clear() must not touch the ordinary WebUI tab"
+    assert result["themeKept"] is True
+
+
+@_node_tests
+def test_vm_unknown_feed_kind_is_refused_and_disclosed():
+    """Executed: R7 hardening — a stream for a path outside SUB_KINDS posts no
+    stream-sub, fires error, and is disclosed as a degraded feature (R3)."""
+    source = f"""
+globalThis.location = {{ search: '?hermes_embed=1&gen=g1', origin: 'http://frame' }};
+const EMBED_JS = {EMBED_JS!r};
+const parentMessages = [];
+const window = {{
+  location: globalThis.location,
+  parent: {{ postMessage: (m) => parentMessages.push(m) }},
+  addEventListener: (type, fn) => {{ window['_on_' + type] = fn; }},
+}};
+window.self = window;
+const document = {{ baseURI: 'http://frame/' }};
+window.document = document;
+const crypto = {{ randomUUID: () => 'op-u' }};
+eval(EMBED_JS);
+const ES = window.EventSource;
+const notices = [];
+window.__hermesEmbedDegradedNotice = (kind, reason) => notices.push({{kind, reason}});
+const es = new ES('http://frame/api/sneaky/unknown/feed?x=1', {{}});
+const errFired = [];
+es.addEventListener('error', () => errFired.push(true));
+const subs = parentMessages.filter(m => m.t === 'stream-sub');
+console.log(JSON.stringify({{
+  subsPosted: subs.length,
+  readyState: es.readyState,
+  degradedRecorded: typeof window.__hermesEmbedRecordDegraded === 'function',
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["subsPosted"] == 0, "unknown feed paths must not post stream-sub"
+    assert result["readyState"] == 2, "refused stream must fail closed (CLOSED)"
+
+
+@_node_tests
+def test_vm_nonce_reuse_rejected_after_completed_handshake():
+    """Executed: §11.3 hardening — nonce reuse is rejected even after the
+    handshake already completed (usedNonces persists post-ready)."""
+    source = f"""
+const EMBED_JS = {EMBED_JS!r};
+const parentMessages = [];
+const location = {{ search: '?hermes_embed=1&gen=g1', origin: 'http://frame' }};
+const window = {{
+  location: location,
+  parent: {{ postMessage: (m) => parentMessages.push(m) }},
+  addEventListener: (type, fn) => {{ window['_on_' + type] = fn; }},
+}};
+window.self = window;
+const document = {{ baseURI: 'http://frame/' }};
+window.document = document;
+const crypto = {{ randomUUID: () => 'op-x' }};
+eval(EMBED_JS);
+function hello(origin, nonce, gen) {{
+  window._on_message({{ origin, data: {{ t:'hello', v:1, gen: gen||'g1', nonce }} }});
+}}
+hello('http://shell', 'n1');
+const firstReady = parentMessages.filter(m => m.t === 'ready').length;
+// post-handshake hellos with fresh + reused nonces: none may produce another ready
+hello('http://shell', 'n2');
+hello('http://shell', 'n1');
+const afterPostHandshake = parentMessages.filter(m => m.t === 'ready').length;
+const usedNoncesTracked = parentMessages.filter(m => m.t === 'ready').length >= 1;
+console.log(JSON.stringify({{ firstReady, afterPostHandshake, usedNoncesTracked }}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["firstReady"] == 1
+    assert result["afterPostHandshake"] == 1, (
+        "no ready may be emitted post-handshake, and a reused nonce (n1) must "
+        "stay rejected after the completed handshake"
+    )
+
+
+@_node_tests
+def test_vm_degraded_policy_error_disclosed_once():
+    """Executed: R3 — a brokered fetch failing with error:'policy' surfaces the
+    degraded notice exactly once per feature path, never silent."""
+    source = f"""
+globalThis.location = {{ search: '?hermes_embed=1&gen=g1', origin: 'http://frame' }};
+const EMBED_JS = {EMBED_JS!r};
+const parentMessages = [];
+const window = {{
+  location: globalThis.location,
+  parent: {{ postMessage: (m) => parentMessages.push(m) }},
+  addEventListener: (type, fn) => {{ window['_on_' + type] = fn; }},
+  fetch: () => {{ throw new Error('NATIVE_FETCH_USED'); }},
+}};
+window.self = window;
+const document = {{ baseURI: 'http://frame/' }};
+window.document = document;
+// Unique op ids: a constant mock collides both fetches into one pending op,
+// so only one promise ever settles and Promise.all hangs.
+let __opSeq = 0;
+const crypto = {{ randomUUID: () => 'op-' + (++__opSeq) }};
+eval(EMBED_JS);
+const notices = [];
+window.__hermesEmbedDegradedNotice = (kind, reason) => notices.push(String(kind));
+// handshake so the fetch goes through the broker
+window._on_message({{ origin:'http://shell', data: {{ t:'hello', v:1, gen:'g1', nonce:'n1' }} }});
+const p1 = window.fetch('http://frame/api/events/stream').then(() => 'ok', e => 'err:' + e.brokerError);
+const p2 = window.fetch('http://frame/api/events/stream').then(() => 'ok', e => 'err:' + e.brokerError);
+setTimeout(() => {{
+  const reqs = parentMessages.filter(m => m.t === 'req');
+  reqs.forEach(m => window._on_message({{ origin:'http://shell', data: {{ t:'res', op:m.op, status:0, error:'policy' }} }}));
+  Promise.all([p1, p2]).then(([r1b, r2b]) => {{
+    console.log(JSON.stringify({{ r1: r1b, r2: r2b, noticeCount: notices.length, notices }}));
+  }});
+}}, 10);
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["r1"] == "err:policy" and result["r2"] == "err:policy"
+    assert result["noticeCount"] == 1, "degraded disclosure must fire once per feature path (no spam, no silence)"

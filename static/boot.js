@@ -7,6 +7,29 @@
 // restore, no URL deep-link, no checkInflightOnBoot auto-reattach.
 function _isEmbedBoot(){ return window.__HERMES_EMBED__===true; }
 
+// R3 degraded-mode disclosure (embed only): the embed-host adapter records
+// broker policy failures (fail-closed SSE feeds / denied requests). Surface
+// a small, non-intrusive, once-per-feature notice instead of silent deadness.
+// No canonical-renderer edits — this hook lives beside the embed gate only.
+(function(){
+  if(window.__HERMES_EMBED__!==true) return;
+  var _disclosed={};
+  window.__hermesEmbedDegradedNotice=function(kind,reason){
+    try{
+      var key=String(kind||'unknown')+'|'+String(reason||'policy');
+      if(_disclosed[key]) return;
+      _disclosed[key]=true;
+      var host=(typeof window.__HERMES_EMBED_HOST__==='object')?window.__HERMES_EMBED_HOST__:null;
+      if(host&&host.degradedPaths) host.degradedPaths[key]=true;
+      if(typeof showToast==='function'){
+        showToast('Some live features are unavailable in embedded view ('+kind+').',4000,'warning');
+      }else if(typeof console!=='undefined'&&console.info){
+        console.info('[embed] degraded feature', kind, reason);
+      }
+    }catch(_){}
+  };
+})();
+
 (function(){
   // Clear stale stop-server flag on successful page load (server is reachable)
   try{localStorage.removeItem('hermes-webui-server-stopped');}catch(_){}
