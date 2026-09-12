@@ -38,14 +38,14 @@ CHAT_GET = set(('session sessions sessions/search media sidecar/identity session
     'session/usage session/export session/draft session/conversation-rounds '
     'session/compress/status session/worktree/status chat/stream/status chat/stream chat/cancel '
     'models models/live models/catalog workspaces commands prompts personalities '
-    'approval/pending clarify/pending background/status transcribe/capability '
-    'profile/active').split())
+    'approval/pending clarify/pending session/yolo background/status transcribe/capability '
+    'profile/active settings profiles reasoning projects list').split())
 CHAT_POST = set(('session/new session/rename session/archive session/pin session/draft '
     'session/update session/delete session/duplicate session/branch session/clear '
     'session/retry session/undo session/truncate session/compress/start '
     'session/title/regenerate chat/start chat/steer chat btw upload '
     'upload/extract approval/respond clarify/respond bg-task-complete-ack '
-    'transcribe tts background').split())
+    'transcribe tts background client-events/log').split())
 CONTROL_GET = set(('settings providers providers/self-hosted provider/quota '
     'provider/cost-history skills skills/content skills/usage memory crons '
     'crons/status crons/recent crons/history crons/output crons/delivery-options '
@@ -98,6 +98,34 @@ def allowed(method, path, scopes):
                 (CONTROL_GET if method == 'GET' else CONTROL_POST if method == 'POST' else set()))
             or ('cdp' in scopes and ((method == 'POST' and route in CDP_POST)
                 or (method == 'GET' and route == 'sidecar/cdp/relays'))))
+
+
+# Embed client telemetry is a bounded, untrusted sink: device bearers may only
+# POST small diagnostic payloads here (R1). Cookie-authenticated requests keep
+# the existing 4KB handler cap in routes.py; this guards the bearer path where
+# the generic 20MB read_body limit would otherwise apply.
+CLIENT_EVENTS_LOG_MAX_BODY_BYTES = 8192
+
+
+def request_body_too_large(handler):
+    """True when this request carries a Content-Length over its route budget.
+
+    Only bearer-authenticated POSTs to the client telemetry sink are budgeted
+    here. Returns False for any handler shape that lacks the attributes (mock
+    handlers in legacy tests and ordinary requests are untouched).
+    """
+    try:
+        if (handler.command != 'POST'
+                or urlparse(handler.path).path != '/api/client-events/log'
+                or getattr(handler, '_extension_principal', None) is None):
+            return False
+        length = int(handler.headers.get('Content-Length', '0'))
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if length > CLIENT_EVENTS_LOG_MAX_BODY_BYTES:
+        handler.close_connection = True
+        return True
+    return False
 
 
 def digest(value):
