@@ -163,7 +163,7 @@
     usedNonces:{},          // §11.3 single-use nonce
     caps:['stream','settings-read'], // R7: caps the frame actually provides (media/upload deferred to Phase 3)
     capsSource:'static',    // R7: where the caps list came from (static adapter contract, not negotiated)
-    build:(function(){ try{ return String(window.__HERMES_WEBUI_BUNDLE_VERSION__||'spike'); }catch(_){ return 'spike'; } })()
+    get build(){ try{ return String(window.__HERMES_WEBUI_BUNDLE_VERSION__||'spike'); }catch(_){ return 'spike'; } }
   };
 
   function _post(msg){
