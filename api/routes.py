@@ -15544,6 +15544,8 @@ def handle_post(handler, parsed) -> bool:
     from api import extension_auth
     if parsed.path.startswith(extension_auth.PREFIX):
         return extension_auth.handle_post(handler, parsed)
+    if extension_auth.request_body_too_large(handler):
+        return j(handler, {'error': 'payload_too_large'}, status=413) or True
     diag = RequestDiagnostics.maybe_start("POST", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
     if parsed.path == "/api/csp-report":
         if diag:
