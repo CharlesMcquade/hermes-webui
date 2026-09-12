@@ -7,6 +7,11 @@
 <!-- base href enables subpath mount support; all static paths must stay relative (no leading slash).
      MUST appear before manifest/favicon links so browsers resolve relative URLs against the
      correct base when the page is served from /session/<id> routes. See #2226. -->
+<!-- embed-host.js MUST load before every script below in embed mode: it installs
+     the namespaced localStorage wrapper, neutralizes the CSRF monkey-patch
+     (see line ~34 gate below), and replaces fetch/EventSource with broker
+     shims. See static/embed-host.js header + HOST-CONTRACT.md. -->
+<script>(function(){var _e=new URLSearchParams(location.search).get('hermes_embed')==='1'||location.pathname==='/embed';window.__HERMES_EMBED__=_e;if(_e){document.write('<script src="static/embed-host.js"><\/script>');}})()</script>
 <script>(function(){var path=location.pathname,marker='/session/',i=path.indexOf(marker),p;i>=0?p=(path.slice(0,i+1)||'/'):p=(path.endsWith('/')?path:(path.replace(/\/[^\/]*$/,'/')||'/'));document.write('<base href="'+location.origin+p+'">');})()</script>
 <link rel="icon" type="image/svg+xml" href="static/favicon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="static/favicon-32.png">
