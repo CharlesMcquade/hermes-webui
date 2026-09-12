@@ -2640,6 +2640,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _currentLiveSegmentSeq+=1;
     _assistantSegmentSeq=_currentLiveSegmentSeq;
     assistantRow.setAttribute('data-live-assistant','1');
+    // R-INH Phase 3 proof marker: canonical renderer revision tag, stamped on
+    // every live assistant row this renderer creates. Absent in revisions
+    // before this commit; presence proves the embedded panel is executing the
+    // hosted backend's messages.js, not extension-bundled renderer code.
+    assistantRow.setAttribute('data-render-proof','rinh-p3');
     assistantRow.setAttribute('data-activity-burst-id',String(_currentActivityBurstId));
     assistantRow.setAttribute('data-live-segment-seq',String(_assistantSegmentSeq));
     assistantBody=document.createElement('div');assistantBody.className='msg-body';
