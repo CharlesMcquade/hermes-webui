@@ -2742,6 +2742,15 @@ def test_rotated_session_stream_end_uses_original_stream_owner_id(tmp_path, monk
         "stream_owner_id, not the rotated continuation id"
     )
     assert end_payloads, "stream_end was never emitted by the background title worker"
+    events = list(stream_queue.queue)
+    done_index = next(i for i, (name, _) in enumerate(events) if name == 'done')
+    title_index = next(i for i, (name, _) in enumerate(events) if name == 'title')
+    end_index = next(i for i, (name, _) in enumerate(events) if name == 'stream_end')
+    assert done_index < title_index < end_index
+    assert events[done_index][1]['session']['session_id'] == continuation_id
+    assert events[title_index][1]['session_id'] == session_id
+    assert events[title_index][1]['target_session_id'] == continuation_id
+    assert events[title_index][1]['title'] == 'Rotated Title Owner'
     assert end_payloads[-1] == session_id, (
         f"stream_end carried {end_payloads[-1]!r} instead of the original stream "
         f"owner {session_id!r}; the client SSE fence would reject it and the "
