@@ -3559,14 +3559,15 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     _applyFontSize(fontSize);
     const serverContentWidth=_normalizeContentWidth(s.content_width);
     const localContentWidth=localStorage.getItem('hermes-content-width');
-    const contentWidth=localContentWidth&&localContentWidth!=='default'
+    // An explicit Default selection is still intent, including after a failed save.
+    const contentWidth=localContentWidth!==null
       ? _normalizeContentWidth(localContentWidth)
       : serverContentWidth;
     localStorage.setItem('hermes-content-width',contentWidth);
     _applyContentWidth(contentWidth);
     _syncContentWidthPicker(contentWidth);
     if(contentWidth!==serverContentWidth){
-      try{api('/api/settings',{method:'POST',body:JSON.stringify({content_width:contentWidth})});}catch(_){}
+      try{Promise.resolve(api('/api/settings',{method:'POST',body:JSON.stringify({content_width:contentWidth})})).catch(()=>{});}catch(_){}
     }
     if(typeof setLocale==='function'){
       // #7622 (round 3): the settings payload's `s.language` is

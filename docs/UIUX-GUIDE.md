@@ -122,6 +122,16 @@ intent.
 Keep scale tight. Avoid introducing near-duplicate one-off font sizes, colors,
 radius values, or spacing values when an existing token works.
 
+## Message width
+
+The composer message-width button offers Default, Wide, and Full columns and
+reflows the conversation immediately. The browser retains explicit selections,
+including Default, when appearance autosave fails or returns a partial response;
+a late response for an older selection must not revert a newer choice. The
+selected width is also saved through the appearance settings endpoint. On narrow
+screens the column stays within the available space, and enhanced Markdown tables
+scroll horizontally without widening the conversation.
+
 ## Color, depth, and shape
 
 Use one accent at a time. Semantic colors are for semantic state: success,
