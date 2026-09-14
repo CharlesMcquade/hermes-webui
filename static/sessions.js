@@ -5907,6 +5907,13 @@ function _prependTouchBatch(){
     const beforeSpacer=body.querySelector('.session-virtual-spacer[data-virtual-spacer="before"]');
     commitTargets.push({wrapper:wrapper, body:body, beforeSpacer:beforeSpacer, label:label, isNew:isNew});
   }
+  // Capture before attaching wrappers: their headers also shift live rows.
+  let anchorEl=null, anchorTopBefore=0;
+  const firstExisting=existingItems[0];
+  if(firstExisting&&typeof firstExisting.offsetTop==='number'){
+    anchorEl=firstExisting;
+    anchorTopBefore=firstExisting.offsetTop;
+  }
   // Phase 2: attach newly created wrappers to the live DOM in canonical order.
   //
   // The prepend interval is [targetStart, oldStart). commitTargets only
@@ -5976,18 +5983,14 @@ function _prependTouchBatch(){
   // adjusting scrollTop — the user's visible rows jump. Capture the first
   // existing session row's offsetTop before commit and adjust scrollTop by
   // the measured delta after commit so the user's viewport stays anchored.
-  let anchorEl=null, anchorTopBefore=0;
-  const firstExisting=existingItems[0];
-  if(firstExisting&&typeof firstExisting.offsetTop==='number'){
-    anchorEl=firstExisting;
-    anchorTopBefore=firstExisting.offsetTop;
-  }
   for(const target of commitTargets){
     const firstSession=target.body.querySelector('.session-item[data-sid]');
     const insertBeforeEl=firstSession||target.body.querySelector('.session-virtual-spacer[data-virtual-spacer="after"]')||null;
     if(insertBeforeEl) target.body.insertBefore(fragmentsByGroup[target.label], insertBeforeEl);
     else target.body.appendChild(fragmentsByGroup[target.label]);
   }
+  _sessionTouchStartIndex=targetStart;
+  _updateTouchGroupSpacers(list, state, targetStart, oldLoaded);
   // Adjust scrollTop to preserve the user's viewport anchor after the prepend
   // shrank the before-spacer and inserted real rows above the viewport.
   if(anchorEl&&typeof anchorEl.offsetTop==='number'){
@@ -5998,8 +6001,6 @@ function _prependTouchBatch(){
       list.scrollTop=Math.max(0, currentScroll+delta);
     }
   }
-  _sessionTouchStartIndex=targetStart;
-  _updateTouchGroupSpacers(list, state, targetStart, oldLoaded);
   _updateTouchSentinel(list, total, targetStart, oldLoaded);
   // Clear pending BEFORE scheduling the successor (same fix as append —
   // _scheduleContinuousBatch bumps _touchBatchToken, so if pending is still
