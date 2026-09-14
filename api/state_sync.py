@@ -250,6 +250,11 @@ def persist_session_title_authority(
     try:
         db.ensure_session(session_id=session_id, source="webui")
         candidate = db.sanitize_title(title) if hasattr(db, "sanitize_title") else title
+        # A reset is absence of a title, not a globally unique literal name.
+        # Keep the WebUI placeholder out of Agent's unique-title namespace.
+        resetting = source == "derived" and title == "Untitled"
+        if resetting:
+            candidate = None
         if source == "user":
             db.set_session_title(session_id, candidate)
         elif hasattr(db, "_execute_write"):
@@ -264,6 +269,10 @@ def persist_session_title_authority(
         else:
             db.set_auto_title_if_empty(session_id, candidate)
         persisted = _read_title_state(db, session_id)
+        if resetting:
+            if persisted != (None, source):
+                raise RuntimeError("Agent DB did not reset the session title")
+            return title, source
         if not persisted[0]:
             raise RuntimeError("Agent DB did not persist a session title")
         return persisted
