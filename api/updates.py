@@ -1758,17 +1758,15 @@ def _schedule_restart(delay: float = 2.0) -> None:
 
     from api.config import enter_restart_drain, exit_restart_drain
 
+    # Publication is synchronous and serialized with run admission. A failed
+    # publication raises before a restart worker can be launched.
+    enter_restart_drain(reason="supervised_restart")
+
     def _do():
-        # Enter the drain state BEFORE waiting: from this moment new local and
-        # Gateway run admission is refused (RunAdmissionDrainingError /
-        # 503 restart_draining), so no work can start that this process would
-        # abandon at re-exec. The marker is pid-keyed to THIS process, so the
-        # replacement generation admits normally from birth; on success the
-        # old image dies holding the marker, which is exactly the lifecycle
-        # contract (marker active until replacement or rollback).
-        enter_restart_drain(reason="supervised_restart")
         try:
             _drain_and_reexec(delay)
+        except Exception:
+            logger.exception("WebUI restart aborted before replacement")
         finally:
             # Success never returns here: os.execv replaces the image and the
             # Windows path exits the process, so a RETURN means the restart
@@ -1788,7 +1786,10 @@ def _schedule_restart(delay: float = 2.0) -> None:
         # Threads die when execv replaces the process image, so the lock is
         # released atomically by the kernel.
         with _apply_lock:
-            _wait_until_restart_safe()
+            state = _wait_until_restart_safe()
+            if state.get("restart_blocked", True):
+                logger.warning("WebUI restart aborted: drain remains blocked")
+                return
             # Purge bytecode caches so the new process imports from
             # current source.  Without this, Python may serve stale .pyc
             # files whose mtime matches the just-pulled .py files,
@@ -1845,8 +1846,12 @@ def _schedule_restart(delay: float = 2.0) -> None:
     # Return the thread so callers (and tests) can join it — the drain
     # lifecycle spans marker write through lock release, and marker removal
     # alone does not mean the thread finished unwinding.
-    thread = threading.Thread(target=_do, daemon=True)
-    thread.start()
+    try:
+        thread = threading.Thread(target=_do, daemon=True)
+        thread.start()
+    except BaseException:
+        exit_restart_drain()
+        raise
     return thread
 
 
