@@ -6500,16 +6500,8 @@ if(typeof window!=='undefined'){
       const _prevScrollTopForLog=_lastScrollTop;
       _lastScrollTop=top;
       if(movedUp){
-        // Aggressive-follow escape threshold: while Auto-follow is ON and the
-        // pane is pinned, an upward move only unpins once the tail region has
-        // actually LEFT the viewport (scrolled up more than ~one screen).
-        // Small upward moves near the bottom — trackpad jiggle, momentum
-        // overshoot, layout nudges — keep the pin and the follow writer
-        // re-snaps. Escaping follow = deliberately scrolling up a full screen,
-        // matching reader intent ("the previous turn is out of view now").
-        if(typeof window!=='undefined'&&window._autoScrollFollow&&_scrollPinned&&bottomDistance<=el.clientHeight){
-          _nearBottomCount=0;
-        }else{
+        // Reader movement releases follow even inside the last viewport.
+        // Geometry-only clamps were excluded above; proximity is not intent.
         _cancelBottomSettle();
         _nearBottomCount=0;
         _scrollPinned=false;
@@ -6521,7 +6513,6 @@ if(typeof window!=='undefined'){
             console.debug('[follow] sticky-unpin',{top,lastTop:_prevScrollTopForLog,dTop:top-(_prevScrollTopForLog??top),scrollH:el.scrollHeight,bottomDistance,wheel:_recentMessageWheelIntent(),key:_recentMessageKeyScrollIntent(),touch:_recentMessageTouchScrollIntent(),drag:(typeof _scrollbarDragActive!=='undefined'&&!!_scrollbarDragActive)});
           }
         }catch(_e){}
-        }
       }else if(movedDown&&(nearBottom||caughtPrevTail)){
         // Catching the PREVIOUS tail is decisive: re-pin immediately (no
         // debounce — at fast stream rates a second qualifying event may never
