@@ -5926,6 +5926,42 @@ def coerce_reasoning_effort_for_model(
     return raw
 
 
+def reasoning_override_key(model_id: str | None, provider_id: str | None = None) -> str:
+    """Return the exact provider-aware key used for per-model reasoning state."""
+    model = str(model_id or "").strip()
+    provider = str(provider_id or "").strip().lower()
+    if not model or model.startswith("@") or not provider or provider == "default":
+        return model
+    return f"@{provider}:{model}"
+
+
+def effective_reasoning_effort(
+    config_data: dict | None,
+    model_id: str | None,
+    *,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> str:
+    """Resolve exact model override, then global fallback, then provider default."""
+    data = config_data if isinstance(config_data, dict) else {}
+    agent_cfg = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    effort_raw = agent_cfg.get("reasoning_effort")
+    overrides = agent_cfg.get("reasoning_overrides")
+    if isinstance(overrides, dict) and model_id:
+        key = reasoning_override_key(model_id, provider_id)
+        if key in overrides:
+            effort_raw = overrides[key]
+        elif str(model_id).strip() in overrides:
+            # Compatibility with pre-provider-qualified entries.
+            effort_raw = overrides[str(model_id).strip()]
+    return coerce_reasoning_effort_for_model(
+        str(effort_raw or "").strip().lower(),
+        model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
+
+
 def get_reasoning_status(
     *,
     model_id: str | None = None,
@@ -5943,11 +5979,6 @@ def get_reasoning_status(
     display_cfg = config_data.get("display") or {}
     agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
-    effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
-    if model_id and isinstance(agent_cfg, dict):
-        overrides = agent_cfg.get("reasoning_overrides")
-        if isinstance(overrides, dict) and model_id in overrides:
-            effort_raw = overrides[model_id]
 
     resolve_model = model_id
     resolve_provider = provider_id
@@ -5982,8 +6013,8 @@ def get_reasoning_status(
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
         # Report the COERCED effort so boot/status/chip read paths agree with
         # what streaming actually sends. (Codex review of the drop-max alignment.)
-        "reasoning_effort": coerce_reasoning_effort_for_model(
-            str(effort_raw or "").strip().lower(),
+        "reasoning_effort": effective_reasoning_effort(
+            config_data,
             resolve_model,
             provider_id=resolve_provider,
             base_url=resolve_base_url,
@@ -6134,13 +6165,14 @@ def set_reasoning_effort(
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
         if model_id:
+            override_key = reasoning_override_key(model_id, provider_id)
             overrides = agent_cfg.get("reasoning_overrides")
             if not isinstance(overrides, dict):
                 overrides = {}
             if raw:
-                overrides[model_id] = raw
+                overrides[override_key] = raw
             else:
-                overrides.pop(model_id, None)
+                overrides.pop(override_key, None)
             if overrides:
                 agent_cfg["reasoning_overrides"] = overrides
             else:

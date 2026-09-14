@@ -236,6 +236,41 @@ def get_session_title_state(session_id: str, profile: Optional[str] = None):
         db.close()
 
 
+def persist_session_title_authority(
+    session_id: str,
+    title: str,
+    profile: Optional[str] = None,
+    *,
+    source: str = "user",
+):
+    """Persist an explicit title/reset to Agent state before sidecar projection."""
+    db = _get_state_db(profile=profile, strict=True)
+    if db is None:
+        return title, source
+    try:
+        db.ensure_session(session_id=session_id, source="webui")
+        candidate = db.sanitize_title(title) if hasattr(db, "sanitize_title") else title
+        if source == "user":
+            db.set_session_title(session_id, candidate)
+        elif hasattr(db, "_execute_write"):
+            db._execute_write(
+                lambda conn: conn.execute(
+                    "UPDATE sessions SET title = ?, title_source = ? WHERE id = ?",
+                    (candidate, source, session_id),
+                )
+            )
+        elif hasattr(db, "set_auto_title"):
+            db.set_auto_title(session_id, candidate, source=source)
+        else:
+            db.set_auto_title_if_empty(session_id, candidate)
+        persisted = _read_title_state(db, session_id)
+        if not persisted[0]:
+            raise RuntimeError("Agent DB did not persist a session title")
+        return persisted
+    finally:
+        db.close()
+
+
 def sync_session_title(session_id: str, title: str, profile: Optional[str] = None,
                        *, expected=None, replace: bool = False, explicit: bool = False):
     """Resolve a generated title BEFORE publishing it to the WebUI sidecar.

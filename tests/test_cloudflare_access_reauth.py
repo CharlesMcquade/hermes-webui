@@ -376,3 +376,35 @@ def test_api_form_data_transport_generates_multipart_boundary():
     assert content_type.startswith("multipart/form-data; boundary=")
     assert observed["headers"]["x-requested-with"] == "XMLHttpRequest"
     assert "boundary payload" in observed["body"]
+
+
+def test_direct_fetch_401_redirects_once_and_api_opt_out_is_preserved():
+    source = UI_JS.read_text(encoding="utf-8")
+    patch_fetch = _extract_function(source, "_patchOfflineFetch")
+    redirect = _extract_function(source, "_redirectIfUnauth")
+    is_abort = _extract_function(source, "_isAbortError")
+    browser_online = _extract_function(source, "_browserReportsOnline")
+    script = textwrap.dedent(f"""
+        let reloads=0;
+        const calls=[];
+        global.location={{href:'https://hermes.example/session/x',origin:'https://hermes.example',reload:()=>{{reloads+=1;}}}};
+        global.document={{baseURI:'https://hermes.example/'}};
+        global.navigator={{onLine:true}};
+        global.window={{location:global.location,fetch:async(input,init)=>{{calls.push(init);return {{ok:false,status:401}};}}}};
+        let _offlineFetchPatched=false;
+        let _offlineRawFetch=null;
+        let _authReloadStarted=false;
+        const _showOfflineBannerIfProbeFails=()=>Promise.resolve(false);
+        {browser_online}
+        {is_abort}
+        {redirect}
+        {patch_fetch}
+        (async()=>{{
+          _patchOfflineFetch();
+          await window.fetch('/api/direct');
+          await window.fetch('/api/bootstrap',{{__hermesRedirect401:false}});
+          await window.fetch('/api/direct-again');
+          process.stdout.write(JSON.stringify({{reloads, leaked:calls.some(c=>Object.prototype.hasOwnProperty.call(c,'__hermesRedirect401'))}}));
+        }})().catch(err=>{{console.error(err);process.exit(1);}});
+    """)
+    assert _node(script) == {"reloads": 1, "leaked": False}

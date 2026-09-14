@@ -56,6 +56,9 @@ class TestMultiOptionLeak(unittest.TestCase):
     def test_options_label_without_quotes_rejected(self):
         self.assertTrue(_is_bad_new_title("Title alternatives: Session Naming"))
 
+    def test_pipe_delimited_alternatives_rejected(self):
+        self.assertTrue(_is_bad_new_title("Dashboard | Stats | Analytics"))
+
     def test_single_quoted_phrase_still_allowed(self):
         self.assertEqual(
             _sanitize_generated_title('Understanding "quiet quitting" at work'),

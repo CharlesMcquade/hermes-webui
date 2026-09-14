@@ -16593,8 +16593,21 @@ def handle_post(handler, parsed) -> bool:
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be renamed from WebUI", 403)
         with _get_session_agent_lock(body["session_id"]):
-            from api.session_ops import apply_session_title_rename
-            apply_session_title_rename(s, body["title"])
+            from api.session_ops import AUTO_TITLE_LABELS, apply_session_title_rename
+            from api.state_sync import persist_session_title_authority
+            requested_title = str(body["title"] or "").strip()[:80] or "Untitled"
+            title_source = "derived" if requested_title.casefold() in AUTO_TITLE_LABELS else "user"
+            try:
+                accepted_title, _accepted_source = persist_session_title_authority(
+                    s.session_id,
+                    requested_title,
+                    profile=getattr(s, "profile", None) or "default",
+                    source=title_source,
+                )
+            except Exception:
+                logger.warning("Could not persist canonical title for %s", s.session_id, exc_info=True)
+                return bad(handler, "Could not persist session title", 503)
+            apply_session_title_rename(s, accepted_title)
             s.save()
         _sync_session_title_to_insights(s)
         publish_session_list_changed(
@@ -17019,6 +17032,17 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         sid = body["session_id"]
         with _get_session_agent_lock(sid):
+            from api.state_sync import persist_session_title_authority
+            try:
+                reset_title, _reset_source = persist_session_title_authority(
+                    sid,
+                    "Untitled",
+                    profile=getattr(s, "profile", None) or "default",
+                    source="derived",
+                )
+            except Exception:
+                logger.warning("session clear could not reset canonical title for %s", sid, exc_info=True)
+                return bad(handler, "Could not reset session title", 503)
             had_sidecar_messages = bool(s.messages or [])
             # Clear is a full truncate-to-empty: route through the SAME helper the
             # /api/session/truncate handler uses (single source of truth) so the
@@ -17067,7 +17091,7 @@ def handle_post(handler, parsed) -> bool:
             # reused session keeps its manual-title protection and never auto-names
             # again (#3542 lifecycle gap).
             from api.session_ops import apply_session_title_rename
-            apply_session_title_rename(s, "Untitled")
+            apply_session_title_rename(s, reset_title)
             s.save()
             persisted_clear = False
             try:
