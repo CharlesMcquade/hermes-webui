@@ -180,46 +180,29 @@ class TestBlocker1PreStartWorkerRetirement:
                 "worker participant leaked after Gateway teardown"
             )
 
-    def test_local_pre_start_source_calls_retirement(self):
-        """The local pre-start return in _run_agent_streaming() (streaming.py)
-        must call _retire_worker_cancelled_state in its early-return path."""
-        from pathlib import Path
-        streaming_src = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text()
+    @pytest.mark.parametrize("backend", ["local", "gateway"])
+    def test_pre_start_production_entry_retires_worker(self, backend, tmp_path):
+        """Call the real worker entry after cancel has removed its queue."""
+        import api.streaming as st
+        from api.gateway_chat import _run_gateway_chat_streaming
 
-        # Find the pre-start return block: the queue lookup ("q = peek_stream(stream_id)"
-        # since the lock-disciplined STREAMS reads release #7339) followed by
-        # "if q is None:" ... "return"
-        import re
-        # The pre-start block should contain _retire_worker_cancelled_state
-        # between "if q is None:" and the first "return" after it
-        m = re.search(r'q = (?:STREAMS\.get\(stream_id\)|peek_stream\(stream_id\))\s*\n\s*if q is None:.*?return', streaming_src, re.DOTALL)
-        assert m, "pre-start return block not found in streaming.py"
-        prestart_block = m.group()
-        assert '_retire_worker_cancelled_state' in prestart_block, (
-            "local pre-start return must call _retire_worker_cancelled_state to "
-            "retire the worker participant (gate-certifier blocker #1)"
-        )
-
-    def test_gateway_pre_start_source_calls_retirement(self):
-        """The Gateway pre-start return in gateway_chat.py must call
-        _retire_worker_cancelled_state in its early-return path."""
-        from pathlib import Path
-        gw_src = (Path(__file__).resolve().parents[1] / "api" / "gateway_chat.py").read_text()
-
-        import re
-        # The gateway pre-start block has _finish_gateway_run_starting(result="fallback")
-        # followed by cleanup and return.  Match from that anchor to the return statement.
-        # Use \n\s*return\b to avoid matching "return" inside comments/strings.
-        m = re.search(
-            r'_finish_gateway_run_starting\(stream_id, result="fallback"\).*?\n\s*return\b',
-            gw_src, re.DOTALL,
-        )
-        assert m, "Gateway pre-start return block not found in gateway_chat.py"
-        prestart_block = m.group()
-        assert '_retire_worker_cancelled_state' in prestart_block, (
-            "Gateway pre-start return must call _retire_worker_cancelled_state "
-            "(gate-certifier blocker #1)"
-        )
+        sid = "pre-start-production-" + backend
+        with st.STREAMS_LOCK:
+            st._set_stream_settlement_participants_locked(sid, 'cancel', 'worker')
+            st._STREAM_CANCEL_CLAIMED.add(sid)
+            st._STREAM_SETTLEMENT_TERMINAL.add(sid)
+            # cancel_stream's outer finalizer releases its claim before
+            # completing its participant; reproduce that ordering here.
+            st._STREAM_CANCEL_CLAIMED.discard(sid)
+            st._complete_stream_settlement_participant_locked(sid, 'cancel')
+        worker = st._run_agent_streaming if backend == "local" else _run_gateway_chat_streaming
+        worker("session", "question", "model", tmp_path, sid)
+        for name in (
+            '_STREAM_SETTLEMENT_PARTICIPANTS', '_STREAM_SETTLEMENT_COMPLETED',
+            '_STREAM_CANCEL_CLAIMED', '_STREAM_SETTLEMENT_TERMINAL',
+            '_STREAM_NOTICE_GENERATION', '_STREAM_FALLBACK_NOTICES',
+        ):
+            assert sid not in getattr(st, name), name
 
     def test_gateway_teardown_source_calls_retirement(self):
         """The Gateway normal teardown finally in gateway_chat.py must call
