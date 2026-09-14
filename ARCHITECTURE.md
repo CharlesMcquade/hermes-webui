@@ -217,7 +217,11 @@ legacy provenance is protected. Equal-rank refresh uses the Agent DB's
 `_execute_write` transaction with a title/source compare-and-swap because
 `set_auto_title` only upgrades provenance. Usage-only insights sync writes at
 `derived` authority and cannot consume the Agent's LLM upgrade or claim a user
-rename.
+rename. Clearing a session resets the canonical title to SQL `NULL` with
+`derived` provenance, then reads that state back before publishing the WebUI's
+`Untitled` placeholder. The placeholder is not a globally unique Agent title:
+multiple cleared sessions must coexist without title collisions. A failed reset
+still fails closed before changing the sidecar or transcript.
 
 A missing Agent installation/DB keeps standalone WebUI titling working; an
 unreadable existing DB fails without publishing the candidate. Legacy DBs without
