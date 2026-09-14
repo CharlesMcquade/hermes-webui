@@ -384,6 +384,15 @@ screenshots. This gate tests page reconstruction, journal-cursor resume, and
 subsequent fixture SSE updates. It does not test a real provider/network or PWA
 service-worker cache behavior.
 
+### Touch sidebar prepend anchor
+
+`./scripts/test.sh tests/test_touch_prepend_browser.py -q` exercises two prepends
+across absent date groups with real Chromium layout and the production stylesheet
+at desktop, tablet, and phone widths. It verifies retained row identity, canonical
+SID/group order, and exact measured scroll compensation, including group headers.
+Install Playwright and Chromium as above; otherwise this optional browser slice
+skips. It does not certify physical iPadOS momentum scrolling.
+
 ### Streaming reader intent
 
 While a response is still streaming, scroll upward with a trackpad or wheel to
