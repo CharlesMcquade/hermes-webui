@@ -4218,6 +4218,9 @@ def _strip_xml_tool_calls(text: str) -> str:
 
 def _sanitize_generated_title(text: str) -> str:
     """Sanitize LLM-generated title text before persisting to session."""
+    # Preserve newline candidate boundaries before markup normalization.
+    if _looks_like_title_option_menu(text):
+        return ''
     s = _strip_thinking_markup(text or '')
     s = re.sub(
         r'^\s*(?:[*_`~]+\s*)?(?:session\s+title|title)\s*:\s*(?:[*_`~]+\s*)?',
@@ -4226,6 +4229,8 @@ def _sanitize_generated_title(text: str) -> str:
         flags=re.IGNORECASE,
     )
     s = re.sub(r'^\s*title\s*:\s*', '', s, flags=re.IGNORECASE)
+    if _looks_like_title_option_menu(s):
+        return ''
     s = s.strip(" \t\r\n\"'`*_~")
     s = re.sub(r'\s+', ' ', s).strip()
     # Guard against chain-of-thought leakage, meta-reasoning, and trivial echo.
@@ -4241,14 +4246,13 @@ _TITLE_OPTION_MENU_RE = re.compile(
 )
 
 # Evidence that a preamble introduces MULTIPLE candidates rather than one
-# selected title: numbered/bulleted list entries or several quoted strings.
+# selected title: numbered/bulleted entries or delimited candidates.
 # Unanchored: callers may pass raw stored titles (multiline lists) OR the
 # whitespace-collapsed sanitize form, where list markers are inline.
 _TITLE_MENU_LIST_RE = re.compile(
     r'(?:[-*\u2022\u2023]|\d{1,2}[).:])\s+\S',
     flags=re.IGNORECASE,
 )
-_TITLE_MENU_QUOTED_RE = re.compile("[\u201c\u201d\"]{1,2}[^\u201c\u201d\"]{2,}[\u201c\u201d\"]{0,2}")
 
 
 def _looks_like_title_option_menu(text: str) -> bool:
@@ -4258,7 +4262,7 @@ def _looks_like_title_option_menu(text: str) -> bool:
     ``Title Suggestions: Migration Strategy`` or
     ``Here Are Some Title Options for Session Naming`` exist and must not be
     rejected. Classify as a menu only when multiple candidates follow —
-    two or more list entries, or two or more quoted items. Matching works on
+    two or more list entries, or delimiter-separated items. Matching works on
     both raw stored text and the whitespace-collapsed sanitize form.
     """
     s = str(text or '')
@@ -4268,7 +4272,22 @@ def _looks_like_title_option_menu(text: str) -> bool:
     rest = s[s_m.end():]
     if len(_TITLE_MENU_LIST_RE.findall(rest)) >= 2:
         return True
-    return len(_TITLE_MENU_QUOTED_RE.findall(rest)) >= 2
+    # Only separators outside quoted terms delimit candidates. Two quoted
+    # words in a single comparison title are not a menu.
+    candidates = []
+    start = 0
+    quote = None
+    for index, char in enumerate(rest):
+        if char in ('"', '\u201c', '\u201d'):
+            if quote is None:
+                quote = '\u201d' if char == '\u201c' else char
+            elif char == quote:
+                quote = None
+        elif quote is None and char in ',;\n':
+            candidates.append(rest[start:index].strip())
+            start = index + 1
+    candidates.append(rest[start:].strip())
+    return sum(bool(candidate) for candidate in candidates) >= 2
 
 
 def _looks_invalid_generated_title(text: str) -> bool:
@@ -4561,8 +4580,9 @@ def _latest_exchange_snippets(messages):
                 user_text = ''
                 asst_text = ''
                 break
-            if not user_text:
-                user_text = candidate
+            user_text = candidate
+            # Never cross a user boundary to borrow an older assistant reply.
+            break
         if user_text and asst_text:
             break
     return user_text[:500], asst_text[:500]
@@ -5567,7 +5587,11 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 _put_title_status(put_event, session_id, source, fallback_reason, effective_title, raw_preview)
             else:
                 _put_title_status(put_event, session_id, source, llm_status, effective_title, raw_preview)
-            put_event('title', {'session_id': session_id, 'title': effective_title})
+            put_event('title', {
+                'session_id': stream_owner_id or session_id,
+                'target_session_id': session_id,
+                'title': effective_title,
+            })
             # Sync the generated title to state.db so `hermes sessions list` shows it.
             try:
                 from api.state_sync import sync_session_title
