@@ -9729,6 +9729,10 @@ class RunAdmissionDrainingError(RuntimeError):
     """Raised when this WebUI process is draining for a supervised restart."""
 
 
+# A fresh interpreter image owns a fresh token, including same-PID POSIX exec.
+_RESTART_DRAIN_GENERATION = uuid.uuid4().hex
+
+
 def _restart_drain_marker_path(pid: int | None = None) -> Path:
     root = Path(
         os.getenv("HERMES_WEBUI_RESTART_DRAIN_DIR")
@@ -9739,7 +9743,19 @@ def _restart_drain_marker_path(pid: int | None = None) -> Path:
 
 def restart_drain_active() -> bool:
     """Return whether this exact WebUI process generation is draining."""
-    return _restart_drain_marker_path().exists()
+    path = _restart_drain_marker_path()
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    # Legacy/unreadable markers fail closed. Only a positively identified old
+    # image can be retired; exec keeps PID but cannot keep the image token.
+    generation = marker.get("generation") if isinstance(marker, dict) else None
+    if isinstance(generation, str) and generation and generation != _RESTART_DRAIN_GENERATION:
+        return False
+    return True
 
 
 def enter_restart_drain(reason: str = "restart") -> None:
@@ -9750,14 +9766,19 @@ def enter_restart_drain(reason: str = "restart") -> None:
     exists, so the wait/re-exec window of a supervised restart cannot accept
     turns that the replacement generation will never see.
     """
-    path = _restart_drain_marker_path()
-    try:
+    # Serialize publication with run registration. Failure propagates to the
+    # scheduler: replacement must never proceed with admission still open.
+    with ACTIVE_RUNS_LOCK:
+        if restart_drain_active():
+            raise RunAdmissionDrainingError("A restart drain already owns admission")
+        path = _restart_drain_marker_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + f".tmp{os.getpid()}.{uuid.uuid4().hex[:8]}")
-        tmp.write_text(json.dumps({"pid": os.getpid(), "reason": str(reason or "restart"), "entered_at": time.time()}) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        logger.warning("failed to write restart-drain marker %s", path, exc_info=True)
+        try:
+            tmp.write_text(json.dumps({"pid": os.getpid(), "generation": _RESTART_DRAIN_GENERATION, "reason": str(reason or "restart"), "entered_at": time.time()}) + "\n", encoding="utf-8")
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 def exit_restart_drain() -> None:
