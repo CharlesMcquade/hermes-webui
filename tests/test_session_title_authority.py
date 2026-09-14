@@ -294,10 +294,13 @@ def test_regenerate_api_returns_exact_db_title_and_compact_projection(title_stat
     db, make, path = title_state
     s = make("authority-api", "Old automatic title", "llm")
     monkeypatch.setattr(routes, "generate_session_title_for_session", lambda *a, **kw: ("[FF] Sleeper league roster audit", "shared_title", ""))
+    events = []
+    monkeypatch.setattr(routes, "_publish_session_list_changed", lambda reason, **kwargs: events.append((reason, kwargs)))
     status, payload = _regenerate_request(monkeypatch, s)
     assert status == 200
     assert payload["title"] == payload["session"]["title"] == db.get_session_title(s.session_id) == "[FF] Sleeper league roster audit"
     _assert_projected(s, path, payload["title"])
+    assert events == [("session_title_regenerate", {"profile": "default", "session_id": s.session_id})]
 
 
 @pytest.mark.parametrize("writer", ["webui", "cli"])
@@ -318,3 +321,21 @@ def test_manual_regenerate_api_rejects_concurrent_rename(title_state, monkeypatc
     assert "changed" in payload["error"]
     assert (s.title if writer == "webui" else db.get_session_title(s.session_id)) == "New manual title"
 
+
+
+def test_explicit_title_and_reset_update_canonical_authority(title_state):
+    db, make, _path = title_state
+    s = make("authority-explicit-writer", "Old generated title", "llm")
+    accepted = state_sync.persist_session_title_authority(
+        s.session_id, "Manual title", profile="default", source="user"
+    )
+    assert accepted == ("Manual title", "user")
+    assert db.get_session_title(s.session_id) == "Manual title"
+    assert db.get_session_title_source(s.session_id) == "user"
+
+    reset = state_sync.persist_session_title_authority(
+        s.session_id, "Untitled", profile="default", source="derived"
+    )
+    assert reset == ("Untitled", "derived")
+    assert db.get_session_title(s.session_id) == "Untitled"
+    assert db.get_session_title_source(s.session_id) == "derived"

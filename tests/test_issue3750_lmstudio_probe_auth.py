@@ -683,5 +683,39 @@ agent:
     saved = config._load_yaml_config_file(config._get_config_path())
 
     assert saved["agent"]["reasoning_effort"] == "low"
-    assert saved["agent"]["reasoning_overrides"]["qwen/qwen3.8-27b"] == "medium"
+    assert saved["agent"]["reasoning_overrides"]["@lmstudio:qwen/qwen3.8-27b"] == "medium"
     assert status["reasoning_effort"] == "medium"
+
+
+def test_effective_reasoning_resolver_scopes_models_and_falls_back(monkeypatch):
+    data = {
+        "agent": {
+            "reasoning_effort": "low",
+            "reasoning_overrides": {
+                "@lmstudio:model-a": "high",
+                "@lmstudio:model-b": "medium",
+            },
+        }
+    }
+    monkeypatch.setattr(config, "coerce_reasoning_effort_for_model", lambda value, *a, **k: value)
+    assert config.effective_reasoning_effort(data, "model-a", provider_id="lmstudio") == "high"
+    assert config.effective_reasoning_effort(data, "model-b", provider_id="lmstudio") == "medium"
+    assert config.effective_reasoning_effort(data, "model-c", provider_id="lmstudio") == "low"
+    assert config.effective_reasoning_effort(data, "@lmstudio:model-a", provider_id="lmstudio") == "high"
+
+
+def test_gateway_reasoning_uses_shared_effective_resolver(monkeypatch):
+    from api import gateway_chat
+    observed = {}
+    def resolve(data, model, **kwargs):
+        observed.update(data=data, model=model, kwargs=kwargs)
+        return "xhigh"
+    monkeypatch.setattr(gateway_chat, "effective_reasoning_effort", resolve)
+    result = gateway_chat._gateway_reasoning_effort_for_request(
+        {"agent": {"reasoning_effort": "low"}},
+        model="@openai-codex:gpt-5.6-sol",
+        model_provider="openai-codex",
+    )
+    assert result == "xhigh"
+    assert observed["model"] == "@openai-codex:gpt-5.6-sol"
+    assert observed["kwargs"]["provider_id"] == "openai-codex"

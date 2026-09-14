@@ -2436,13 +2436,15 @@ function t(key, ...args) {{
   return (values[key] || key).replace(/\{{(\d+)\}}/g, (_, i) => args[Number(i)] ?? '');
 }}
 async function api() {{ return apiData; }}
-function _showUpdateBanner() {{}}
+let bannerOptions=null;
+function _showUpdateBanner(_data, options) {{ bannerOptions=options; }}
 {format_fn}
 {instruction_fn}
 {error_fn}
 {check_fn}
 (async () => {{
   await checkUpdatesNow();
+  if(!bannerOptions || bannerOptions.force !== true) throw new Error('manual check must force banner display');
   if(state.checkUpdatesStatus.textContent.indexOf('docker pull ghcr.io/nesquena/hermes-webui:latest') === -1) throw new Error('settings manual update must render pull guidance: '+state.checkUpdatesStatus.textContent);
   if(state.checkUpdatesStatus.style.color !== 'var(--accent)') throw new Error('manual update should stay in available state');
   apiData = {{ webui: {{ no_git: true, behind: 1 }}, agent: null }};
@@ -2647,7 +2649,7 @@ class TestUpdateCompareSource:
         up_to_date_idx = src.find("settings_up_to_date")
         assert up_to_date_idx != -1, "manual update up-to-date branch not found"
         block = src[up_to_date_idx:up_to_date_idx + 300]
-        assert "_showUpdateBanner(data)" in block
+        assert "_showUpdateBanner(data,{force:true})" in block
 
     def test_update_banner_auto_notice_is_weekly_per_fingerprint(self):
         src = read('static/ui.js')

@@ -185,14 +185,23 @@ function _patchOfflineFetch(){
     try{
       const input=args[0];
       const init=args[1]||{};
+      const redirect401=init.__hermesRedirect401!==false;
       let requestUrl=null;
       try{requestUrl=new URL(typeof input==='string'||input instanceof URL?input:input.url,document.baseURI||location.href);}catch(_){}
       if(requestUrl&&requestUrl.origin===location.origin){
         const headers=new Headers(init.headers||(input&&input.headers)||undefined);
         if(!headers.has('X-Requested-With'))headers.set('X-Requested-With','XMLHttpRequest');
-        args=[input,{...init,headers}];
+        const nextInit={...init,headers};
+        delete nextInit.__hermesRedirect401;
+        args=[input,nextInit];
+      } else if(Object.prototype.hasOwnProperty.call(init,'__hermesRedirect401')){
+        const nextInit={...init};
+        delete nextInit.__hermesRedirect401;
+        args=[input,nextInit];
       }
-      return await _offlineRawFetch(...args);
+      const res=await _offlineRawFetch(...args);
+      if(redirect401&&typeof _redirectIfUnauth==='function')_redirectIfUnauth(res);
+      return res;
     }
     catch(e){
       if(!_isAbortError(e)&&(e instanceof TypeError||!_browserReportsOnline())){

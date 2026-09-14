@@ -425,14 +425,14 @@ def test_set_reasoning_effort_accepts_empty_as_clear():
     def fake_save(path, data):
         saved.update(data.get("agent", {}) or {})
 
-    with mock.patch("api.config._save_yaml_config_file", side_effect=fake_save), \
+    existing = {"agent": {"reasoning_effort": "low", "reasoning_overrides": {"@zai:glm-4.6": "high"}}}
+    with mock.patch("api.config._load_yaml_config_file", return_value=existing), \
+         mock.patch("api.config._save_yaml_config_file", side_effect=fake_save), \
          mock.patch("api.config.reload_config"):
         result = cfg.set_reasoning_effort("", model_id="glm-4.6", provider_id="zai")
-    # Empty effort must not write either a global or per-model empty string.
-    assert "reasoning_effort" not in saved, (
-        f"empty effort must not set agent.reasoning_effort; saved agent cfg={saved}"
-    )
-    assert "glm-4.6" not in saved.get("reasoning_overrides", {})
+    # Empty effort removes only the selected model override; the global fallback survives.
+    assert saved.get("reasoning_effort") == "low"
+    assert "@zai:glm-4.6" not in saved.get("reasoning_overrides", {})
     assert result["reasoning_effort"] == ""
 
 
@@ -457,5 +457,5 @@ def test_set_reasoning_effort_still_accepts_valid_levels(effort):
     with mock.patch("api.config._save_yaml_config_file", side_effect=fake_save), \
          mock.patch("api.config.reload_config"):
         cfg.set_reasoning_effort(effort, model_id="glm-4.6", provider_id="zai")
-    assert saved.get("reasoning_overrides", {}).get("glm-4.6") == effort
+    assert saved.get("reasoning_overrides", {}).get("@zai:glm-4.6") == effort
     assert "reasoning_effort" not in saved
