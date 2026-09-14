@@ -188,7 +188,8 @@ function _patchOfflineFetch(){
       const redirect401=init.__hermesRedirect401!==false;
       let requestUrl=null;
       try{requestUrl=new URL(typeof input==='string'||input instanceof URL?input:input.url,document.baseURI||location.href);}catch(_){}
-      if(requestUrl&&requestUrl.origin===location.origin){
+      const sameOrigin=!!requestUrl&&requestUrl.origin===location.origin;
+      if(sameOrigin){
         const headers=new Headers(init.headers||(input&&input.headers)||undefined);
         if(!headers.has('X-Requested-With'))headers.set('X-Requested-With','XMLHttpRequest');
         const nextInit={...init,headers};
@@ -200,7 +201,8 @@ function _patchOfflineFetch(){
         args=[input,nextInit];
       }
       const res=await _offlineRawFetch(...args);
-      if(redirect401&&typeof _redirectIfUnauth==='function')_redirectIfUnauth(res);
+      // Foreign sidecars own their auth failures; never reload the WebUI for them.
+      if(sameOrigin&&redirect401&&typeof _redirectIfUnauth==='function')_redirectIfUnauth(res);
       return res;
     }
     catch(e){

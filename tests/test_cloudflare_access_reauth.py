@@ -408,3 +408,54 @@ def test_direct_fetch_401_redirects_once_and_api_opt_out_is_preserved():
         }})().catch(err=>{{console.error(err);process.exit(1);}});
     """)
     assert _node(script) == {"reloads": 1, "leaked": False}
+
+
+def test_cross_origin_sidecar_401_does_not_reload_webui():
+    """The shipped health caller must settle foreign auth failures locally."""
+    source = UI_JS.read_text(encoding="utf-8")
+    functions = "\n".join(_extract_function(source, name) for name in (
+        "_browserReportsOnline", "_isAbortError", "_redirectIfUnauth", "_patchOfflineFetch",
+    ))
+    check = _extract_function((ROOT / "static/panels.js").read_text(), "_checkExtensionSidecarHealth")
+    observed = _node(textwrap.dedent(f"""
+        let reloads=0;
+        const calls=[], health=[], runtime=[];
+        global.location={{href:'http://127.0.0.1:8787/session/history',origin:'http://127.0.0.1:8787',reload:()=>{{reloads++;}}}};
+        global.document={{baseURI:location.href}};
+        global.navigator={{onLine:true}};
+        global.window={{location,fetch:async(input,init)=>{{
+          calls.push({{url:String(input),credentials:init.credentials,
+            headers:Object.fromEntries(new Headers(init.headers).entries()),
+            leaked:Object.hasOwn(init,'__hermesRedirect401')}});
+          return {{ok:false,status:401}};
+        }}}};
+        let _offlineFetchPatched=false, _offlineRawFetch=null, _authReloadStarted=false;
+        let _extensionsSidecarMonitorSeq=1;
+        const _showOfflineBannerIfProbeFails=()=>Promise.resolve(false);
+        const _setExtensionSidecarHealth=(...args)=>health.push(args);
+        const _setExtensionSidecarRuntime=(...args)=>runtime.push(args);
+        {functions}
+        {check}
+        (async()=>{{
+          _patchOfflineFetch(); global.fetch=window.fetch;
+          await _checkExtensionSidecarHealth({{health_url:'http://127.0.0.1:9999/health'}},0,1);
+          const afterSidecar=reloads;
+          await fetch(new URL('http://127.0.0.1:9999/health'),{{__hermesRedirect401:true}});
+          await fetch(new Request('https://sidecar.example/health'),{{__hermesRedirect401:false}});
+          const afterForeign=reloads;
+          await fetch('/api/bootstrap',{{__hermesRedirect401:false}});
+          const afterOptOut=reloads;
+          await Promise.all([fetch('/api/one'),fetch('/api/two')]);
+          process.stdout.write(JSON.stringify({{afterSidecar,afterForeign,afterOptOut,reloads,calls,health,runtime}}));
+        }})().catch(err=>{{console.error(err);process.exit(1);}});
+    """))
+    assert observed["afterSidecar"] == 0
+    assert observed["afterForeign"] == 0
+    assert observed["afterOptOut"] == 0
+    assert observed["reloads"] == 1
+    assert observed["health"] == [[0, "unhealthy", "unhealthy"]]
+    assert observed["runtime"] == [[0, None]]
+    assert observed["calls"][0]["credentials"] == "omit"
+    assert all("x-requested-with" not in call["headers"] for call in observed["calls"][:3])
+    assert all(call["headers"]["x-requested-with"] == "XMLHttpRequest" for call in observed["calls"][3:])
+    assert not any(call["leaked"] for call in observed["calls"])
