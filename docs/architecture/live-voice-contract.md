@@ -69,6 +69,22 @@ Hermes, not as a second executor. The implementation lives in
 - Small spoken exchanges are mirrored as paired user/assistant turns.
   `agent_ask` persists through chat-start instead of adding a duplicate user row.
 
+## Token usage logging
+
+- The realtime call is a direct browser↔OpenAI WebRTC session: its token
+  usage never passes through the agent loop, so the browser reports it. Every
+  `response.done` whose Response carries a `usage` object is reported once to
+  `POST /api/voice/live/usage` — fire-and-forget; a reporting failure never
+  disturbs the voice session. Failed responses still report (the tokens were
+  consumed). The browser's per-connection dedupe resets on reconnect, and the
+  server dedupes again by response id.
+- The server appends each report to `voice_usage.jsonl` in the WebUI state
+  directory — the only place the audio/text token breakdown survives — and,
+  when the `sync_to_insights` setting is on, accumulates a delta into
+  state.db `session_model_usage` under task `voice_realtime` for the realtime
+  model, so per-session per-model usage queries see voice alongside typed
+  chat. Both paths are best-effort and never fatal.
+
 ## Hermes owns the work
 
 - Launch uses `_handle_chat_start`; all configured Hermes tools, skills, model,
