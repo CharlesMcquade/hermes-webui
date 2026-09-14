@@ -88,8 +88,15 @@ def main():
                             session.update(workspace=temp, model='', active_stream_id='')
                             page.evaluate("async()=>await loadSession('fixture',{force:true})")
                             assert page.evaluate("S.messages.length===52&&_oldestIdx===3250&&_messagesTruncated"), 'force refresh expanded loaded history'
-                            page.evaluate("async()=>await _loadOlderMessages()")
-                            assert page.evaluate("S.messages.length===3302&&_oldestIdx===0&&!_messagesTruncated"), 'explicit older load did not reveal history'
+                            page.evaluate("""async()=>{
+                              let pages=0;
+                              while(_messagesTruncated && pages++<200){
+                                const before=_oldestIdx;
+                                await _loadOlderMessages();
+                                if(_oldestIdx>=before)throw new Error('older pagination made no progress');
+                              }
+                            }""")
+                            assert page.evaluate("S.messages.length===3302&&_oldestIdx===0&&!_messagesTruncated"), ('explicit older load did not reveal history', page.evaluate('({n:S.messages.length,offset:_oldestIdx,truncated:_messagesTruncated})'))
                             assert page.evaluate("S.messages[0].content==='History 0'&&S.messages.at(-1).content.includes('Completed answer')"), 'older load lost content'
                             page.evaluate("S.messages=window.__paginationFull.messages.slice(3250);_oldestIdx=3250;_messagesTruncated=true;renderMessages({preserveScroll:true})")
                             race=page.evaluate("""async()=>{

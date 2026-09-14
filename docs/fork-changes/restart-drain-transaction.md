@@ -25,7 +25,15 @@ construction rollback. `tests/test_restart_drain_exec.py` runs a real POSIX exec
 in an isolated child, proves PID continuity, and registers a replacement run.
 No production process or real user state is used.
 
-This does not yet unify Gateway service restart, shutdown, synchronous chat,
-and pre-worker pending-state admission behind one coordinator. Those remain
-review blockers for the broader restart-drain feature; the health capability
-must not be interpreted as proof that every restart surface is covered.
+Gateway service restart and shutdown now acquire the same admission drain
+before waiting or launching their process/signal side effects. Blocked waits
+abort and release admission. Synchronous chat retains a registry reservation
+through persistence; streaming request preparation reserves occupancy before
+pending-state mutation. Worker registration still checks the drain separately.
+Agent updates must observe a completed Gateway restart, not merely an in-progress
+command, before scheduling replacement. Admission-surface regressions live in
+`tests/test_restart_admission_surfaces.py`.
+
+The Gateway wait currently runs synchronously before its command launch, so a
+busy restart request may wait up to the existing drain ceiling. End-to-end
+concurrent HTTP admission/worker-handoff stress remains outside these tests.

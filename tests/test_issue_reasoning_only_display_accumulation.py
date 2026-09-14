@@ -7,7 +7,23 @@ transient incremental ``reasoning`` snapshot varied. Content-distinct rows may
 legitimately share a row id in the display projection, so repair must be narrow.
 """
 
-from api import streaming
+from api import models, streaming
+
+
+def test_canonical_projection_reasoning_replay_is_idempotent():
+    row = dict(id=73, role='assistant', content='', timestamp=10.0,
+               reasoning_content='settled', api_content='{"role":"assistant","content":""}')
+    projected = models._project_state_db_message(
+        row, set(row), 'id', ['reasoning_content', 'api_content'])
+    assert projected['_state_db_row_id'] == 73
+    assert '_db_persisted' not in projected
+    rows = [projected, dict(projected, reasoning='longer snapshot')]
+    repaired = streaming._dedupe_state_backed_reasoning_rows(rows)
+    assert len(repaired) == 1
+    assert repaired[0]['reasoning'] == 'longer snapshot'
+    for other in [dict(projected, _row_id=74), dict(projected, _partial=True),
+                  dict(projected, _state_db_row_id=True), dict(projected, content='answer')]:
+        assert streaming._dedupe_state_backed_reasoning_rows([projected, other]) == [projected, other]
 
 
 def _reasoning_row(*, row_id: int | None = 73683, reasoning="partial", settled="settled", timestamp=10.0):

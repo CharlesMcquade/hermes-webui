@@ -559,38 +559,43 @@ function _harvestArtifactCandidatesFromMessages(messages){
   return out;
 }
 
-// Per-session registry of artifacts harvested from transcript rows dropped by
-// a loaded-window slice. Keyed by session id so a session switch restores the
-// right list; capped so a long-lived tab cannot grow it without bound.
-const _HEAD_ARTIFACTS_MAX_PATHS = 200;
-const _HEAD_ARTIFACTS_MAX_SESSIONS = 12;
-const _sessionHeadArtifacts = new Map();
-
-function _noteHeadArtifactsForSession(sid, messages){
-  if(!sid) return;
-  const existing = _sessionHeadArtifacts.get(sid) || [];
-  const seen = new Set(existing.map(a => a.path));
-  const merged = existing.slice();
-  for(const a of _harvestArtifactCandidatesFromMessages(messages)){
-    if(seen.has(a.path)) continue;
-    seen.add(a.path);
-    merged.push({path: a.path, kind: a.kind || 'tool'});
-    if(merged.length >= _HEAD_ARTIFACTS_MAX_PATHS) break;
+// The current session object owns the artifact projection. It is rebuilt from
+// authoritative full history, never accumulated in a bare-session page cache.
+// A transcript slice may retain this small derived list, not the dropped rows.
+function _artifactProjectionForSnapshot(session){
+  if(!session) return null;
+  const items=_harvestArtifactCandidatesFromMessages(session.messages||[]);
+  for(const tc of (session.tool_calls||[])){
+    for(const a of _artifactCandidatesFromToolCall(tc)) items.push(a);
   }
-  if(merged.length === existing.length) return;
-  if(!_sessionHeadArtifacts.has(sid) && _sessionHeadArtifacts.size >= _HEAD_ARTIFACTS_MAX_SESSIONS){
-    const oldest = _sessionHeadArtifacts.keys().next().value;
-    _sessionHeadArtifacts.delete(oldest);
-  }
-  _sessionHeadArtifacts.set(sid, merged);
+  return {session_id:session.session_id, profile:session.profile||S.activeProfile||'default',
+    revision:session.regeneration_revision, generation:_loadSessionGeneration, items};
 }
 
-function _headArtifactsForSession(sid){
-  return _sessionHeadArtifacts.get(sid) || [];
+function _artifactProjectionMatches(session, projection){
+  return !!(session&&projection&&projection.session_id===session.session_id&&
+    projection.profile===(session.profile||S.activeProfile||'default')&&
+    projection.revision===session.regeneration_revision&&
+    projection.generation===_loadSessionGeneration);
 }
 
-function _clearHeadArtifactsForSession(sid){
-  if(sid) _sessionHeadArtifacts.delete(sid);
+async function _hydrateSessionArtifactProjection(session, ownsLoad){
+  const profile=S.activeProfile||'default';
+  const generation=_loadSessionGeneration;
+  let full=session;
+  if(session._messages_truncated || session._messages_offset>0){
+    let data;
+    try{
+      data=await api(`/api/session?session_id=${encodeURIComponent(session.session_id)}&messages=1&resolve_model=0`,{timeoutMs:120000});
+    }catch(_){ return null; } // Artifact enrichment must not prevent transcript loading.
+    if(!ownsLoad() || generation!==_loadSessionGeneration || profile!==(S.activeProfile||'default')) return null;
+    full=data&&data.session;
+    if(!full || full.session_id!==session.session_id ||
+      (full.profile||profile)!==(session.profile||profile) ||
+      full.regeneration_revision!==session.regeneration_revision ||
+      full._messages_truncated || full._messages_offset>0) return null;
+  }
+  return _artifactProjectionForSnapshot(full);
 }
 
 function collectSessionArtifacts(){
@@ -611,15 +616,9 @@ function collectSessionArtifacts(){
   for(const a of _harvestArtifactCandidatesFromMessages(S.messages || [])){
     push(a.path, a.kind || 'tool');
   }
-  // Source 4: artifacts harvested from history OUTSIDE the resident loaded
-  // window. Terminal settlements slice full snapshots down to the reader's
-  // loaded boundary (_preserveLoadedMessageWindow); the dropped head rows are
-  // harvested there into a per-session registry so mutation tool calls before
-  // the boundary keep surfacing here even though they are no longer resident
-  // in S.messages. Cleared once full history is loaded (head becomes resident).
-  const sid = S.session && S.session.session_id;
-  if(sid && typeof _headArtifactsForSession === 'function'){
-    for(const a of _headArtifactsForSession(sid)) push(a.path, a.kind || 'tool');
+  const projection=S.session&&S.session._artifactProjection;
+  if(_artifactProjectionMatches(S.session,projection)){
+    for(const a of projection.items) push(a.path,a.kind||'tool');
   }
   return items.slice(0, 50);
 }

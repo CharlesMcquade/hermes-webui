@@ -1446,7 +1446,7 @@ class TestAgentUpdateRequiresGatewayRestart:
 
         def fake_gateway_restart(*, profile=None):
             gateway_restarts.append(profile)
-            return {'status': 'in_progress', 'message': 'Gateway service restart initiated (in progress)'}
+            return {'status': 'completed', 'message': 'Gateway service restart initiated (in progress)'}
 
         monkeypatch.setattr(upd, '_run_git', fake_run)
         monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
@@ -1459,7 +1459,7 @@ class TestAgentUpdateRequiresGatewayRestart:
         assert result['stash_conflict'] is True
         assert result['target'] == 'agent'
         assert result['restart_scheduled'] is True
-        assert result['gateway_restart'] == 'in_progress'
+        assert result['gateway_restart'] == 'completed'
         assert gateway_restarts == ['default']
 
     def test_apply_update_agent_without_gateway_restart_result_fails(self, tmp_path, monkeypatch):

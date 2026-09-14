@@ -58,6 +58,7 @@ def _collect_via_node(messages):
             "_artifactCandidatesFromText",
             "_artifactCandidatesFromToolCall",
             "_harvestArtifactCandidatesFromMessages",
+            "_artifactProjectionMatches",
             "collectSessionArtifacts",
         )
     )
