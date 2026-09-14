@@ -6818,7 +6818,8 @@ def _dedupe_state_backed_reasoning_rows(messages):
     thing, and WebUI's display projection can expose content-distinct rows with
     the same ``_row_id``.  Collapse only rows with durable state provenance:
 
-    * positive integer ``_row_id`` and ``_db_persisted``;
+    * positive canonical ``_state_db_row_id`` (or legacy ``_row_id`` plus
+      ``_db_persisted``), with no contradictory provenance aliases;
     * reasoning-only assistant shape, excluding live ``_partial`` rows;
     * exact timestamp and complete, non-empty ``reasoning_content`` match.
 
@@ -6835,14 +6836,20 @@ def _dedupe_state_backed_reasoning_rows(messages):
         if not isinstance(message, dict):
             out.append(message)
             continue
-        row_id = message.get('_row_id')
+        from api.models import _state_db_row_identity_details
+
+        canonical_id = message.get('_state_db_row_id')
+        row_id = canonical_id if canonical_id is not None else message.get('_row_id')
+        _, valid_identity = _state_db_row_identity_details(message)
+        durable = canonical_id is not None or message.get('_db_persisted') is True
         settled_reasoning = message.get('reasoning_content')
         timestamp = message.get('timestamp', message.get('_ts'))
         eligible = (
             isinstance(row_id, int)
             and not isinstance(row_id, bool)
             and row_id > 0
-            and message.get('_db_persisted') is True
+            and valid_identity
+            and durable
             and not message.get('_partial')
             and _is_reasoning_only_assistant_message(message)
             and isinstance(settled_reasoning, str)
