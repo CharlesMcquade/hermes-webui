@@ -50,6 +50,7 @@ from api.config import (
     load_settings,
     parse_reasoning_effort,
     coerce_reasoning_effort_for_model,
+    effective_reasoning_effort,
     _main_model_request_overrides,
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
 )
@@ -3820,6 +3821,7 @@ def _looks_invalid_generated_title(text: str) -> bool:
             # quoted alternatives, so treat that shape as a leak (yesterday's
             # `Good title options: ...` failure came through this hole).
             len(re.findall(r'"[^"]+"', s)) >= 2
+            or len([part for part in s.split("|") if part.strip()]) >= 3
             or bool(re.search(r'\b(?:options?|alternatives?|candidates?)\s*:', s, flags=re.IGNORECASE))
         )
     )
@@ -10573,10 +10575,8 @@ def _run_agent_streaming(
             # `/reasoning <level>`) and hand the parsed dict to AIAgent.  When
             # the key is absent or invalid, pass None → agent uses its default.
             try:
-                _effort_cfg = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
-                _effort_raw = _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
-                _effort = coerce_reasoning_effort_for_model(
-                    _effort_raw,
+                _effort = effective_reasoning_effort(
+                    _cfg,
                     resolved_model,
                     provider_id=resolved_provider,
                     base_url=resolved_base_url,
