@@ -1867,7 +1867,7 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
     gateway_pid_before_restart = get_active_profile_gateway_running_pid(profile=target_profile)
     restart_result = restart_active_profile_gateway(profile=target_profile)
     status = str(restart_result.get("status") or "")
-    if status in {"completed", "in_progress"}:
+    if status == "completed":
         return True, restart_result
     if status != "failed":
         return False, restart_result

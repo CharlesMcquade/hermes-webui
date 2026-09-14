@@ -12787,16 +12787,37 @@ def _handle_shutdown(handler) -> bool:
         _shutdown_log_value(getattr(handler, "path", None), max_len=240),
         _shutdown_log_value(ua, default="no-ua", max_len=240),
     )
-    j(handler, {"status": "shutting_down"})
+    from api.config import enter_restart_drain, exit_restart_drain
+    from api.updates import _wait_until_restart_safe
+
+    try:
+        enter_restart_drain(reason='shutdown')
+    except (OSError, api_config.RunAdmissionDrainingError):
+        return j(handler, {'error': 'Unable to enter shutdown drain', 'code': 'restart_draining'}, status=503)
     import signal
     import threading
 
     def _do_shutdown():
-        import time
-        time.sleep(0.3)
-        os.kill(os.getpid(), signal.SIGINT)
+        signal_sent = False
+        try:
+            state = _wait_until_restart_safe()
+            if state.get('restart_blocked', True):
+                logger.warning('Shutdown aborted: drain remains blocked')
+                return
+            os.kill(os.getpid(), signal.SIGINT)
+            signal_sent = True
+        finally:
+            # A delivered signal unwinds the server asynchronously. Keep
+            # admission shut until exit; only a blocked/failed attempt rolls back.
+            if not signal_sent:
+                exit_restart_drain()
 
-    threading.Thread(target=_do_shutdown, daemon=True).start()
+    try:
+        threading.Thread(target=_do_shutdown, daemon=True).start()
+    except BaseException:
+        exit_restart_drain()
+        raise
+    j(handler, {"status": "shutting_down"})
     return True
 
 
@@ -23097,6 +23118,36 @@ def _agent_runtime_barrier_response(
     return None
 
 
+def _run_admission_guard(*, http=False):
+    """Reserve restart occupancy before any request-side session mutation.
+
+    This short-lived registry entry bridges admission to worker registration;
+    synchronous requests retain it through persistence. It has no session_id,
+    so it cannot masquerade as a client-attachable worker or self-block the
+    per-session admission checks. Worker-side drain checks remain mandatory.
+    """
+    from functools import wraps
+
+    def decorate(fn):
+        @wraps(fn)
+        def guarded(*args, **kwargs):
+            reservation = 'admission:' + uuid.uuid4().hex
+            try:
+                api_config.register_active_run(reservation, phase='admitting')
+            except api_config.RunAdmissionDrainingError:
+                payload = {'error': 'WebUI is draining for restart', 'code': 'restart_draining'}
+                if http:
+                    return j(args[0], payload, status=503)
+                return dict(payload, _status=503)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                api_config.unregister_active_run(reservation)
+        return guarded
+    return decorate
+
+
+@_run_admission_guard()
 def _start_chat_stream_for_session(
     s,
     *,
@@ -24477,6 +24528,7 @@ def _normalize_chat_attachments(raw_attachments):
     return normalized
 
 
+@_run_admission_guard(http=True)
 def _handle_chat_sync(handler, body):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
     stale_response = _agent_runtime_barrier_response(runner_local_owned=False)

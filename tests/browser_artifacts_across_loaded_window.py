@@ -45,6 +45,10 @@ def main():
                                            workspace=temp, messages=[], message_count=0, tool_calls=[],
                                            active_stream_id='run-fixture', pending_user_message='Inspect fixture',
                                            pending_started_at=time.time(), runtime_journal_snapshot=snapshot)
+                            history = [dict(role='assistant' if i % 2 else 'user', content=f'History {i}') for i in range(3300)]
+                            for index, name in [(3199, 'OLD'), (3299, 'NEW')]:
+                                history[index]['tool_calls'] = [{'function': {'name': 'write_file', 'arguments': json.dumps({'path': f'/workspace/{name}_artifact.md'})}}]
+                            session.update(messages=history, message_count=len(history))
                             page.route('**/api/session?*', session_route(session, 'fixture', temp))
                             page.route('**/api/chat/stream/status?*', lambda r: r.fulfill(json={'active': True}))
                             page.goto(base, wait_until='load')
@@ -55,6 +59,10 @@ def main():
                             page.evaluate("window._virtualizeTranscript=false;window._chatActivityDisplayMode='compact_worklog';window._showThinking=true;window._simplifiedToolCalling=true")
                             page.evaluate("async()=>await loadSession('fixture')")
                             page.wait_for_timeout(400)
+                            cold = page.evaluate("collectSessionArtifacts().map(a=>a.path)")
+                            assert cold.count('/workspace/OLD_artifact.md') == 1, ('cold artifacts missing', cold)
+                            assert cold.count('/workspace/NEW_artifact.md') == 1, cold
+                            assert page.evaluate("_messagesTruncated && S.messages.length<3300"), page.evaluate("({n:S.messages.length,offset:_oldestIdx,truncated:_messagesTruncated})")
                             result = page.evaluate(r"""async (event)=>{
                               const history=Array.from({length:3300},(_,i)=>({role:i%2?'assistant':'user',content:'History '+i}));
                               // Old mutation lives BEFORE the loaded boundary (dropped
@@ -64,15 +72,13 @@ def main():
                               const newMutation={role:'assistant',content:'Inspect fixture',tool_calls:[{function:{name:'write_file',arguments:JSON.stringify({path:'/workspace/NEW_artifact.md'})}}]};
                               const answer='Settled answer';
                               const full=[...history,newMutation,{role:'assistant',content:answer}];
-                              S.messages=history.slice(3250);S.session.message_count=3302;
-                              _messagesTruncated=true;_oldestIdx=3250;
-                              renderMessages({preserveScroll:true});
+                              // The loaded boundary came from production loadSession pagination.
                               const source=fixtureSources.findLast(s=>s.url.includes('api/chat/stream?')&&s.readyState===1);
                               const payload={session_id:'fixture',messages:full,message_count:3302,tool_calls:[]};
                               window.__paginationFull=payload;
                               source.emit(event,{session_id:'fixture',type:event==='cancel'?'cancelled':(event==='done'?'completed':'rate_limit'),message:'Synthetic terminal',session:payload},'run-fixture:1002');
                               await new Promise(r=>setTimeout(r,1500));
-                              if(S.messages.length!==52||_oldestIdx!==3250||!_messagesTruncated)throw new Error('boundary changed '+JSON.stringify({loaded:S.messages.length,offset:_oldestIdx}));
+                              if(S.messages.length!==32||_oldestIdx!==3270||!_messagesTruncated)throw new Error('boundary changed '+JSON.stringify({loaded:S.messages.length,offset:_oldestIdx}));
                               const items=collectSessionArtifacts();
                               const paths=items.map(i=>i.path);
                               const oldCount=paths.filter(p=>p.endsWith('OLD_artifact.md')).length;
@@ -102,6 +108,18 @@ def main():
                                       truncated:_messagesTruncated};
                             }""")
                             assert after['old']==1 and after['new']==1, ('double-count after full load', after)
+                            # Derived evidence cannot cross profile/revision/generation owners.
+                            assert page.evaluate("""()=>{
+                              const s=S.session,p=s._artifactProjection;
+                              return _artifactProjectionMatches(s,p)&&
+                                !_artifactProjectionMatches({...s,profile:'other'},p)&&
+                                !_artifactProjectionMatches({...s,regeneration_revision:99},p)&&
+                                !_artifactProjectionMatches(s,{...p,generation:p.generation-1});
+                            }""")
+                            session.update(messages=[{'role':'user','content':'Replaced history'}],
+                                           message_count=1, regeneration_revision=99, tool_calls=[])
+                            page.evaluate("async()=>await loadSession('fixture',{force:true})")
+                            assert page.evaluate("collectSessionArtifacts().length===0"), 'stale artifacts after replacement'
                             assert not errors, errors
                             context.close()
                     finally:
