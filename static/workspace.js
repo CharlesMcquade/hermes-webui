@@ -45,7 +45,7 @@ async function api(path,opts={}){
       if(!requestHeaders.has('X-Requested-With'))requestHeaders.set('X-Requested-With','XMLHttpRequest');
       fetchOpts.headers=requestHeaders;
       const requestPromise=(async()=>{
-        const res=await fetch(url.href,{credentials:'include',...fetchOpts});
+        const res=await fetch(url.href,{credentials:'include',...fetchOpts,__hermesRedirect401:redirect401});
         if(!res.ok){
           // A top-level navigation lets either WebUI auth or an identity-aware
           // reverse proxy refresh its own HttpOnly session while preserving the
