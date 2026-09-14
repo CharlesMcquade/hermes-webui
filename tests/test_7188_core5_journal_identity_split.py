@@ -99,7 +99,9 @@ def test_cancel_after_compression_journals_under_original_session_id(tmp_path, m
     #    does at admission, BEFORE any compression rotation).
     config.register_stream_owner(stream_id, original_sid)
     config.register_session_writeback_owner(original_sid, stream_id)
-    config.STREAMS[stream_id] = queue.Queue()
+    channel = config.create_stream_channel()
+    subscriber, _ = channel.subscribe_with_snapshot()
+    config.STREAMS[stream_id] = channel
     config.CANCEL_FLAGS[stream_id] = threading.Event()
 
     # 3. Create a RunJournalWriter with the ORIGINAL session ID (as the
@@ -153,6 +155,14 @@ def test_cancel_after_compression_journals_under_original_session_id(tmp_path, m
         "ORIGINAL journal must contain the cancel terminal — "
         "before the fix it was journaled under the continuation ID"
     )
+
+    cancel_event = next(e for e in original_journal_after["events"] if e["event"] == "cancel")
+    live_cancel = subscriber.get_nowait()
+    assert len(live_cancel) == 3, "cancel must carry its own canonical replay cursor"
+    assert live_cancel[0] == "cancel"
+    assert live_cancel[2] == cancel_event["event_id"]
+    _, snapshot = channel.subscribe_with_snapshot()
+    assert snapshot["last_event_id"] == cancel_event["event_id"]
 
     # 7. Assert: NO continuation journal exists for this run.
     continuation_journal_path = (
