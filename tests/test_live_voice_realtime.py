@@ -172,6 +172,7 @@ def test_voice_js_uses_backend_and_agent_bridge():
     assert "api/voice/live/turn" in VOICE_JS
     assert "api/voice/live/connect" in VOICE_JS
     assert "api/voice/live/disconnect" in VOICE_JS
+    assert "api/voice/live/usage" in VOICE_JS
     assert "X-Hermes-CSRF-Token" in VOICE_JS
     # never touches OpenAI directly or embeds a key
     assert "api.openai.com" not in VOICE_JS
@@ -206,6 +207,7 @@ def test_routes_wired_v2():
     assert '"/api/voice/live/steer"' in ROUTES_PY
     assert '"/api/voice/live/status"' in ROUTES_PY
     assert '"/api/voice/live/stop"' in ROUTES_PY
+    assert '"/api/voice/live/usage"' in ROUTES_PY
 
 
 # ── v2 backend unit tests ────────────────────────────────────────────
@@ -406,6 +408,7 @@ def _run_voice_js_scenario(scenario=None):
           if(String(url).includes('/stop')) return response(200,{ok:true,cancelled:true});
           if(String(url).includes('/turn')) return response(200,{ok:true});
           if(String(url).includes('/disconnect')) return response(200,{ok:true,yolo_enabled:false});
+          if(String(url).includes('/usage')) return response(200,{ok:true});
           return response(200,{ok:true});
         };
         class FakePC{
@@ -450,7 +453,7 @@ def _run_voice_js_scenario(scenario=None):
           // generation—has finished.
           emit({type:'response.created',response:{id:'r0'}});
           emit({type:'output_audio_buffer.started',response_id:'r0'});
-          emit({type:'response.done',response:{id:'r0',status:'completed',output:[{
+          emit({type:'response.done',response:{id:'r0',status:'completed',usage:{total_tokens:30,input_tokens:20,output_tokens:10},output:[{
             type:'message',role:'assistant',content:[{type:'audio',transcript:'Released.'}]
           }]}});
           emit({type:'conversation.item.input_audio_transcription.completed',item_id:'u4',transcript:'One more thing.'});
@@ -509,6 +512,9 @@ def _run_voice_js_scenario(scenario=None):
             mirroredTurns:fetches
               .filter(f=>f.url.includes('/turn')&&f.body)
               .map(f=>JSON.parse(f.body)),
+            usageReports:fetches
+              .filter(f=>f.url.includes('/usage')&&f.body)
+              .map(f=>JSON.parse(f.body)),
             cancelEvents:count('response.cancel'),
             clearEvents:count('output_audio_buffer.clear')
           }));
@@ -556,8 +562,59 @@ def test_voice_js_gates_replies_and_settles_each_tool_once():
             "assistant_text": "Released.",
         }
     ]
+    # Exactly one usage report: only the completed response that carried a
+    # usage object (r0). r1's duplicate response.done is fenced by the
+    # completion dedupe, and responses without usage are never reported.
+    assert result["usageReports"] == [
+        {
+            "session_id": "voicejs01",
+            "response_id": "r0",
+            "usage": {"total_tokens": 30, "input_tokens": 20, "output_tokens": 10},
+        }
+    ]
     assert result["cancelEvents"] == 0
     assert result["clearEvents"] == 0
+
+
+def test_voice_usage_reported_once_per_response_only_when_present():
+    """Usage reports fire exactly once per response that carries a usage
+    object — including failed responses (tokens were consumed) — and the
+    per-connection dedupe resets on reconnect."""
+    result = _run_voice_js_scenario(r'''
+      window.toggleLiveVoice(); await delay(25);
+      // Completed response WITH usage → reported once...
+      emit({type:'response.created',response:{id:'rA'}});
+      emit({type:'response.done',response:{id:'rA',status:'completed',usage:{input_tokens:11,output_tokens:7},output:[]}});
+      // ...even when the same response.done arrives again (late duplicate).
+      emit({type:'response.done',response:{id:'rA',status:'completed',usage:{input_tokens:11,output_tokens:7},output:[]}});
+      // Completed response WITHOUT usage → never reported.
+      emit({type:'response.created',response:{id:'rB'}});
+      emit({type:'response.done',response:{id:'rB',status:'completed',output:[]}});
+      // Failed response with usage → still reported (tokens were consumed),
+      // but emitted for a NON-open response id: a failed response.done that
+      // owns the open response tears the connection down by design.
+      emit({type:'response.done',response:{id:'rC',status:'failed',usage:{input_tokens:5,output_tokens:1},output:[]}});
+      // A second completed response IS reported (per-response, not once-per-connection).
+      emit({type:'response.created',response:{id:'rD'}});
+      emit({type:'response.done',response:{id:'rD',status:'completed',usage:{input_tokens:3,output_tokens:2},output:[]}});
+      window.stopLiveVoice(true);
+      // Reconnect: usage state must reset so the same response id can be
+      // reported again on a fresh connection.
+      window.toggleLiveVoice(); await delay(25);
+      emit({type:'response.done',response:{id:'rA',status:'completed',usage:{input_tokens:9,output_tokens:9},output:[]}});
+      window.stopLiveVoice(true);
+      console.log(JSON.stringify({
+        usageReports:fetches
+          .filter(f=>f.url.includes('/usage')&&f.body)
+          .map(f=>JSON.parse(f.body))
+      }));
+    ''')
+    assert result["usageReports"] == [
+        {"session_id": "voicejs01", "response_id": "rA", "usage": {"input_tokens": 11, "output_tokens": 7}},
+        {"session_id": "voicejs01", "response_id": "rC", "usage": {"input_tokens": 5, "output_tokens": 1}},
+        {"session_id": "voicejs01", "response_id": "rD", "usage": {"input_tokens": 3, "output_tokens": 2}},
+        {"session_id": "voicejs01", "response_id": "rA", "usage": {"input_tokens": 9, "output_tokens": 9}},
+    ]
 
 
 def test_voice_gate_orders_transcripts_and_stops_only_explicit_hold():

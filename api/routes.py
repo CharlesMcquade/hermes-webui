@@ -15662,6 +15662,10 @@ def handle_post(handler, parsed) -> bool:
         from api.voice_live import handle_voice_live_stop
         return handle_voice_live_stop(handler)
 
+    if parsed.path == "/api/voice/live/usage":
+        from api.voice_live import handle_voice_live_usage
+        return handle_voice_live_usage(handler)
+
     if parsed.path == "/api/client-events/log":
         if diag:
             diag.stage("read_client_event_body")

@@ -928,3 +928,147 @@ def handle_voice_live_stop(handler):
     except Exception as e:
         print(f"[webui] voice live: stop failed: {e}", flush=True)
         return j(handler, {"ok": False, "error": "cancel failed"}, status=500)
+
+
+# ── realtime token usage logging ─────────────────────────────────────────────
+#
+# The realtime call is a direct browser↔OpenAI WebRTC session: its token usage
+# never passes through the agent loop, so nothing else records it. The browser
+# reads `response.usage` from each `response.done` event and reports it here.
+# Each report is deduped by response id, appended to a JSONL detail log (the
+# only place the audio/text token breakdown survives), and — when the
+# `sync_to_insights` setting is on — accumulated as a delta into state.db's
+# `session_model_usage` under task='voice_realtime', so /insights and
+# per-session per-model queries see voice alongside typed chat.
+
+_VOICE_USAGE_MODEL = REALTIME_MODEL
+_VOICE_USAGE_TASK = "voice_realtime"
+_USAGE_REPORT_LOCK = threading.Lock()
+_USAGE_REPORTED: set[str] = set()
+_USAGE_REPORTED_MAX = 4096
+
+
+def _usage_int(d, key) -> int:
+    try:
+        return int(d.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _voice_usage_fields(usage: dict) -> dict:
+    """Extract the token fields we record from a realtime response.usage."""
+    input_details = usage.get("input_token_details")
+    output_details = usage.get("output_token_details")
+    if not isinstance(input_details, dict):
+        input_details = {}
+    if not isinstance(output_details, dict):
+        output_details = {}
+    return {
+        "input_tokens": _usage_int(usage, "input_tokens"),
+        "output_tokens": _usage_int(usage, "output_tokens"),
+        "total_tokens": _usage_int(usage, "total_tokens"),
+        "cached_tokens": _usage_int(input_details, "cached_tokens"),
+        "reasoning_tokens": _usage_int(output_details, "reasoning_tokens"),
+        "input_token_details": input_details or None,
+        "output_token_details": output_details or None,
+    }
+
+
+def _voice_usage_log_path():
+    from api.config import STATE_DIR
+
+    return Path(STATE_DIR) / "voice_usage.jsonl"
+
+
+def _record_voice_usage_db(session_id: str, fields: dict) -> None:
+    """Best-effort delta into state.db session_model_usage. Never fatal."""
+    try:
+        from api.config import load_settings
+
+        if not load_settings().get("sync_to_insights"):
+            return
+        from api.state_sync import _get_state_db
+
+        db = _get_state_db(profile=None)
+        if db is None:
+            return
+        try:
+            db.record_auxiliary_usage(
+                session_id=session_id,
+                task=_VOICE_USAGE_TASK,
+                model=_VOICE_USAGE_MODEL,
+                billing_provider="openai",
+                billing_base_url="https://api.openai.com/v1",
+                input_tokens=int(fields.get("input_tokens") or 0),
+                output_tokens=int(fields.get("output_tokens") or 0),
+                cache_read_tokens=int(fields.get("cached_tokens") or 0),
+                reasoning_tokens=int(fields.get("reasoning_tokens") or 0),
+                api_call_count=1,
+            )
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[webui] voice live: state.db usage record failed: {e}", flush=True)
+
+
+def handle_voice_live_usage(handler):
+    """POST /api/voice/live/usage — {session_id, response_id, usage}.
+
+    Records one realtime response's token usage. The browser reports each
+    completed `response.done` exactly once; late/duplicate reports are dropped
+    here by response_id. The detail log is always written; the state.db delta
+    follows the existing `sync_to_insights` opt-in. Both paths are best-effort:
+    usage logging must never break a voice session.
+    """
+    if handler.command != "POST":
+        return bad(handler, "POST required", 405)
+    if not _auth_ok(handler):
+        return bad(handler, "unauthorized", 401)
+    try:
+        data = read_body(handler)
+    except Exception:
+        return bad(handler, "invalid request body", 400)
+
+    s, err = _require_webui_session(handler, data.get("session_id"))
+    # bad() already wrote the error response and returns None, so an invalid
+    # session id arrives here as (None, None): without the s is None guard the
+    # handler would crash on s.session_id after the 400 was already sent.
+    if err is not None or s is None:
+        return err
+    sid = s.session_id
+
+    response_id = str(data.get("response_id") or "").strip()
+    usage = data.get("usage")
+    if not response_id or not isinstance(usage, dict):
+        return bad(handler, "response_id and usage required", 400)
+
+    with _USAGE_REPORT_LOCK:
+        if response_id in _USAGE_REPORTED:
+            return j(handler, {"ok": True, "duplicate": True})
+        _USAGE_REPORTED.add(response_id)
+        if len(_USAGE_REPORTED) > _USAGE_REPORTED_MAX:
+            for old in sorted(_USAGE_REPORTED)[: len(_USAGE_REPORTED) // 2]:
+                _USAGE_REPORTED.discard(old)
+
+    fields = _voice_usage_fields(usage)
+    record = {
+        "ts": time.time(),
+        "session_id": sid,
+        "response_id": response_id,
+        "model": _VOICE_USAGE_MODEL,
+        **fields,
+    }
+    try:
+        path = _voice_usage_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _USAGE_REPORT_LOCK:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+    except Exception as e:
+        print(f"[webui] voice live: usage log write failed: {e}", flush=True)
+
+    _record_voice_usage_db(sid, fields)
+    return j(handler, {"ok": True})
