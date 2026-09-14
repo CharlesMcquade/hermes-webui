@@ -323,6 +323,27 @@ def test_manual_regenerate_api_rejects_concurrent_rename(title_state, monkeypatc
 
 
 
+def test_clear_multiple_sessions_resets_canonical_title_without_collisions(title_state, monkeypatch):
+    from urllib.parse import urlparse
+
+    db, make, path = title_state
+    sessions = [make(f"clear-authority-{i}", f"Manual title {i}", "user") for i in range(2)]
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kw: (status, payload))
+    monkeypatch.setattr(routes, "bad", lambda handler, message, status=400: (status, {"error": message}))
+    for s in [*sessions, sessions[0]]:
+        monkeypatch.setattr(routes, "read_body", lambda handler, sid=s.session_id: {"session_id": sid})
+        status, payload = routes.handle_post(
+            types.SimpleNamespace(headers={}, command="POST"), urlparse("/api/session/clear")
+        )
+        assert status == 200, payload
+        assert payload["session"]["title"] == "Untitled"
+        _assert_projected(s, path, "Untitled")
+        assert s.messages == []
+        assert db.get_session_title(s.session_id) is None
+        assert state_sync.get_session_title_state(s.session_id, "default") == (None, "derived")
+
+
 def test_explicit_title_and_reset_update_canonical_authority(title_state):
     db, make, _path = title_state
     s = make("authority-explicit-writer", "Old generated title", "llm")
@@ -337,5 +358,5 @@ def test_explicit_title_and_reset_update_canonical_authority(title_state):
         s.session_id, "Untitled", profile="default", source="derived"
     )
     assert reset == ("Untitled", "derived")
-    assert db.get_session_title(s.session_id) == "Untitled"
-    assert db.get_session_title_source(s.session_id) == "derived"
+    assert db.get_session_title(s.session_id) is None
+    assert state_sync.get_session_title_state(s.session_id, "default") == (None, "derived")
