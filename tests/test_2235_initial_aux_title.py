@@ -804,7 +804,8 @@ class TestRotatedSessionStreamEndOwner(unittest.TestCase):
             'title-target id, or the client SSE fence never closes the stream',
         )
         title_events = [d for e, d in emitted if e == 'title']
-        self.assertEqual([d['session_id'] for d in title_events], ['rotated-continuation-id'])
+        self.assertEqual([d['session_id'] for d in title_events], ['original-stream-owner-id'])
+        self.assertEqual([d['target_session_id'] for d in title_events], ['rotated-continuation-id'])
 
     def test_stream_end_defaults_to_session_id_without_rotation(self):
         from api.streaming import _run_background_title_update
