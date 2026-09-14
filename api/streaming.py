@@ -14336,9 +14336,14 @@ def cancel_stream(stream_id: str) -> bool:
             if _cancel_run_journal is not None:
                 def _publish_cancel_journaled(journaled):
                     _cancel_event_id_local = (journaled or {}).get('event_id') if isinstance(journaled, dict) else None
+                    queue_item = (
+                        ('cancel', _payload, str(_cancel_event_id_local))
+                        if _cancel_event_id_local and hasattr(q, "subscribe_with_snapshot")
+                        else ('cancel', _payload)
+                    )
+                    q.put_nowait(queue_item)
                     if _cancel_event_id_local:
                         STREAM_LAST_EVENT_ID[stream_id] = str(_cancel_event_id_local)
-                    q.put_nowait(('cancel', _payload))
                 try:
                     _cancel_run_journal.close_acceptance_fence_and_publish_terminal(
                         'cancel', _payload, _publish_cancel_journaled
