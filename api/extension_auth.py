@@ -55,6 +55,7 @@ CONTROL_GET = set(('settings providers providers/self-hosted provider/quota '
     'mcp/servers mcp/tools terminal/output reasoning goal model/auxiliary '
     'rollback/list rollback/diff notes/search notes/sources notes/item '
     'wiki/status wiki/browse wiki/page voice/live/status voice/live/capability '
+    'voice/live/usage '
     'updates/summary kanban/boards kanban/board').split())
 CONTROL_POST = set(('settings default-model model/set model/auxiliary models/refresh '
     'personality/set reasoning goal commands/exec commands/bundles/resolve '
@@ -72,6 +73,7 @@ CONTROL_POST = set(('settings default-model model/set model/auxiliary models/ref
     'terminal/close rollback/restore gateway/start gateway/stop gateway/restart '
     'share/create share/revoke voice/live/connect voice/live/disconnect '
     'voice/live/ask voice/live/sdp voice/live/steer voice/live/stop voice/live/turn '
+    'voice/live/usage '
     'admin/reload updates/check kanban/tasks').split())
 CDP_POST = {'sidecar/cdp/' + x for x in ('register', 'poll', 'respond', 'unregister', 'command')}
 

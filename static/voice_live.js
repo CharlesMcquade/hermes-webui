@@ -462,6 +462,7 @@
     if(responseId&&_completedResponses.has(responseId)) return;
     if(responseId) _completedResponses.add(responseId);
     const ownsOpenResponse=!!responseId&&_activeResponseId===responseId;
+    if(responseId) _reportUsage(response);
     if(response&&response.status==='failed'){
       if(ownsOpenResponse){
         _setState('error','Voice response failed. Reconnect voice to continue; accepted Hermes tasks remain in chat.');
@@ -538,6 +539,23 @@
     }else if(ownsOpenResponse){
       _flushResponseQueue();
     }
+  }
+
+  // ── realtime token usage reporting ───────────────────────────────────
+  // The realtime call is browser↔OpenAI WebRTC; its usage never passes
+  // through the server's agent loop. Every completed response carries a
+  // `usage` object on `response.done` — report it exactly once so the
+  // server can log it alongside typed-chat tokens. Fire-and-forget:
+  // reporting failures must never disturb the voice session.
+
+  function _reportUsage(response){
+    try{
+      const usage=response&&response.usage;
+      const responseId=String(response&&response.id||'');
+      if(!usage||!responseId) return;
+      if(!_boundSid) return;
+      void _voicePost('api/voice/live/usage',{response_id:responseId,usage:usage}).catch(()=>{ });
+    }catch(_){ }
   }
 
   function _onCompletedTranscript(msg){
