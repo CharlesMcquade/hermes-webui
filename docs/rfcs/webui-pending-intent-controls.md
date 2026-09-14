@@ -393,7 +393,11 @@ returned. Every local and gateway SSE producer appends and queue-publishes throu
 the same `RunJournalWriter.append_and_publish_sse_event()` transaction used as
 the Steer ordering domain. A sequence-N event therefore cannot release the lock
 until its live frame is queued, so Steer N+1 cannot overtake it and live SSE order
-cannot disagree with journal/replay order. The accepted HTTP
+cannot disagree with journal/replay order. Eager cancellation also publishes its
+own canonical terminal event ID on the live frame before advancing the shared
+cursor. After compression, that event remains in the admission-time session's
+journal; only session/scene persistence targets the continuation session.
+The accepted HTTP
 response carries the same `event_id`, `seq`, and event payload as SSE/replay;
 the originating browser may project it immediately and dedupe the later SSE by
 that identity. If journal persistence fails after runtime
