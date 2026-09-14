@@ -22,7 +22,7 @@ def main():
         proc, log, _, base = _start_webui_server(ROOT, env, state)
         try:
             with sync_playwright() as pw:
-                for engine in ('chromium', 'webkit'):
+                for engine in os.environ.get('BROWSERS', 'chromium,webkit').split(','):
                     browser = getattr(pw, engine).launch(headless=True)
                     try:
                         context = browser.new_context(bypass_csp=True)
