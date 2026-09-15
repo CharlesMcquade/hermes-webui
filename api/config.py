@@ -9750,10 +9750,17 @@ def restart_drain_active() -> bool:
         return False
     except (OSError, ValueError):
         return True
-    # Legacy/unreadable markers fail closed. Only a positively identified old
-    # image can be retired; exec keeps PID but cannot keep the image token.
     generation = marker.get("generation") if isinstance(marker, dict) else None
-    if isinstance(generation, str) and generation and generation != _RESTART_DRAIN_GENERATION:
+    if not generation:
+        # Pre-generation markers belong to an older implementation. A marker
+        # at our PID can only survive into this image through replacement, so
+        # retire it instead of blocking this generation indefinitely.
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            return True
+        return False
+    if isinstance(generation, str) and generation != _RESTART_DRAIN_GENERATION:
         return False
     return True
 

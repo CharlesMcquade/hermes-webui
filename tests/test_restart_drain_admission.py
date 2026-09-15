@@ -29,7 +29,7 @@ def _join_restart_thread(thread, timeout: float = 15.0) -> None:
         assert not thread.is_alive(), "restart thread did not finish in time"
 
 
-def test_current_process_drain_marker_refuses_new_run(monkeypatch, tmp_path):
+def test_legacy_current_process_drain_marker_is_retired(monkeypatch, tmp_path):
     from api import config
 
     monkeypatch.setenv("HERMES_WEBUI_RESTART_DRAIN_DIR", str(tmp_path))
@@ -37,12 +37,13 @@ def test_current_process_drain_marker_refuses_new_run(monkeypatch, tmp_path):
     marker.write_text(json.dumps({"reason": "revision_change"}) + "\n")
     stream_id = "drain-current-process"
 
-    with pytest.raises(config.RunAdmissionDrainingError):
+    try:
         config.register_active_run(stream_id, session_id="session-1")
-
-    with config.ACTIVE_RUNS_LOCK:
-        assert stream_id not in config.ACTIVE_RUNS
-
+        assert not marker.exists()
+        with config.ACTIVE_RUNS_LOCK:
+            assert config.ACTIVE_RUNS[stream_id]["session_id"] == "session-1"
+    finally:
+        _clear_run(config, stream_id)
 
 def test_other_process_drain_marker_does_not_refuse_run(monkeypatch, tmp_path):
     from api import config
@@ -74,10 +75,12 @@ def test_malformed_current_process_marker_still_refuses_run(monkeypatch, tmp_pat
 
 
 def test_chat_start_returns_retryable_maintenance_before_session_mutation(monkeypatch, tmp_path):
-    from api import routes
+    from api import config, routes
 
     monkeypatch.setenv("HERMES_WEBUI_RESTART_DRAIN_DIR", str(tmp_path))
-    (tmp_path / f"{os.getpid()}.json").write_text("{}\n")
+    (tmp_path / f"{os.getpid()}.json").write_text(
+        json.dumps({"generation": config._RESTART_DRAIN_GENERATION}) + "\n"
+    )
     observed = {}
 
     def fake_json(_handler, payload, status=200):
@@ -101,7 +104,9 @@ def test_local_worker_race_emits_terminal_retryable_event(monkeypatch, tmp_path)
     from api import config, streaming
 
     monkeypatch.setenv("HERMES_WEBUI_RESTART_DRAIN_DIR", str(tmp_path))
-    (tmp_path / f"{os.getpid()}.json").write_text("{}\n")
+    (tmp_path / f"{os.getpid()}.json").write_text(
+        json.dumps({"generation": config._RESTART_DRAIN_GENERATION}) + "\n"
+    )
     stream_id = "drain-worker-race"
     events = queue.Queue()
     with config.STREAMS_LOCK:
@@ -128,7 +133,9 @@ def test_gateway_worker_race_emits_terminal_retryable_event(monkeypatch, tmp_pat
     from api import config, gateway_chat
 
     monkeypatch.setenv("HERMES_WEBUI_RESTART_DRAIN_DIR", str(tmp_path))
-    (tmp_path / f"{os.getpid()}.json").write_text("{}\n")
+    (tmp_path / f"{os.getpid()}.json").write_text(
+        json.dumps({"generation": config._RESTART_DRAIN_GENERATION}) + "\n"
+    )
     stream_id = "drain-gateway-worker-race"
     events = queue.Queue()
     with config.STREAMS_LOCK:
