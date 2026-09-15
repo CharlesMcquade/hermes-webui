@@ -1879,7 +1879,7 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
     time.sleep(_AGENT_GATEWAY_RESTART_RETRY_DELAY_S)
     retry_result = restart_active_profile_gateway(profile=target_profile)
     retry_status = str(retry_result.get("status") or "")
-    if retry_status in {"completed", "in_progress"}:
+    if retry_status == "completed":
         return True, {
             **retry_result,
             "retry_attempted": True,
