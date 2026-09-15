@@ -74,6 +74,13 @@ def _gateway_restart_profile_context(profile: str | None = None) -> tuple[Path, 
     return active_home, raw_profile
 
 
+def _wait_until_restart_safe() -> dict:
+    # Resolve lazily to avoid the updates -> gateway_restart import cycle while
+    # keeping a stable use-site that tests and callers can replace.
+    from api.updates import _wait_until_restart_safe as wait
+    return wait()
+
+
 def restart_active_profile_gateway(
     *,
     profile: str | None = None,
@@ -95,7 +102,6 @@ def restart_active_profile_gateway(
         }
 
     from api.config import enter_restart_drain, exit_restart_drain
-    from api.updates import _wait_until_restart_safe
 
     drain_owned = False
 

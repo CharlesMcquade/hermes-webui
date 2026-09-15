@@ -14,6 +14,25 @@ def isolated_drain(monkeypatch, tmp_path):
     config.exit_restart_drain()
 
 
+
+_run_guard_for_test = routes._run_admission_guard()
+
+def test_admission_handoff_keeps_concrete_run_registered():
+    stream_id = "handoff-stream"
+
+    @_run_guard_for_test
+    def start():
+        config.register_active_run(stream_id, session_id="session-1", phase="starting")
+        return {"stream_id": stream_id}
+
+    try:
+        result = start()
+        assert result["stream_id"] == stream_id
+        assert config.ACTIVE_RUNS[stream_id]["phase"] == "starting"
+        assert not any(key.startswith("admission:") for key in config.ACTIVE_RUNS)
+    finally:
+        config.unregister_active_run(stream_id)
+
 def test_pending_start_refused_before_any_session_access(monkeypatch):
     config.enter_restart_drain()
     result = routes._start_chat_stream_for_session(
@@ -36,7 +55,7 @@ def test_gateway_restart_waits_under_drain_and_aborts_blocked(monkeypatch):
     def wait():
         observed.append(config.restart_drain_active())
         return {'restart_blocked': True, 'wait_timed_out': True}
-    monkeypatch.setattr(updates, '_wait_until_restart_safe', wait)
+    monkeypatch.setattr(gateway_restart, '_wait_until_restart_safe', wait)
     spawn = Mock(side_effect=AssertionError('must not restart'))
     monkeypatch.setattr(gateway_restart.subprocess, 'Popen', spawn)
     outcome = gateway_restart.restart_active_profile_gateway()
@@ -52,7 +71,7 @@ def test_gateway_restart_interrupted_preflight_releases_admission(monkeypatch, i
         assert config.restart_drain_active()
         raise interruption('preflight interrupted')
 
-    monkeypatch.setattr(updates, '_wait_until_restart_safe', wait)
+    monkeypatch.setattr(gateway_restart, '_wait_until_restart_safe', wait)
     spawn = Mock(side_effect=AssertionError('must not restart'))
     monkeypatch.setattr(gateway_restart.subprocess, 'Popen', spawn)
     try:

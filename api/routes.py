@@ -24170,9 +24170,17 @@ def _start_chat_stream_for_session(
         kwargs=worker_kwargs,
         daemon=True,
     )
+    # Transfer the request-level admission reservation to the concrete stream
+    # before starting the asynchronous worker. The worker upgrades this
+    # starting row when it registers, so restart safety always sees either
+    # the request reservation or the worker itself.
+    api_config.register_active_run(
+        stream_id, session_id=s.session_id, phase="starting"
+    )
     try:
         thr.start()
     except Exception:
+        api_config.unregister_active_run(stream_id)
         if backend_is_gateway:
             try:
                 from api.gateway_chat import _finish_gateway_run_starting
