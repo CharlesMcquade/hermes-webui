@@ -109,7 +109,16 @@ def restart_active_profile_gateway(
     try:
         enter_restart_drain(reason='gateway_restart')
         drain_owned = True
-        if _wait_until_restart_safe().get('restart_blocked', True):
+        try:
+            blockers = _wait_until_restart_safe()
+        except BaseException as exc:
+            # No subprocess exists yet. Cancellation (including interpreter
+            # shutdown) must not strand the process-wide admission owner.
+            # Ordinary exceptions are released by the outer error handler.
+            if not isinstance(exc, Exception):
+                release()
+            raise
+        if blockers.get('restart_blocked', True):
             release()
             return {'status': 'failed', 'message': 'Gateway restart aborted: drain remains blocked'}
         active_home, cli_profile = _gateway_restart_profile_context(profile)
