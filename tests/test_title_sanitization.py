@@ -117,6 +117,16 @@ class TestTitleOptionMenuDetection(unittest.TestCase):
             '',
         )
 
+    def test_rejects_menu_with_leading_list_marker(self):
+        for candidate in (
+            '- Here are some title options: Alpha, Beta',
+            '• Good title suggestions: One; Two',
+            '1. Title ideas: First, Second',
+        ):
+            with self.subTest(candidate=candidate):
+                self.assertEqual(_sanitize_generated_title(candidate), '')
+                self.assertTrue(_looks_invalid_generated_title(candidate))
+
     def test_persists_single_title_mentioning_suggestions(self):
         self.assertEqual(
             _sanitize_generated_title('Title Suggestions: Improving Session Naming'),
