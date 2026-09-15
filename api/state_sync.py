@@ -266,6 +266,12 @@ def persist_session_title_authority(
             )
         elif hasattr(db, "set_auto_title"):
             db.set_auto_title(session_id, candidate, source=source)
+        elif resetting:
+            # Legacy stores only expose fill-if-empty and cannot clear an
+            # existing title. Keep the clear route usable in standalone mode
+            # rather than reporting a failed reset after the conversation was
+            # already cleared from the WebUI sidecar.
+            return title, source
         else:
             db.set_auto_title_if_empty(session_id, candidate)
         persisted = _read_title_state(db, session_id)
