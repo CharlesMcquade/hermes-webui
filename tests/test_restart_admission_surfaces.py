@@ -46,6 +46,29 @@ def test_gateway_restart_waits_under_drain_and_aborts_blocked(monkeypatch):
     assert not config.restart_drain_active()
 
 
+@pytest.mark.parametrize('interruption', [KeyboardInterrupt, SystemExit])
+def test_gateway_restart_interrupted_preflight_releases_admission(monkeypatch, interruption):
+    def wait():
+        assert config.restart_drain_active()
+        raise interruption('preflight interrupted')
+
+    monkeypatch.setattr(updates, '_wait_until_restart_safe', wait)
+    spawn = Mock(side_effect=AssertionError('must not restart'))
+    monkeypatch.setattr(gateway_restart.subprocess, 'Popen', spawn)
+    try:
+        with pytest.raises(interruption):
+            gateway_restart.restart_active_profile_gateway()
+        assert not config.restart_drain_active()
+        assert not gateway_restart._GATEWAY_RESTART_LOCK.locked()
+        config.register_active_run('after-interrupted-preflight', session_id='after')
+    finally:
+        config.unregister_active_run('after-interrupted-preflight')
+        config.exit_restart_drain()
+        if gateway_restart._GATEWAY_RESTART_LOCK.locked():
+            gateway_restart._GATEWAY_RESTART_LOCK.release()
+    spawn.assert_not_called()
+
+
 def test_agent_update_does_not_accept_pending_gateway_restart(monkeypatch):
     monkeypatch.setattr(updates, 'restart_active_profile_gateway',
                         lambda **kwargs: {'status': 'in_progress'})
