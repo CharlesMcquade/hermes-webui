@@ -23328,6 +23328,11 @@ def _start_chat_stream_for_session(
     )
     try:
         thr.start()
+        is_alive = getattr(thr, "is_alive", None)
+        if not callable(is_alive) or not is_alive():
+            # Test doubles and workers that completed synchronously own no
+            # post-response lifetime; do not strand their starting row.
+            api_config.unregister_active_run(stream_id)
     except Exception:
         api_config.unregister_active_run(stream_id)
         if backend_is_gateway:
