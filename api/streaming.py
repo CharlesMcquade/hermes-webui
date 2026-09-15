@@ -3927,7 +3927,8 @@ def _sanitize_generated_title(text: str) -> str:
 
 
 _TITLE_OPTION_MENU_RE = re.compile(
-    r'^\s*(?:(?:here (?:are|is)|some|good|possible)\s+)*(?:here (?:are|is)\s+some\s+|some\s+of\s+the\s+)?'
+    r'^\s*(?:(?:[-*\u2022\u2023]|\d{1,2}[).:])\s+)?'
+    r'(?:(?:here (?:are|is)|some|good|possible)\s+)*(?:here (?:are|is)\s+some\s+|some\s+of\s+the\s+)?'
     r'(?:session\s+)?title\s+(?:options?|suggestions?|ideas?|candidates?)\s*:',
     flags=re.IGNORECASE,
 )
