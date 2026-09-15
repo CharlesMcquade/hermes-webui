@@ -280,6 +280,33 @@ def test_legacy_store_returns_winning_title_and_closes(monkeypatch):
     assert state_sync.sync_session_title("legacy", "Generated title") == ("Generated title", None)
 
 
+def test_legacy_store_without_clear_api_preserves_standalone_reset(monkeypatch):
+    class LegacyDB:
+        title = "Legacy title"
+        closed = False
+
+        def ensure_session(self, **kwargs):
+            pass
+
+        def get_session_title(self, sid):
+            return self.title
+
+        def set_auto_title_if_empty(self, sid, title):
+            if self.title is None:
+                self.title = title
+
+        def close(self):
+            self.closed = True
+
+    db = LegacyDB()
+    monkeypatch.setattr(state_sync, "_get_state_db", lambda **kwargs: db)
+    assert state_sync.persist_session_title_authority(
+        "legacy", "Untitled", source="derived"
+    ) == ("Untitled", "derived")
+    assert db.title == "Legacy title"
+    assert db.closed
+
+
 def _regenerate_request(monkeypatch, s):
     from urllib.parse import urlparse
     monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
