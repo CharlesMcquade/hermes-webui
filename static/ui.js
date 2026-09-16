@@ -17170,6 +17170,14 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
       _programmaticScrollSetAt=performance.now();
       container.scrollTop=Math.max(0,container.scrollTop+delta);
       _lastScrollTop=container.scrollTop;
+      // #7591 v2.2 — the clamp is now the reader's authoritative position:
+      // it deliberately placed them on real rendered rows. Any in-flight
+      // scroll snapshot predates this decision; stale restore/revert writers
+      // (which ping-ponged against the clamp: clamp→36K, revert→0, repeat)
+      // must abandon instead of fighting. Bumping the input generation makes
+      // _messageScrollSnapshotInputChanged() true for every snapshot captured
+      // before the clamp.
+      if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
       if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
       _messageVirtualWindowKey='';
       if(typeof _scheduleMessageVirtualizedRender==='function') _scheduleMessageVirtualizedRender(true);
