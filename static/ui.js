@@ -1319,11 +1319,13 @@ function _compensateScrollForMeasurementDelta(renderFn){
   const actualOffset=rowRect.top-containerRect.top;
   const delta=actualOffset-anchorBefore.topOffset;
   if(Math.abs(delta)<2) return;
-  // #7591 fling guard — same bound as the pad-delta path: a row-delta larger
-  // than a few viewports means the anchor was recycled across an estimate
-  // lurch; rewriting scrollTop by it throws the reader across the transcript.
-  const maxDelta=Math.max(1,container.clientHeight)*MESSAGE_VIRTUAL_COMPENSATION_MAX_VIEWPORTS;
-  if(Math.abs(delta)>maxDelta) return;
+  // #7591 v2 — the row-delta path is MEASURED geometry (real rendered offset
+  // of a real row vs the offset captured pre-render), not an estimate. A
+  // legitimately huge row landing above the viewport produces a legitimately
+  // huge delta; bounding it broke exactly that case (16K px row on a real
+  // session). Unlike the pad-delta fallback (estimate-derived, guard
+  // applies), this path is exact: apply it in full. Content continuity is
+  // enforced one level up by the restore verifier.
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   container.scrollTop=scrollTopBefore+delta;
   _lastScrollTop=container.scrollTop;
