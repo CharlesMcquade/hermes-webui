@@ -16477,12 +16477,16 @@ function _restoreMessageScrollSnapshot(snapshot){
     const _vh=Math.max(1,el.clientHeight);
     if(Math.abs(_moved)>_vh*1.5){
       const _after=_messageViewportCenterRowToken();
-      // Continuity holds only when both sides resolve to the SAME row.
-      // Null on either side (reader was over a pad/empty region) fails the
-      // check — that is exactly the stranded-in-pad fling shape.
-      const _continuity=!!(_centerBefore&&_after&&_centerBefore===_after);
-      const _recentInput=(typeof _recentMessageScrollIntent==='function')?_recentMessageScrollIntent():false;
-      if(!_continuity&&(_recentInput||!_centerBefore||!_after)){
+      // #7591 v2.4 — two distinct cases:
+      // (a) REAL CONTENT SWAP: both tokens resolve and DIFFER → the restore
+      //     threw the reader at different content. Revert.
+      // (b) RESCUE: pre-restore token is NULL (reader was stranded over a
+      //     pad/blank region — that is WHY the recovery ran) and the restore
+      //     landed them on real rows. Reverting would throw them back into
+      //     the void and feed the ping-pong (measured: 0→16K→0 loops).
+      //     Keep the rescue.
+      const _contentSwap=!!(_centerBefore&&_after&&_centerBefore!==_after);
+      if(_contentSwap){
         // Restore threw the reader at different content: undo it and return —
         // falling through would hit the absolute `scrollTop=snapshot.top`
         // fallback and re-apply the fling we just reverted.
@@ -16496,10 +16500,10 @@ function _restoreMessageScrollSnapshot(snapshot){
     }
   }
   if(!restoredViaAnchor){
-    // #7591 — same continuity contract as the anchor path: an absolute
-    // restore that crosses >1.5 viewports AND does not provably keep the
-    // centered content is a stale-snapshot fling; skip it and keep the
-    // reader where the browser settled them.
+    // #7591 v2.4 — absolute restore: revert only on a REAL content swap
+    // (both tokens resolve and differ). A null pre-restore token means the
+    // reader was stranded over a pad; the restore landing them on rows is a
+    // rescue, not a fling.
     const _absBefore=el.scrollTop;
     _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
     el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
@@ -16508,9 +16512,8 @@ function _restoreMessageScrollSnapshot(snapshot){
       const _absMoved=el.scrollTop-_absBefore;
       if(Math.abs(_absMoved)>Math.max(1,el.clientHeight)*1.5){
         const _absAfter=_messageViewportCenterRowToken();
-        const _absContinuity=!!(_centerBefore&&_absAfter&&_centerBefore===_absAfter);
-        const _absRecentInput=(typeof _recentMessageScrollIntent==='function')?_recentMessageScrollIntent():false;
-        if(!_absContinuity&&(_absRecentInput||!_centerBefore||!_absAfter)){
+        const _absSwap=!!(_centerBefore&&_absAfter&&_centerBefore!==_absAfter);
+        if(_absSwap){
           el.scrollTop=_absBefore;
           if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
           _abandonMessageScrollSnapshot();
