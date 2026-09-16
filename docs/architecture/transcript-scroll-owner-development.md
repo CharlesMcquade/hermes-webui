@@ -65,6 +65,25 @@ The public tool-heavy fixture still exposes blank mobile viewports. Earlier
 upstream and failed-stack controls also failed browser geometry gates. These
 failures are not permission to weaken the oracle or report this candidate fixed.
 
+## Follow-up review fixes
+
+Cache-hit ownership initialization and post-commit nested disclosure offsets are
+now fixed. The new `cache` and `disclosure` browser cases fail against `9a5add3b`
+(stale `other` session stamp / nested scroll reset from 120 to 0) and pass on the
+follow-up candidate in Chromium and WebKit at desktop, narrow, and mobile widths
+(12 checks). The targeted 35 unit tests pass as well.
+
+Remaining review findings are source-traced, not claimed browser reproductions:
+
+- The nearest-message fallback still does not anchor within expanded activity
+  siblings. Anchor activity to its owning turn and a within-activity landmark.
+- Unconditional whole-live-turn reuse can discard a richer staged projection;
+  absence of a staged live key can remove parser-ahead content. Reuse the existing
+  owner-validated segment/structural-superset reconciliation before commit.
+- Historical scene hydration and disclosure open-state restoration already run
+  before the owned early return. The disclosure defect was detached layout, not
+  general omission of hydration. Do not report that broader claim as established.
+
 Before deployment:
 
 - Make virtual geometry and the renderer agree on complete assistant/worklog

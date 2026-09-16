@@ -1595,7 +1595,10 @@ function _commitMessageWindow(target, staged, anchor, reuse){
   for(const node of target.querySelectorAll('[data-session-msg-idx]')){
     node.dataset.msgIdx=String(_messageRawIdxForSessionIndex(Number(node.dataset.sessionMsgIdx)));
   }
-  target.dataset.windowSession=S.session?.session_id||'';
+  _initializeMessageWindowOwnership(target);
+}
+function _initializeMessageWindowOwnership(inner){
+  inner.dataset.windowSession=S.session?.session_id||'';
   _messageWindowRevision++;
   _rememberMessageWindowReader();
 }
@@ -17264,6 +17267,7 @@ function renderMessages(options){
       _sessionHtmlCacheSid=sid;
       _rehydrateTransparentStreamDom(inner);
       _rehydrateDeferredWorklogsFromCache(inner);
+      _initializeMessageWindowOwnership(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
@@ -18740,6 +18744,9 @@ function renderMessages(options){
   if(ownedWindow){
     for(const row of inner.querySelectorAll('[data-msg-idx]')) row.style.contentVisibility='visible';
     _commitMessageWindow(liveInner,inner,windowAnchor,windowOnly);
+    // Open-state restoration during staging has no laid-out nested geometry.
+    // Restore result-body offsets only after the staged nodes are connected.
+    _restoreWorklogDetailDisclosureState(liveInner,worklogDetailDisclosureState);
     _messageVirtualWindowKey=renderWindowKey;
     _wireMessageWindowLoadEarlierButton();
     _updateMessageVirtualMeasurements(renderVisWithIdx,renderVisibleIdxs,virtualWindow);
@@ -18884,9 +18891,7 @@ function renderMessages(options){
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
   }
-  inner.dataset.windowSession=sid||'';
-  _messageWindowRevision++;
-  _rememberMessageWindowReader();
+  _initializeMessageWindowOwnership(inner);
   _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
   // Kill the pinned/tail-follower mid-stream jitter. Schedule the re-anchor in a MICROTASK,
   // not synchronously: inside this render sync stack the browser still reports a transient
