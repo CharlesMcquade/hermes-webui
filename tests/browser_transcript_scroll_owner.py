@@ -198,7 +198,7 @@ def movement(a, b):
 
 def assert_frames(frames, direction, *, identity=True):
     assert len(frames) >= 3, 'sampler did not observe browser frames'
-    for a, b in zip(frames, frames[1:]):
+    for a, b in zip(frames, frames[1:], strict=False):
         assert not b.get('contentErrors'), ('wrong rendered message content', b['contentErrors'])
         assert b['visible'], ('blank viewport', b)
         assert len(b['rows']) < COUNT // 2, ('unbounded mounted transcript', len(b['rows']))
@@ -212,7 +212,7 @@ def assert_frames(frames, direction, *, identity=True):
             old = {r['id']: r['node'] for r in a['rows']}
             replaced = [r['id'] for r in b['rows'] if r['id'] in old and r['node'] != old[r['id']]]
             assert not replaced, ('retained rows recreated during window shift', replaced)
-    travel = sum(movement(a, b) for a, b in zip(frames, frames[1:]))
+    travel = sum(movement(a, b) for a, b in zip(frames, frames[1:], strict=False))
     intended = frames[-1]['wheel'] - frames[0]['wheel']
     # Endpoint exemption is direction-aware, using actual transcript bounds.
     last = frames[-1]
@@ -653,7 +653,7 @@ def main():
                                     context.route('**/*', lambda r: r.continue_() if urlsplit(r.request.url).hostname in ('127.0.0.1','localhost') else r.abort())
                                 page=context.new_page()
                                 errors=[]
-                                page.on('pageerror',lambda e:errors.append(str(e)))
+                                page.on('pageerror',lambda e, errors=errors:errors.append(str(e)))
                                 transport=Transport(temp)
                                 transport.streaming = case == 'stream'
                                 if case=='activity':

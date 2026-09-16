@@ -2,7 +2,7 @@
 from tests.test_scroll_owner_live_reconciliation import isolated_webui, page  # noqa: F401
 
 
-def test_compensation_guard_does_not_block_required_mount(page):
+def test_compensation_guard_does_not_block_required_mount(page):  # noqa: F811 - pytest injects the imported fixture
     result = page.evaluate("""() => {
       S.busy=false;S.activeStreamId=null;delete INFLIGHT.fixture;
       S.messages=Array.from({length:240},(_,i)=>({role:i%2?'assistant':'user',
