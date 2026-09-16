@@ -545,10 +545,6 @@ async function startCompressionRecovery(btn){
 const MESSAGE_RENDER_WINDOW_DEFAULT=50;
 const MESSAGE_VIRTUAL_THRESHOLD_ROWS=80;
 const MESSAGE_VIRTUAL_BUFFER_PX=900;
-// #7591 — measurement-compensation scrollTop writes larger than this many
-// viewports are estimate error, not real content shift; applying them flings
-// the reader across the transcript (the oscillation's per-flip distance).
-const MESSAGE_VIRTUAL_COMPENSATION_MAX_VIEWPORTS=2;
 const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS={
   user:120,
   process_wakeup:96,
@@ -560,20 +556,6 @@ function _messageVirtualDefaultHeightForRole(role){
   return MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS[
     role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role)?role:'default'
   ];
-}
-// #7591 — per-role measured mean row heights. Unmeasured rows previously fell
-// back to the flat MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS constants, which on real
-// sessions disagree with reality by 34% (PR #7283) to 3.6x (issue #7591: the
-// estimated topPad for one transcript was ~34K px for ~11K px of real content).
-// Every re-window then flung scrollTop by the estimate error. Calibrating from
-// the measurements the render loop already collects shrinks the error to the
-// variance around the mean instead of constant-vs-reality.
-let _messageVirtualMeasuredMeansByRole=null;
-function _messageVirtualCalibratedHeightForRole(role){
-  const means=_messageVirtualMeasuredMeansByRole;
-  if(!means||typeof means!=='object') return null;
-  const v=Number(means[role]);
-  return (Number.isFinite(v)&&v>0)?Math.round(v):null;
 }
 const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=2;
 let _messageRenderWindowSid=null;
@@ -631,7 +613,6 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualHeightCacheLen=0;
   _messageVirtualHeightCacheSrc=null;
   _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
-  _messageVirtualMeasuredMeansByRole=null;
   _messageVirtualWindowKey='';
   _messageVirtualMeasurementCycleKey='';
   _messageVirtualMeasurementRetryCount=0;
@@ -697,12 +678,7 @@ function _messageVirtualWindow(opts){
   const rowHeightFor=(idx)=>{
     const cached=Number(heights[idx]);
     if(Number.isFinite(cached)&&cached>0) return cached;
-    if(roleForIdx){
-      const calibrated=(typeof _messageVirtualCalibratedHeightForRole==='function')?_messageVirtualCalibratedHeightForRole(roleForIdx(idx)):null;
-      if(calibrated) return calibrated;
-      return Math.max(1,_messageVirtualDefaultHeightForRole(roleForIdx(idx)));
-    }
-    return defaultHeight;
+    return roleForIdx?Math.max(1,_messageVirtualDefaultHeightForRole(roleForIdx(idx))):defaultHeight;
   };
   if(total<=Math.max(threshold, keepTailCount)){
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
@@ -852,24 +828,6 @@ function _syncMessageVirtualHeightCache(visWithIdx){
   }else{
     _messageVirtualHeightCache=nextHeights;
     _messageVirtualWindowKey='';
-  }
-  // #7591 — seed unmeasured entries with per-role measured means when the
-  // flat-constant estimate error dominates the pad (measured on real
-  // sessions: 34% short per #7283, 3.6x tall per #7591). Calibration beats
-  // constants as soon as the measure pass has seen a few rows of a role; it
-  // converts re-window scrollHeight swings from estimate error into the
-  // (much smaller) variance around the mean. Per-row measured heights are
-  // authoritative and overwrite seeds as rows are actually rendered.
-  if(Array.isArray(_messageVirtualHeightCache)&&_messageVirtualHeightCache.length===nextEntries.length){
-    const means=(_messageVirtualMeasuredMeansByRole&&typeof _messageVirtualMeasuredMeansByRole==='object')
-      ?_messageVirtualMeasuredMeansByRole:null;
-    if(means){
-      for(let i=0;i<nextEntries.length;i++){
-        if(Number(_messageVirtualHeightCache[i])>0) continue;
-        const h=_messageVirtualCalibratedHeightForRole(_messageVirtualRoleForEntry(nextEntries[i]));
-        if(h) _messageVirtualHeightCache[i]=h;
-      }
-    }
   }
   _messageVirtualHeightCacheEntries=nextEntries;
   _messageVirtualHeightCacheLen=S.messages.length;
@@ -1298,14 +1256,7 @@ function _compensateScrollForMeasurementDelta(renderFn){
     const topPadBefore=Number(anchorBefore.topPadBefore);
     if(Number.isFinite(topPadBefore)){
       const padDelta=topPadAfter-topPadBefore;
-      // #7591 fling guard: a pad delta larger than a few viewports is estimate
-      // error, not a real content shift. The viewport is stranded in the pad
-      // either way; the edge clamp in _maybeRecoverVirtualizedBlankViewport
-      // lands the reader at real rows, so the giant rewrite is both wrong and
-      // unnecessary. Skip it instead of throwing the reader across the
-      // transcript.
-      const maxComp=Math.max(1,container.clientHeight)*MESSAGE_VIRTUAL_COMPENSATION_MAX_VIEWPORTS;
-      if(Math.abs(padDelta)>=2&&Math.abs(padDelta)<=maxComp){
+      if(Math.abs(padDelta)>=2){
         _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
         container.scrollTop=Math.max(0,scrollTopBefore+padDelta);
         _lastScrollTop=container.scrollTop;
@@ -1319,11 +1270,6 @@ function _compensateScrollForMeasurementDelta(renderFn){
   const actualOffset=rowRect.top-containerRect.top;
   const delta=actualOffset-anchorBefore.topOffset;
   if(Math.abs(delta)<2) return;
-  // #7591 fling guard — same bound as the pad-delta path: a row-delta larger
-  // than a few viewports means the anchor was recycled across an estimate
-  // lurch; rewriting scrollTop by it throws the reader across the transcript.
-  const maxDelta=Math.max(1,container.clientHeight)*MESSAGE_VIRTUAL_COMPENSATION_MAX_VIEWPORTS;
-  if(Math.abs(delta)>maxDelta) return;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   container.scrollTop=scrollTopBefore+delta;
   _lastScrollTop=container.scrollTop;
@@ -1458,32 +1404,6 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
   }
   if(measuredCount>0){
     _messageVirtualEstimatedRowHeight=Math.max(60, Math.round(measuredTotal/measuredCount));
-    // #7591 — maintain per-role measured means so unmeasured rows are
-    // estimated from calibration instead of flat constants (the pad-error
-    // root cause). Means converge as more rows are measured; the constants
-    // remain the seed for roles never measured this session.
-    const roleMeans=(typeof _messageVirtualMeasuredMeansByRole==='object'&&_messageVirtualMeasuredMeansByRole)
-      ?_messageVirtualMeasuredMeansByRole:{};
-    for(let vi=0;vi<renderVisWithIdx.length;vi++){
-      const entry=renderVisWithIdx[vi];
-      if(!entry) continue;
-      const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
-      if(!Number.isFinite(visibleIdx)) continue;
-      const h=Number(_messageVirtualHeightCache[visibleIdx]);
-      if(!(h>0)) continue;
-      const role=_messageVirtualRoleForEntry(entry);
-      const count=Number(roleMeans[role+'_count'])||0;
-      // #7591 — freeze the mean after 20 samples: a live running mean wobbles
-      // as each window measures different rows, and pad-height wobble shifts
-      // every rendered row's absolute position between frames — the restore
-      // layer then chases the shifts (the residual fling ladder). Estimates
-      // converge; past ~20 samples more averaging only adds churn.
-      if(count>=20) continue;
-      const prev=Number(roleMeans[role])||0;
-      roleMeans[role]=(prev*count+h)/(count+1);
-      roleMeans[role+'_count']=count+1;
-    }
-    _messageVirtualMeasuredMeansByRole=roleMeans;
   }
   if(changed){
     _scheduleMessageVirtualMeasurementRefresh(virtualWindow);
@@ -16360,22 +16280,6 @@ function _messageScrollSnapshotInputChanged(snapshot){
   const current=typeof _messageScrollInputGeneration==='number' ? _messageScrollInputGeneration : captured;
   return Number.isFinite(captured)&&Number.isFinite(current)&&current!==captured;
 }
-// #7591 — identity of the message under the viewport center (stable
-// session-relative index preferred). Used to verify that a snapshot restore
-// preserved content continuity: a restore that moves scrollTop across several
-// viewports AND swaps the centered message threw the reader at different
-// content (estimate-geometry shift), which is the residual fling class.
-function _messageViewportCenterRowToken(){
-  const el=$('messages');
-  if(!el||typeof document==='undefined'||typeof document.elementFromPoint!=='function') return null;
-  const r=el.getBoundingClientRect();
-  if(!r||!r.height) return null;
-  const y=Math.min(Math.max(r.top+r.height/2,r.top+1),r.bottom-1);
-  const hit=document.elementFromPoint(r.left+r.width/2,y);
-  const row=hit&&hit.closest?hit.closest('[data-msg-idx],[data-session-msg-idx]'):null;
-  if(!row||!row.dataset) return null;
-  return row.dataset.sessionMsgIdx||row.dataset.msgIdx||null;
-}
 function _abandonMessageScrollSnapshot(){
   const el=$('messages');
   if(!el){
@@ -16441,15 +16345,6 @@ function _restoreMessageScrollSnapshot(snapshot){
     return;
   }
   if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
-  // #7591 verify-then-revert: a snapshot restore may legitimately re-anchor the
-  // reader across large scrollTop distances when window geometry changed, but
-  // it must never swap the CONTENT under the reader's eye. If the restore
-  // moved scrollTop by more than 1.5 viewports AND the centered message
-  // changed identity, the restore followed estimate-geometry instead of the
-  // reader (the residual ~17K px fling loop): revert to the post-render
-  // position, which the browser already settled at real content.
-  const _revertTopBefore=(typeof el.scrollTop==='number')?el.scrollTop:0;
-  const _centerBefore=(typeof _messageViewportCenterRowToken==='function')?_messageViewportCenterRowToken():null;
   let restoredViaAnchor=(snapshot.anchor&&typeof _restoreMessageViewportAnchor==='function')
     ? _restoreMessageViewportAnchor(snapshot.anchor,0)
     : false;
@@ -16458,54 +16353,9 @@ function _restoreMessageScrollSnapshot(snapshot){
       ? _restoreMessageViewportAnchor(snapshot.anchor,0)
       : false;
   }
-  if(restoredViaAnchor
-     &&typeof _messageViewportCenterRowToken==='function'
-     &&typeof _abandonMessageScrollSnapshot==='function'){
-    const _moved=el.scrollTop-_revertTopBefore;
-    const _vh=Math.max(1,el.clientHeight);
-    if(Math.abs(_moved)>_vh*1.5){
-      const _after=_messageViewportCenterRowToken();
-      // Continuity holds only when both sides resolve to the SAME row.
-      // Null on either side (reader was over a pad/empty region) fails the
-      // check — that is exactly the stranded-in-pad fling shape.
-      const _continuity=!!(_centerBefore&&_after&&_centerBefore===_after);
-      const _recentInput=(typeof _recentMessageScrollIntent==='function')?_recentMessageScrollIntent():false;
-      if(!_continuity&&(_recentInput||!_centerBefore||!_after)){
-        // Restore threw the reader at different content: undo it and return —
-        // falling through would hit the absolute `scrollTop=snapshot.top`
-        // fallback and re-apply the fling we just reverted.
-        _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-        el.scrollTop=_revertTopBefore;
-        _lastScrollTop=el.scrollTop;
-        if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
-        if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
-        return;
-      }
-    }
-  }
   if(!restoredViaAnchor){
-    // #7591 — same continuity contract as the anchor path: an absolute
-    // restore that crosses >1.5 viewports AND does not provably keep the
-    // centered content is a stale-snapshot fling; skip it and keep the
-    // reader where the browser settled them.
-    const _absBefore=el.scrollTop;
     _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
     el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
-    if(typeof _messageViewportCenterRowToken==='function'
-       &&typeof _abandonMessageScrollSnapshot==='function'){
-      const _absMoved=el.scrollTop-_absBefore;
-      if(Math.abs(_absMoved)>Math.max(1,el.clientHeight)*1.5){
-        const _absAfter=_messageViewportCenterRowToken();
-        const _absContinuity=!!(_centerBefore&&_absAfter&&_centerBefore===_absAfter);
-        const _absRecentInput=(typeof _recentMessageScrollIntent==='function')?_recentMessageScrollIntent():false;
-        if(!_absContinuity&&(_absRecentInput||!_centerBefore||!_absAfter)){
-          el.scrollTop=_absBefore;
-          if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
-          _abandonMessageScrollSnapshot();
-          return;
-        }
-      }
-    }
   }
   // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
   _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
@@ -17096,74 +16946,6 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
 function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow){
   if(!preserveScroll||!virtualWindow||!virtualWindow.virtualized||!!(options&&options._virtualFallback)) return false;
   if(_messageViewportIntersectsRenderedRow()) return false;
-  // #7591 — the blank-viewport state is expected mid-gesture: during fast
-  // upward scrolling the reader lands inside the estimated topPad before the
-  // window catches up. The old recovery re-rendered the ENTIRE transcript
-  // (_virtualFallback), collapsing scrollHeight by the pad delta; the browser
-  // clamped scrollTop into the tail, the window re-computed with the pad
-  // again, and the two states fed each other — the measured oscillation loop
-  // (29 teleports/90s, 31-41K px each, against input direction). Instead:
-  // clamp the reader to the nearest rendered edge (window start while moving
-  // up, window end while moving down) and let the normal RAF window refresh
-  // extend coverage — the window recomputes from the clamped scrollTop and
-  // mounts rows around the reader without ever rewriting the whole transcript.
-  const container=$('messages');
-  // #7591 — a fresh programmatic-scroll flag means a restore/jump write is
-  // still settling; running the gesture clamp then would compound two
-  // writers. Fall through to the legacy full-render fallback in that case
-  // (bounded by the verify-then-revert below).
-  if(container&&typeof _freshProgrammaticScrollActive==='function'&&_freshProgrammaticScrollActive()){
-    if(_sessionHtmlCacheSid&&S.session&&S.session.session_id===_sessionHtmlCacheSid){
-      _sessionHtmlCache.delete(_sessionHtmlCacheSid);
-    }
-    _messageVirtualWindowKey='';
-    renderMessages({preserveScroll:true,_virtualFallback:true});
-    return true;
-  }
-  if(container){
-    const rows=Array.from(container.querySelectorAll('[data-msg-idx]'));
-    const firstRow=rows.length?rows[0]:null;
-    const lastRow=rows.length?rows[rows.length-1]:null;
-    if(firstRow&&lastRow){
-      const cRect=container.getBoundingClientRect();
-      const firstRect=firstRow.getBoundingClientRect();
-      const lastRect=lastRow.getBoundingClientRect();
-      // Viewport intersects no row ⇒ the whole window is on one side. Three
-      // cases (geometry decides — no input-direction guessing):
-      //   reader ABOVE window (landed in topPad): bring window start to
-      //     viewport top → scrollTop += firstRect.top-cRect.top (>0)
-      //   reader BELOW window (bottomPad): bring window end to viewport
-      //     bottom → scrollTop += lastRect.bottom-cRect.bottom (<0)
-      //   reader's SCROLL POSITION overshot so the window is above scrollTop
-      //     but still on screen edge: nearest edge is the window end.
-      const windowBelowViewport=firstRect.top>=cRect.bottom;
-      const windowAboveViewport=lastRect.bottom<=cRect.top;
-      let delta;
-      if(windowBelowViewport){
-        delta=firstRect.top-cRect.top;
-      }else if(windowAboveViewport){
-        delta=lastRect.bottom-cRect.bottom;
-      }else{
-        // Window straddles the viewport edges without any row under the
-        // center hit-point (all rows clipped): land the nearest edge.
-        delta=(cRect.top-firstRect.top)<(lastRect.bottom-cRect.bottom)
-          ?(firstRect.top-cRect.top)
-          :(lastRect.bottom-cRect.bottom);
-      }
-      // #7591 — the clamp must never move the reader BACKWARD past their
-      // momentum (a restore fling already took them to ~0 once; re-flinging
-      // to the window from there repeats it). Clamp only ever lands the
-      // reader AT the window edge they are nearest, never across it.
-      _programmaticScroll=true;
-      _programmaticScrollSetAt=performance.now();
-      container.scrollTop=Math.max(0,container.scrollTop+delta);
-      _lastScrollTop=container.scrollTop;
-      if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
-      _messageVirtualWindowKey='';
-      if(typeof _scheduleMessageVirtualizedRender==='function') _scheduleMessageVirtualizedRender(true);
-      return true;
-    }
-  }
   if(_sessionHtmlCacheSid&&S.session&&S.session.session_id===_sessionHtmlCacheSid){
     _sessionHtmlCache.delete(_sessionHtmlCacheSid);
   }
