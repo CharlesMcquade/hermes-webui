@@ -69,3 +69,16 @@ def test_activity_reader_survives_rebuilt_prepend(kind, width):
     assert result['windowRange']['start'] <= 66 < result['windowRange']['end']
     assert result['actual'] == pytest.approx(result['expected'], abs=0.5)
     assert result['sourceCount'] == 3
+
+
+@pytest.mark.parametrize('width', [1440, 390])
+def test_collapsed_activity_cannot_own_visible_reader(width):
+    source = Path(os.environ.get('SCROLL_ACTIVITY_SOURCE', ROOT / 'static/ui.js')).read_text()
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page(viewport={'width': width, 'height': 844})
+        page.set_content('<style>body{margin:0}#messages{height:600px;overflow:auto}\n          .collapsed{height:0;overflow:hidden}p{height:300px;margin:0}</style>\n          <div id="messages"><div id="msgInner" data-window-session="one">\n          <div hidden data-msg-idx="0" data-session-msg-idx="0" data-worklog-anchor-key="msg:0"></div>\n          <div class="collapsed"><div class="wl-reason" data-worklog-anchor-key="msg:0"><p>Not painted</p></div></div>\n          <div data-msg-idx="1" data-session-msg-idx="1"><p>Actual reader</p></div>\n          </div></div>')
+        page.add_script_tag(content="const $=id=>document.getElementById(id);const S={session:{session_id:'one'}};" + function(source, '_messageWindowSnapshot'))
+        result = page.evaluate("() => {const a=_messageWindowSnapshot();return {index:a.sessionIndex,text:a.node.textContent};}")
+        browser.close()
+    assert result == {'index': 1, 'text': 'Actual reader'}

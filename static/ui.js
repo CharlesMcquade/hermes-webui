@@ -1530,8 +1530,20 @@ function _messageWindowSnapshot(){
   const sources=Array.from(inner.querySelectorAll('[data-msg-idx]'));
   // Worklog projections are siblings of their hidden source segments. Do not
   // give projections data-msg-idx: measurement must count the source only once.
+  const paintedRect=node=>{
+    const rect=node.getBoundingClientRect();
+    let top=rect.top,bottom=rect.bottom;
+    if(getComputedStyle(node).visibility==='hidden') return {top,bottom:top,height:0};
+    for(let parent=node.parentElement;parent&&parent!==container;parent=parent.parentElement){
+      if(['hidden','clip','auto','scroll'].includes(getComputedStyle(parent).overflowY)){
+        const bounds=parent.getBoundingClientRect();
+        top=Math.max(top,bounds.top);bottom=Math.min(bottom,bounds.bottom);
+      }
+    }
+    return {top,bottom,height:Math.max(0,bottom-top)};
+  };
   const candidates=Array.from(inner.querySelectorAll('[data-msg-idx],.wl-reason[data-worklog-anchor-key],.tool-card-row[data-tool-disclosure-key]'))
-    .filter(node=>node.getBoundingClientRect().height>0);
+    .filter(node=>paintedRect(node).height>0);
   const sourceFor=node=>{
     if(node.matches('[data-msg-idx]')) return node;
     if(node.dataset.worklogAnchorKey) return sources.find(source=>source.dataset.worklogAnchorKey===node.dataset.worklogAnchorKey);
@@ -1543,7 +1555,7 @@ function _messageWindowSnapshot(){
   // Rejecting every offscreen row here abandons ownership precisely at a cold
   // boundary, when estimates are being replaced by measured content.
   candidates.sort((a,b)=>{
-    const distance=node=>{const r=node.getBoundingClientRect();return r.bottom<=top?top-r.bottom:r.top>=top+container.clientHeight?r.top-top-container.clientHeight:0;};
+    const distance=node=>{const r=paintedRect(node);return r.bottom<=top?top-r.bottom:r.top>=top+container.clientHeight?r.top-top-container.clientHeight:0;};
     return distance(a)-distance(b);
   });
   for(const node of candidates){
@@ -6722,8 +6734,10 @@ if(typeof window!=='undefined'){
       _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
       return;
     }
-    if(_freshProgrammaticScrollActive()) return;
+    // Compensation suppresses follow/unpin interpretation, not mounting. Real
+    // input can advance into a spacer while that short-lived guard is armed.
     _scheduleMessageVirtualizedRender();
+    if(_freshProgrammaticScrollActive()) return;
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
