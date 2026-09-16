@@ -477,13 +477,27 @@ def natural_case(page, transport, evidence):
 
 def activity_case(page, transport, evidence):
     """Prepend while the viewport contains only projected Worklog reasoning."""
+    page.evaluate("""() => {
+      const reason=Array.from($('msgInner').querySelectorAll('.wl-reason'))
+        .find(n=>n.textContent.includes('Activity landmark 200'));
+      const group=reason?.closest('.tool-worklog-group');
+      if(!group)throw Error('fixture did not project activity reasoning');
+      if(group.classList.contains('tool-call-group-collapsed'))
+        group.querySelector('.tool-worklog-summary').click();
+    }""")
+    page.wait_for_timeout(300)
+    box=page.locator('#messages').bounding_box()
+    page.mouse.move(box['x']+box['width']/2,box['y']+box['height']/2)
+    page.mouse.wheel(0,-600)
+    page.wait_for_timeout(300)
     evidence['setup']=page.evaluate("""() => {
       const c=$('messages');
       const reasons=Array.from($('msgInner').querySelectorAll('.wl-reason'));
       const reason=reasons.find(n=>n.textContent.includes('Activity landmark 200'));
       if(!reason)throw Error('fixture did not project activity reasoning');
       const group=reason.closest('.tool-worklog-group');
-      group.classList.add('open');group.classList.remove('tool-call-group-collapsed');
+      if(group.classList.contains('tool-call-group-collapsed'))
+        group.querySelector('.tool-worklog-summary').click();
       const mark=Array.from(reason.querySelectorAll('p')).find(p=>p.textContent.startsWith('Activity landmark 200:'));
       if(!mark)throw Error('missing activity landmark');
       c.scrollTop+=mark.getBoundingClientRect().top-c.getBoundingClientRect().top-100;
