@@ -442,6 +442,54 @@ def natural_case(page, transport, evidence):
     evidence['requests']=transport.requests
 
 
+def disclosure_case(page, transport, evidence):
+    position(page)
+    page.evaluate("""() => {
+      const cards=Array.from(document.querySelectorAll('#msgInner .thinking-card'));
+      if(!cards.length)throw Error('fixture did not render thinking disclosure');
+      const card=cards[cards.length-1];
+      _setWorklogDetailDisclosureOpen(card,true);
+      const body=_worklogDetailScrollableBody(card);
+      window.ownerDisclosureKey=_worklogDetailBaseKey(card);
+      body.scrollTop=120;
+      window.ownerDisclosureOffset=body.scrollTop;
+      if(ownerDisclosureOffset<100)throw Error('disclosure not scrollable');
+    }""")
+    page.evaluate('async()=>await _loadOlderMessages()')
+    evidence['state']=page.evaluate("""() => {
+      const card=Array.from(document.querySelectorAll('#msgInner .thinking-card')).find(n=>_worklogDetailBaseKey(n)===ownerDisclosureKey);
+      return {exists:!!card,open:card?.classList.contains('open'),before:ownerDisclosureOffset,
+        after:card?_worklogDetailScrollableBody(card).scrollTop:null};
+    }""")
+    state=evidence['state']
+    assert state['exists'] and state['open'] and abs(state['after']-state['before'])<2, state
+
+
+def cache_case(page, transport, evidence):
+    # Revisit the exact same paginated projection so the real HTML cache can hit.
+    page.evaluate("async()=>await loadSession('other')")
+    page.evaluate("async()=>await loadSession('fixture')")
+    page.wait_for_timeout(400)
+    page.evaluate("""() => {
+      window.ownerCacheHits=0;
+      const original=_sessionHtmlCache.get.bind(_sessionHtmlCache);
+      _sessionHtmlCache.get=key=>{const value=original(key);if(key==='fixture'&&value)ownerCacheHits++;return value;};
+    }""")
+    page.evaluate("async()=>await loadSession('other')")
+    page.evaluate("async()=>await loadSession('fixture')")
+    page.wait_for_timeout(400)
+    evidence['state']=page.evaluate("""() => ({hits:ownerCacheHits,
+      sid:S.session.session_id,stamp:$('msgInner').dataset.windowSession,
+      observed:_messageWindowObserved?.sid,anchor:!!_messageWindowSnapshot()})""")
+    assert evidence['state']['hits']>0, 'cache path was not exercised'
+    assert evidence['state']['stamp']==evidence['state']['sid']=='fixture', evidence
+    assert evidence['state']['observed']=='fixture' and evidence['state']['anchor'], evidence
+    before=snapshot(page)
+    page.evaluate('async()=>await _loadOlderMessages()')
+    after=snapshot(page)
+    assert abs(movement(before,after))<=4, ('cache re-entry prepend drift',before,after)
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--baseline-ref')
@@ -486,6 +534,9 @@ def main():
                                 page.on('pageerror',lambda e:errors.append(str(e)))
                                 transport=Transport(temp)
                                 transport.streaming = case == 'stream'
+                                if case=='disclosure':
+                                    m=next(m for m in reversed(transport.data) if m.get('role')=='assistant')
+                                    m['content']='<think>'+'\n'.join(f'Public reasoning line {n}' for n in range(250))+'</think>\n\n'+m['content']
                                 page.route('**/api/chat/stream/status?*',lambda r:r.fulfill(json={'active':True}))
                                 page.route('**/api/session?*',transport.route)
                                 # Freeze both candidate and baseline JS for the entire
@@ -497,6 +548,7 @@ def main():
                                     page.goto(base,wait_until='load')
                                     wait(page,"typeof loadSession==='function' && S._bootReady===true")
                                     page.evaluate("window._virtualizeTranscript=true;window._sessionEndlessScrollEnabled=true")
+                                    if case=='disclosure':page.evaluate("window._simplifiedToolCalling=false;window._showThinking=true")
                                     page.evaluate("async()=>await loadSession('fixture')")
                                     # Grow through genuine cold paginated responses, never assign S.messages.
                                     for _ in range(0 if case=='natural' else 10):
@@ -512,6 +564,8 @@ def main():
                                     elif case=='cold':cold_case(page,transport,evidence)
                                     elif case=='stream':stream_case(page,transport,evidence)
                                     elif case=='natural':natural_case(page,transport,evidence)
+                                    elif case=='cache':cache_case(page,transport,evidence)
+                                    elif case=='disclosure':disclosure_case(page,transport,evidence)
                                     else:raise ValueError('unknown case: '+case)
                                     assert not errors, errors
                                     results.append(dict(test=key,status='PASS'))
