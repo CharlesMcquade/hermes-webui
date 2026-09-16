@@ -74,8 +74,13 @@ PROBE = r"""() => {
     .filter(n=>!n.parentElement.closest('[data-msg-idx]'));
   window.ownerSnapshot=()=>{
     const c=document.querySelector('#messages'),v=c.getBoundingClientRect();
+    const contentErrors=[];
     const rs=rows().map(n=>{
       const m=S.messages[Number(n.dataset.msgIdx)],r=n.getBoundingClientRect();
+      const expected=/^## (Research summary \d+)/m.exec(typeof m?.content==='string'?m.content:'');
+      const actual=n.querySelector('h2');
+      if(expected&&actual&&actual.textContent!==expected[1])
+        contentErrors.push({id:m._test_id,expected:expected[1],actual:actual.textContent});
       if(!ids.has(n))ids.set(n,++serial);
       return {id:m?m._test_id:null,node:ids.get(n),top:r.top-v.top,height:r.height,
         bottom:r.bottom-v.top};
@@ -125,7 +130,7 @@ PROBE = r"""() => {
       });
     }
     rs.sort((a,b)=>a.top-b.top);
-    return {time:performance.now(),wheel:window.ownerWheel||0,rows:rs,landmarks,
+    return {time:performance.now(),wheel:window.ownerWheel||0,rows:rs,landmarks,contentErrors,
       visible:rs.filter(r=>r.bottom>2&&r.top<v.height-2).map(r=>r.id),height:v.height,top:c.scrollTop,max:c.scrollHeight-c.clientHeight,
       oldest:_oldestIdx,truncated:_messagesTruncated,session:S.session.session_id,
       selectionLength:String(getSelection()).length};
@@ -166,6 +171,7 @@ def movement(a, b):
 def assert_frames(frames, direction, *, identity=True):
     assert len(frames) >= 3, 'sampler did not observe browser frames'
     for a, b in zip(frames, frames[1:]):
+        assert not b.get('contentErrors'), ('wrong rendered message content', b['contentErrors'])
         assert b['visible'], ('blank viewport', b)
         assert len(b['rows']) < COUNT // 2, ('unbounded mounted transcript', len(b['rows']))
         delta = movement(a, b)

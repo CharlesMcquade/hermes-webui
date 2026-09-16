@@ -1745,8 +1745,10 @@ function _restoreMessageWindowReader(target,anchor){
         // msg:<rawIdx> worklog keys can change on prepend. Resolve through the
         // stable source identity before looking up its current visible clone.
         const key=row&&row.dataset.worklogAnchorKey;
-        row=key?Array.from(target.querySelectorAll('.wl-reason[data-worklog-anchor-key]'))
-          .find(node=>node.dataset.worklogAnchorKey===key):null;
+        // A formerly folded reason may become the visible final answer when
+        // paging completes its turn. Its source remains the same content owner.
+        row=(key?Array.from(target.querySelectorAll('.wl-reason[data-worklog-anchor-key]'))
+          .find(node=>node.dataset.worklogAnchorKey===key):null)||row;
       }else if(anchor.activityKind==='tool'){
         row=Array.from(target.querySelectorAll('.tool-card-row[data-tool-disclosure-key]'))
           .find(node=>node.dataset.toolDisclosureKey===anchor.activityKey);
@@ -1840,11 +1842,10 @@ function _renderCacheKey(text, isUser){
   // Fold render_user_markdown state into user-message keys so toggling the
   // setting invalidates cached plain-text renders (#3870).
   const p = isUser ? (window._renderUserMarkdown ? 'um' : 'u') : 'a';
-  // Short content: use the full string as key (cheap Map lookup).
-  // Long content: length + prefix + suffix is good enough — collisions on
-  // 20-char prefix+suffix are vanishingly rare for chat messages.
-  if(text.length <= 500) return p + ':' + text;
-  return p + ':' + text.length + ':' + text.slice(0,20) + ':' + text.slice(-20);
+  // Distinct long messages can share length, prefix and suffix (for example
+  // numbered answers). Cache by the complete input so reused rows cannot paint
+  // another message's body. The bounded Map already limits retained entries.
+  return p + ':' + text;
 }
 function _getCachedRender(text, isUser){
   const key = _renderCacheKey(text, isUser);
