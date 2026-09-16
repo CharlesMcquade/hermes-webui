@@ -675,15 +675,24 @@ function _messageVirtualWindow(opts){
   const tailStart=Math.max(0, total-keepTailCount);
   const heights=Array.isArray(opts&&opts.heights)?opts.heights:[];
   const roleForIdx=typeof (opts&&opts.roleForIdx)==='function'?opts.roleForIdx:null;
+  const reader=opts&&opts.reader;
   const rowHeightFor=(idx)=>{
+    if(reader&&idx===reader.index&&reader.height>0) return reader.height;
     const cached=Number(heights[idx]);
-    if(Number.isFinite(cached)&&cached>0) return cached;
+    if(typeof heights[idx]==='number'&&Number.isFinite(cached)&&cached>=0) return cached;
+    if(opts&&typeof opts.collapsedForIdx==='function'&&opts.collapsedForIdx(idx)) return 0;
     return roleForIdx?Math.max(1,_messageVirtualDefaultHeightForRole(roleForIdx(idx))):defaultHeight;
   };
   if(total<=Math.max(threshold, keepTailCount)){
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
   }
-  const scrollTop=Math.max(0, Number(opts&&opts.scrollTop)||0);
+  let scrollTop=Math.max(0, Number(opts&&opts.scrollTop)||0);
+  // Geometry wins over the estimated prefix: never window out the actual reader.
+  if(reader&&Number.isInteger(reader.index)&&reader.index>=0&&reader.index<total){
+    scrollTop=0;
+    for(let i=0;i<reader.index;i++) scrollTop+=rowHeightFor(i);
+    scrollTop=Math.max(0,scrollTop-(Number(reader.offset)||0));
+  }
   const targetTop=Math.max(0, scrollTop-bufferPx);
   const targetBottom=scrollTop+viewportHeight+bufferPx;
   let start=0;
@@ -859,15 +868,49 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
     const tailStart=Math.max(0, total-Math.max(0, Number(keepTailCount)||0));
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
   }
-  return _messageVirtualWindow({
+  const result=_messageVirtualWindow({
     total:visWithIdx.length,
     scrollTop:container?container.scrollTop:0,
     viewportHeight:container?container.clientHeight:(_messageVirtualEstimatedRowHeight*6),
     heights:_messageVirtualHeightCache,
     defaultHeight:_messageVirtualEstimatedRowHeight,
     roleForIdx:idx=>_messageVirtualRoleForEntry(visWithIdx[idx]),
+    collapsedForIdx:idx=>{
+      const m=visWithIdx[idx]?.m;
+      const next=visWithIdx[idx+1]?.m;
+      return !S.busy&&typeof chatActivityMode==='function'&&chatActivityMode()==='compact_worklog'&&
+        _assistantMessageBelongsInWorklog(m,visWithIdx[idx]?.rawIdx,null,undefined,
+          {isTurnFinalAssistant:!next||next.role!=='assistant'});
+    },
     keepTailCount,
+    reader:typeof _messageWindowReader==='function'?_messageWindowReader(visWithIdx):null,
   });
+  if(result.virtualized){
+    // Assistant turns own their worklog and final-answer geometry together.
+    // Cutting a turn at an arbitrary raw message changes which segments fold.
+    const startOfTurn=index=>{
+      while(index>0&&visWithIdx[index]?.m?.role==='assistant'&&visWithIdx[index-1]?.m?.role==='assistant') index--;
+      return index;
+    };
+    const height=index=>{
+      const cached=_messageVirtualHeightCache[index];
+      if(typeof cached==='number'&&cached>=0) return cached;
+      const m=visWithIdx[index]?.m, next=visWithIdx[index+1]?.m;
+      if(!S.busy&&typeof chatActivityMode==='function'&&chatActivityMode()==='compact_worklog'&&
+         _assistantMessageBelongsInWorklog(m,visWithIdx[index]?.rawIdx,null,undefined,{isTurnFinalAssistant:!next||next.role!=='assistant'})) return 0;
+      return _messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[index]));
+    };
+    const originalStart=result.start, originalTail=result.tailStart;
+    result.start=startOfTurn(result.start);
+    result.tailStart=startOfTurn(result.tailStart);
+    while(result.end<result.tailStart&&visWithIdx[result.end]?.m?.role==='assistant'&&visWithIdx[result.end-1]?.m?.role==='assistant') result.end++;
+    if(result.end>=result.tailStart){result.end=Math.max(result.end,result.tailStart);result.tailStart=result.end;}
+    for(let i=result.start;i<originalStart;i++) result.topPad-=height(i);
+    result.topPad=Math.max(0,result.topPad);
+    result.bottomPad=0;
+    for(let i=result.end;i<result.tailStart;i++) result.bottomPad+=height(i);
+  }
+  return result;
 }
 function _messageVirtualPrependedHeightDelta(prependedRenderableCount){
   const count=Math.max(0, Number(prependedRenderableCount)||0);
@@ -1392,10 +1435,11 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     const entry=renderVisWithIdx[vi];
     if(!entry) continue;
     const totalHeight=_measureMessageVirtualRow(inner, entry);
-    if(totalHeight<=0) continue;
+    // Zero is a measured collapsed anchor, distinct from an unmeasured slot.
+    if(totalHeight<=0&&!inner.querySelector(`[data-msg-idx="${entry.rawIdx}"]`)) continue;
     const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
     if(!Number.isFinite(visibleIdx)) continue;
-    if(Math.abs((Number(_messageVirtualHeightCache[visibleIdx])||0)-totalHeight)>1){
+    if(!Number.isFinite(_messageVirtualHeightCache[visibleIdx])||Math.abs(_messageVirtualHeightCache[visibleIdx]-totalHeight)>1){
       _messageVirtualHeightCache[visibleIdx]=totalHeight;
       changed=true;
     }
@@ -1475,6 +1519,147 @@ function _rememberRenderedUserRowIntrinsicHeights(){
     }
   }
 }
+// Window mutations are staged off-DOM and committed once. No scroll snapshot is
+// carried across a frame: the reader is sampled at the synchronous mutation.
+let _messageWindowRevision=0;
+function _messageWindowSnapshot(){
+  const container=$('messages');
+  const inner=$('msgInner');
+  if(!container||!inner||inner.dataset.windowSession!==S.session?.session_id) return null;
+  const top=container.getBoundingClientRect().top;
+  const candidates=Array.from(inner.querySelectorAll('[data-msg-idx]')).filter(node=>node.getBoundingClientRect().height>0);
+  // Keep a nearest content reference even when the viewport crosses a spacer.
+  // Rejecting every offscreen row here abandons ownership precisely at a cold
+  // boundary, when estimates are being replaced by measured content.
+  candidates.sort((a,b)=>{
+    const distance=node=>{const r=node.getBoundingClientRect();return r.bottom<=top?top-r.bottom:r.top>=top+container.clientHeight?r.top-top-container.clientHeight:0;};
+    return distance(a)-distance(b);
+  });
+  for(const node of candidates){
+    const rect=node.getBoundingClientRect();
+    if(rect.height>0){
+      const landmarks=Array.from(node.querySelectorAll('p,pre,table,li,h1,h2,h3,h4'));
+      const landmarkIndex=landmarks.findIndex(el=>{
+        const r=el.getBoundingClientRect();return r.height>0&&r.bottom>top&&r.top<top+container.clientHeight;
+      });
+      const landmark=landmarks[landmarkIndex]||node;
+      return {node:landmark,row:node,landmarkIndex,sessionIndex:Number(node.dataset.sessionMsgIdx),
+        key:node.dataset.messageAnchorKey||'',offset:landmark.getBoundingClientRect().top-top,rowOffset:rect.top-top};
+    }
+  }
+  return null;
+}
+function _messageWindowReader(entries){
+  const anchor=_messageWindowSnapshot();
+  if(!anchor) return null;
+  let index=Number.isFinite(anchor.sessionIndex)
+    ? entries.findIndex(e=>_messageSessionIndexForRawIdx(e.rawIdx)===anchor.sessionIndex):-1;
+  if(index<0&&anchor.key) index=_messageVisibleIndexForAnchorKey(anchor.key,entries);
+  return index<0?null:{index,offset:anchor.rowOffset,height:anchor.row.getBoundingClientRect().height};
+}
+function _messageWindowNodeKey(node){
+  if(node.id==='liveAssistantTurn') return 'live';
+  const rows=node.matches('[data-msg-idx]')?[node]:Array.from(node.querySelectorAll('[data-msg-idx]'));
+  return rows.length?rows.map(row=>row.dataset.sessionMsgIdx+':'+(row.dataset.messageAnchorKey||'')).join(';'):'';
+}
+function _commitMessageWindow(target, staged, anchor, reuse){
+  const container=$('messages');
+  // Browser anchoring and JS compensation must not both own this transaction.
+  container.style.overflowAnchor='none';
+  const previous=new Map();
+  for(const node of Array.from(target.children)){
+    const key=_messageWindowNodeKey(node);
+    if(key&&(reuse||key==='live')&&target.dataset.windowSession===S.session?.session_id) previous.set(key,node);
+  }
+  const desired=Array.from(staged.children).map(node=>{
+    const key=_messageWindowNodeKey(node), old=previous.get(key);
+    // Identity alone is not a content version: anchor keys intentionally use a
+    // short prefix. Compare the unenhanced render, not the mutated live DOM
+    // (syntax highlighting, disclosures, media and selection live there).
+    node._messageWindowMarkup=node.outerHTML.replace(/contain-intrinsic-size: auto [\d.]+px;/g,'');
+    return old&&(key==='live'||old._messageWindowMarkup===node._messageWindowMarkup)?old:node;
+  });
+  // Insert before removing: the live scroller never sees an empty transcript.
+  for(let i=0;i<desired.length;i++){
+    const node=desired[i];
+    if(node.parentElement===target) continue;
+    const successor=desired.slice(i+1).find(next=>next.parentElement===target)||null;
+    target.insertBefore(node,successor);
+  }
+  const keep=new Set(desired);
+  for(const node of Array.from(target.children)) if(!keep.has(node)) node.remove();
+  for(let i=0;i<desired.length;i++){
+    if(target.children[i]!==desired[i]) target.insertBefore(desired[i],target.children[i]||null);
+  }
+  _restoreMessageWindowReader(target,anchor);
+  for(const node of target.querySelectorAll('[data-session-msg-idx]')){
+    node.dataset.msgIdx=String(_messageRawIdxForSessionIndex(Number(node.dataset.sessionMsgIdx)));
+  }
+  target.dataset.windowSession=S.session?.session_id||'';
+  _messageWindowRevision++;
+  _rememberMessageWindowReader();
+}
+function _restoreMessageWindowReader(target,anchor){
+  const container=$('messages');
+  if(anchor){
+    let row=anchor.node.isConnected?anchor.node:null;
+    if(!row){
+      row=Array.from(target.querySelectorAll('[data-msg-idx]')).find(node=>
+        Number(node.dataset.sessionMsgIdx)===anchor.sessionIndex || (anchor.key&&node.dataset.messageAnchorKey===anchor.key));
+      if(row&&anchor.landmarkIndex>=0) row=row.querySelectorAll('p,pre,table,li,h1,h2,h3,h4')[anchor.landmarkIndex]||row;
+    }
+    if(row){
+      const delta=row.getBoundingClientRect().top-container.getBoundingClientRect().top-anchor.offset;
+      if(Math.abs(delta)>0.5){
+        _programmaticScroll=true;
+        _programmaticScrollSetAt=performance.now();
+        container.scrollTop+=delta;
+        // The follow listener may already have a queued rAF. Give it the
+        // corrected baseline, so this geometry write cannot count as a
+        // downward user movement catching the previous tail.
+        _lastScrollTop=container.scrollTop;
+        _lastMessageScrollHeight=container.scrollHeight;
+        _deferClearProgrammaticScroll();
+      }
+    }
+  }
+}
+let _messageWindowResizeObserver=null;
+let _messageWindowObserved=null;
+let _messageWindowInputEpoch=0;
+function _rememberMessageWindowReader(){
+  const container=$('messages'), inner=$('msgInner');
+  if(!container||!inner) return;
+  _messageWindowObserved={anchor:_messageWindowSnapshot(),top:container.scrollTop,
+    sid:S.session?.session_id,data:S.messages,revision:_messageWindowRevision,input:_messageWindowInputEpoch};
+  if(_messageWindowResizeObserver||typeof ResizeObserver==='undefined') return;
+  for(const event of ['wheel','touchstart','pointerdown','keydown']){
+    container.addEventListener(event,()=>{_messageWindowInputEpoch++;},{passive:true});
+  }
+  container.addEventListener('scroll',()=>{
+    // A queued event from our own correction must not replace the landmark
+    // after a later layout change but before ResizeObserver delivers it.
+    if(!_messageWindowObserved||container.scrollTop!==_messageWindowObserved.top) _rememberMessageWindowReader();
+  },{passive:true});
+  _messageWindowResizeObserver=new ResizeObserver(()=>{
+    _settleMessageWindowReader();
+    _scheduleMessageVirtualizedRender();
+  });
+  _messageWindowResizeObserver.observe(inner);
+}
+function _settleMessageWindowReader(){
+  const container=$('messages'), inner=$('msgInner'), saved=_messageWindowObserved;
+  if(!container||!inner) return;
+  if(saved&&saved.sid===S.session?.session_id&&saved.data===S.messages&&
+     saved.revision===_messageWindowRevision&&saved.input===_messageWindowInputEpoch&&
+     saved.top===container.scrollTop&&(_messageUserUnpinned||!_scrollPinned)){
+    _restoreMessageWindowReader(inner,saved.anchor);
+    // Keep the same content landmark through successive asynchronous layouts.
+    saved.top=container.scrollTop;
+  }else{
+    _rememberMessageWindowReader();
+  }
+}
 function _scheduleMessageVirtualizedRender(force){
   const container=$('messages');
   const inner=$('msgInner');
@@ -1491,22 +1676,11 @@ function _scheduleMessageVirtualizedRender(force){
   _messageVirtualScrollRaf=requestAnimationFrame(()=>{
     _messageVirtualScrollRaf=0;
     const liveVisWithIdx=_getVisibleMessagesWithIdx();
+    _settleMessageWindowReader();
     const liveWindow=_currentMessageVirtualWindow(liveVisWithIdx,_messageVirtualKeepTailCount());
     const liveKey=_messageVirtualWindowKeyFor(liveWindow);
     if(!force&&liveKey===_messageVirtualWindowKey) return;
-    if(_scrollbarDragActive){
-      _programmaticScroll=true;
-      _programmaticScrollSetAt=performance.now();
-      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true }); });
-      _deferClearProgrammaticScroll();
-      _messageVirtualWindowKey=liveKey;
-      return;
-    }
-    _msgNodeRecycleEnabled=true;
-    try{
-      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true }); });
-    }
-    finally{ _msgNodeRecycleEnabled=false; }
+    renderMessages({preserveScroll:true, _windowOnly:true});
   });
 }
 
@@ -6115,6 +6289,10 @@ function _recordNonMessageScrollIntent(e){
   // the programmatic flag and jump owner, but a low-delta upward wheel must still
   // count as reader takeover when it interrupted an owned scroll.
   const wheelUp=typeof e.deltaY==='number'&&e.deltaY<0;
+  // At a loaded-history boundary, an outward gesture produces no scroll event.
+  // Continue paging on actual input even when the page contains only collapsed
+  // activity. The loader owns deduplication and validates session/data identity.
+  if(wheelUp&&e.isTrusted&&el.scrollTop<=1&&_olderMessagesPrefetchReady()) _loadOlderMessages();
   const guardedWheelUp=wheelUp&&_freshProgrammaticScrollActive();
   const jumpScrollOwned=typeof _messageJumpScrollOwner!=='undefined'&&!!_messageJumpScrollOwner;
   if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0)){
@@ -16950,7 +17128,7 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
     _sessionHtmlCache.delete(_sessionHtmlCacheSid);
   }
   _messageVirtualWindowKey='';
-  renderMessages({preserveScroll:true,_virtualFallback:true});
+  _scheduleMessageVirtualizedRender(true);
   return true;
 }
 
@@ -17022,12 +17200,16 @@ function _processWakeupCardHtml(info, rawText, extras){
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
   const preserveScroll=!!(options&&options.preserveScroll);
-  const virtualFallback=!!(options&&options._virtualFallback);
+
   // Capture the pre-wipe scroll position when preserving OR when the reader has
   // manually unpinned; both need to restore the reader's position after the DOM
   // rebuild rather than snap to the bottom. (Codex #4006 r3 follow-up.)
   const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null;
-  const inner=$('msgInner');
+  const windowOnly=!!(options&&options._windowOnly);
+  const ownedWindow=windowOnly||!!(options&&options._ownedPrepend);
+  const liveInner=$('msgInner');
+  const windowAnchor=ownedWindow?((options&&options._prependAnchor)||_messageWindowSnapshot()):null;
+  const inner=ownedWindow?document.createElement('div'):liveInner;
   const sid=S.session?S.session.session_id:null;
   if(!S.busy&&Array.isArray(S.messages)&&typeof _hydrateIdLinkedHistoricalToolScenes==='function'){
     const activityMode=typeof chatActivityMode==='function'?chatActivityMode():'compact_worklog';
@@ -17048,9 +17230,7 @@ function renderMessages(options){
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const visWithIdx=_getVisibleMessagesWithIdx();
   $('emptyState').style.display=(visWithIdx.length||preservedCompressionTaskMessages.length)?'none':'';
-  const virtualWindow=virtualFallback
-    ? {virtualized:false,start:0,end:visWithIdx.length,topPad:0,bottomPad:0,total:visWithIdx.length,tailStart:visWithIdx.length}
-    : _currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
+  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
   const renderWindowKey=_messageVirtualWindowKeyFor(virtualWindow);
   const windowStart=virtualWindow.start;
   const windowEnd=virtualWindow.end;
@@ -17074,7 +17254,7 @@ function renderMessages(options){
   // Also skip cache for transient transcript cards such as /compress and
   // cross-channel handoff summaries; otherwise the cached transcript returns
   // before those cards can be inserted.
-  if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
+  if(!ownedWindow&&sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
     const renderSignature=_messageRenderCacheSignature();
     cachedRenderSignature=renderSignature;
     const cached=_sessionHtmlCache.get(sid);
@@ -17156,7 +17336,7 @@ function renderMessages(options){
   const sessionCompressionSummary=(
     S.session && typeof S.session.compression_anchor_summary==='string'
   ) ? S.session.compression_anchor_summary.trim() : '';
-  const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(inner);
+  const worklogDetailDisclosureState=_captureWorklogDetailDisclosureState(liveInner);
   _recycleStash.clear();
   if(_msgNodeRecycleEnabled){
     for(const child of Array.from(inner.children)){
@@ -17168,7 +17348,7 @@ function renderMessages(options){
   }
   // Mobile scroll-jank fix: temporarily disable overflow-anchor so Chromium
   // cannot re-anchor to the topmost row during the DOM wipe-and-rebuild gap.
-  if(window._fixMobileScrollJank) window._fixMobileScrollJank();
+  if(!ownedWindow&&window._fixMobileScrollJank) window._fixMobileScrollJank();
   // Capture whether the reader was at/near the tail BEFORE the wipe. A tail-follower
   // hit by a mid-stream re-render gets a one-frame jitter: the wipe+rebuild lands the
   // sync scrollTop write against a transient layout whose above-viewport height is a
@@ -17389,7 +17569,7 @@ function renderMessages(options){
   // Windowed render loop replaces the legacy full loop:
   // for(let vi=0;vi<visWithIdx.length;vi++)
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
-    if(virtualWindow.virtualized&&virtualWindow.bottomPad>0&&vi===headRenderCount){
+    if(virtualWindow.virtualized&&renderTailStart>windowEnd&&vi===headRenderCount){
       // The virtual gap breaks assistant-turn adjacency. Reset the current
       // turn before rendering the always-visible tail so assistant segments do
       // not merge across the spacer boundary.
@@ -17476,7 +17656,7 @@ function renderMessages(options){
     }
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
     const nextRendered=renderVisWithIdx[vi+1];
-    const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant');
+    const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant'||(vi+1===headRenderCount&&renderTailStart>windowEnd));
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
       // Static regression tests intentionally look for msg-media-img/msg-file-badge near this branch.
@@ -18557,6 +18737,23 @@ function renderMessages(options){
       }
     }
   }
+  if(ownedWindow){
+    for(const row of inner.querySelectorAll('[data-msg-idx]')) row.style.contentVisibility='visible';
+    _commitMessageWindow(liveInner,inner,windowAnchor,windowOnly);
+    _messageVirtualWindowKey=renderWindowKey;
+    _wireMessageWindowLoadEarlierButton();
+    _updateMessageVirtualMeasurements(renderVisWithIdx,renderVisibleIdxs,virtualWindow);
+    const revision=_messageWindowRevision, data=S.messages;
+    requestAnimationFrame(()=>{
+      if(revision!==_messageWindowRevision||S.messages!==data||S.session?.session_id!==sid) return;
+      // Post-processing may grow mounted content, but must not restore an old
+      // reader after wheel/touch input. The next window pass samples live geometry.
+      _postProcessWithAnchorSuppression(liveInner);
+    });
+    if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
+    return;
+  }
+  if(virtualWindow.virtualized) for(const row of inner.querySelectorAll('[data-msg-idx]')) row.style.contentVisibility='visible';
   // Re-attach the preserved live turn (#3877). The rebuild above recreated a
   // live turn from S.messages, but the live assistant message's content lags the
   // stream (it is only persisted to S.messages on a throttled write-back) — so the
@@ -18658,6 +18855,8 @@ function renderMessages(options){
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
+  // Remember render output before DOM-only enhancements mutate it.
+  for(const node of inner.children) node._messageWindowMarkup=node.outerHTML.replace(/contain-intrinsic-size: auto [\d.]+px;/g,'');
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
   // Refresh todo panel if it's currently open
@@ -18685,6 +18884,9 @@ function renderMessages(options){
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
   }
+  inner.dataset.windowSession=sid||'';
+  _messageWindowRevision++;
+  _rememberMessageWindowReader();
   _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
   // Kill the pinned/tail-follower mid-stream jitter. Schedule the re-anchor in a MICROTASK,
   // not synchronously: inside this render sync stack the browser still reports a transient
