@@ -114,6 +114,17 @@ Activity and live-turn follow-up:
 
 Before deployment:
 
+The mount-guard/clipped-owner follow-up moves range maintenance before fresh
+programmatic-scroll suppression while keeping follow/unpin interpretation
+behind that guard. Snapshot candidates are clipped against overflow ancestors;
+positive layout height alone does not mean a collapsed worklog is painted.
+Four behavioral cases fail on `289c31e5` and pass on this follow-up (two browser
+engines for required mount scheduling/idle convergence; desktop and mobile for
+clipped ownership). Verification: 44 targeted tests, 54 text/lifecycle browser
+checks, and 6 expanded-activity browser checks passed. The unchanged natural
+mobile tools gate still fails upward paging movement in both engines. This
+follow-up is not a completed scrolling fix.
+
 - Make virtual geometry and the renderer agree on complete assistant/worklog
   groups, including expanded activity and zero-height source anchors.
 - Prove content completeness and correct turn association, not just row bounds.
