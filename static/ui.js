@@ -1298,13 +1298,23 @@ function _compensateScrollForMeasurementDelta(renderFn){
     const topPadBefore=Number(anchorBefore.topPadBefore);
     if(Number.isFinite(topPadBefore)){
       const padDelta=topPadAfter-topPadBefore;
-      // #7591 fling guard: a pad delta larger than a few viewports is estimate
-      // error, not a real content shift. The viewport is stranded in the pad
-      // either way; the edge clamp in _maybeRecoverVirtualizedBlankViewport
-      // lands the reader at real rows, so the giant rewrite is both wrong and
-      // unnecessary. Skip it instead of throwing the reader across the
-      // transcript.
-      const maxComp=Math.max(1,container.clientHeight)*MESSAGE_VIRTUAL_COMPENSATION_MAX_VIEWPORTS;
+      // #7591 v2 — measured-realignment guard: a pad delta is REAL only if it
+      // matches a content change that actually happened around the anchor
+      // row's window. During a gesture, a pad that changes by tens of
+      // viewports between two frames is estimator churn; the viewport is
+      // stranded either way and the edge clamp in
+      // _maybeRecoverVirtualizedBlankViewport lands the reader on real rows.
+      // Apply pad compensation ONLY when |delta| fits within the rendered
+      // window's span (i.e., it is local), not when it implies re-anchoring
+      // the reader across the transcript.
+      const windowSpan=(()=>{
+        const rows=container.querySelectorAll('[data-msg-idx]');
+        if(rows.length<2) return 0;
+        const firstRect=rows[0].getBoundingClientRect();
+        const lastRect=rows[rows.length-1].getBoundingClientRect();
+        return Math.abs(lastRect.bottom-firstRect.top);
+      })();
+      const maxComp=Math.max(Math.max(1,container.clientHeight)*MESSAGE_VIRTUAL_COMPENSATION_MAX_VIEWPORTS, windowSpan);
       if(Math.abs(padDelta)>=2&&Math.abs(padDelta)<=maxComp){
         _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
         container.scrollTop=Math.max(0,scrollTopBefore+padDelta);

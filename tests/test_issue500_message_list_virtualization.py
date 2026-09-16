@@ -1467,6 +1467,7 @@ const container = {
   get clientHeight(){ return 914; },
   getBoundingClientRect(){ return {top: 0, bottom: 914}; },
   classList: { add(){}, remove(){} },
+  querySelectorAll(){ return []; },
   querySelector(selector){
     if(selector === '[data-virtual-spacer="before"]') return spacer;
     if(selector === '[data-msg-idx="7"]') return null;  // anchor recycled out of window
@@ -1511,6 +1512,7 @@ const container = {
   get clientHeight(){ return 914; },
   getBoundingClientRect(){ return {top: 0, bottom: 914}; },
   classList: { add(){}, remove(){} },
+  querySelectorAll(){ return []; },
   querySelector(selector){
     if(selector === '[data-virtual-spacer="before"]') return spacer;
     if(selector === '[data-msg-idx="7"]') return null;
