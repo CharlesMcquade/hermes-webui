@@ -916,6 +916,7 @@ function _messageVirtualRoleForEntry(entry){
   return 'default';
 }
 function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
+  if(typeof _messagePinnedAnchorRawIdx==='undefined'){globalThis._messagePinnedAnchorRawIdx=null;globalThis._messagePinnedAnchorAt=0;globalThis._messagePinnedAnchorTopOffset=0;globalThis._messagePinnedWindow=null;globalThis._messageVirtualCompensating=false;}
   _syncMessageVirtualHeightCache(visWithIdx);
   const container=$('messages');
   // #4325 opt-out: when the user disables transcript virtualization, always
@@ -1310,6 +1311,7 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
   return true;
 }
 let _messageViewportAnchorRemounting=false;
+
 let _messageVirtualCompensating=false;
 // #7591 v3.0 — last reader row resolved by an anchor restore (rawIdx) + time.
 // Window computations must contain this row while fresh: the estimate walk can
@@ -1363,6 +1365,7 @@ function _remountMessageViewportAnchor(anchor){
   return Number.isFinite(targetIdx)&&!!container.querySelector(`[data-msg-idx="${targetIdx}"]`);
 }
 function _compensateScrollForMeasurementDelta(renderFn){
+  if(typeof _messagePinnedAnchorRawIdx==='undefined'){globalThis._messagePinnedAnchorRawIdx=null;globalThis._messagePinnedAnchorAt=0;globalThis._messagePinnedAnchorTopOffset=0;globalThis._messagePinnedWindow=null;globalThis._messageVirtualCompensating=false;}
   const container=$('messages');
   if(!container) return renderFn();
   const anchorBefore=_captureMessageViewportAnchor();
@@ -1375,8 +1378,8 @@ function _compensateScrollForMeasurementDelta(renderFn){
   // (measured: reader at 20850 → wipe → capture sees 0 → restore 'restores'
   // the clamp, and in adjacent frames it flung 3458→51699). While the
   // compensating flag is set, the snapshot restore defers to this writer.
-  _messageVirtualCompensating=true;
-  try{ renderFn(); }finally{ container.classList.remove('vscroll-measuring'); _messageVirtualCompensating=false; }
+  if(typeof _messageVirtualCompensating!=='undefined')_messageVirtualCompensating=true;
+  try{ renderFn(); }finally{ container.classList.remove('vscroll-measuring'); if(typeof _messageVirtualCompensating!=='undefined')_messageVirtualCompensating=false; }
   // #7591 v3.4 — while the anchor pin is fresh, the post-render realign in the
   // virtualized-render RAF is the single position writer (it re-places the
   // reader on the pinned row at a REAL row rect). The pad/row-delta writes
@@ -1730,6 +1733,9 @@ function _scheduleMessageVirtualizedRender(force){
     return;
   }
   if(_messageVirtualScrollRaf) return;
+  // #7591 v4 — during the load-older settle window the transcript is in its
+  // full-render calibration pass; windowed re-renders would fight it.
+  if(typeof _loadOlderSettleUntil==='number'&&performance.now()<_loadOlderSettleUntil) return;
   _messageVirtualScrollRaf=requestAnimationFrame(()=>{
     _messageVirtualScrollRaf=0;
     const liveVisWithIdx=_getVisibleMessagesWithIdx();
@@ -1761,7 +1767,7 @@ function _scheduleMessageVirtualizedRender(force){
     // browser then clamps scrollTop and the reader lands at the bottom even
     // though their anchor row is still rendered. While the anchor pin is fresh,
     // re-place the reader on the pinned row at its captured offset.
-    if(_messagePinnedAnchorRawIdx!==null&&(performance.now()-_messagePinnedAnchorAt)>=3000){_messagePinnedAnchorRawIdx=null;_messagePinnedWindow=null;}
+    if(typeof _messagePinnedAnchorRawIdx!=='undefined'&&_messagePinnedAnchorRawIdx!==null&&((performance.now()-_messagePinnedAnchorAt)>=3000||(typeof _messagePinnedWindow==='undefined'))){_messagePinnedAnchorRawIdx=null;_messagePinnedWindow=null;}
     if(_messagePinnedAnchorRawIdx!==null&&(performance.now()-_messagePinnedAnchorAt)<3000&&!((typeof _recentMessageScrollIntent==='function')&&_recentMessageScrollIntent())){
       const c2=$('messages');
       const row2=c2&&c2.querySelector(`[data-msg-idx="${_messagePinnedAnchorRawIdx}"]`);
@@ -16627,10 +16633,21 @@ function _restoreMessageScrollSnapshot(snapshot){
   // activity rebuilds can remount an older top-of-viewport anchor and yank a
   // pinned streaming transcript upward. Semantic anchors remain for manual
   // unpinned reading positions below.
-  if(_messageVirtualCompensating) return false;
-  if(typeof _messageScrollSnapshotInputChanged==='function'&&_messageScrollSnapshotInputChanged(snapshot)){
-    if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
-    return;
+  if(typeof _messageVirtualCompensating!=='undefined'&&_messageVirtualCompensating) return false;
+  // #7591 v4 — the settle-window calibration render (full, no windowing) is
+  // exempt from the prepend shields: its snapshot is captured pre-wipe at the
+  // anchored position and its restore is the only thing that holds the reader
+  // while the full DOM rebuild reshapes the number line.
+  if(!(snapshot&&snapshot._settleCalibration)){
+    if(typeof _loadingOlder!=='undefined'&&_loadingOlder){
+      if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
+      return;
+    }
+    const _settleUntil=(typeof _loadOlderSettleUntil==='number')?_loadOlderSettleUntil:0;
+    if(performance.now()<_settleUntil){
+      if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
+      return;
+    }
   }
   if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
   // #7591 v2.5 — load-older owns the viewport for the prepend instant. It runs
@@ -16932,10 +16949,21 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   // Same-frame live DOM updates (tool/worklog/activity rows) are the hot path for
   // streaming. Pinned followers must stay tail-relative here too; restoring the
   // semantic viewport anchor is only safe for explicitly unpinned readers.
-  if(_messageVirtualCompensating) return false;
-  if(typeof _messageScrollSnapshotInputChanged==='function'&&_messageScrollSnapshotInputChanged(snapshot)){
-    if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
-    return;
+  if(typeof _messageVirtualCompensating!=='undefined'&&_messageVirtualCompensating) return false;
+  // #7591 v4 — the settle-window calibration render (full, no windowing) is
+  // exempt from the prepend shields: its snapshot is captured pre-wipe at the
+  // anchored position and its restore is the only thing that holds the reader
+  // while the full DOM rebuild reshapes the number line.
+  if(!(snapshot&&snapshot._settleCalibration)){
+    if(typeof _loadingOlder!=='undefined'&&_loadingOlder){
+      if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
+      return;
+    }
+    const _settleUntil=(typeof _loadOlderSettleUntil==='number')?_loadOlderSettleUntil:0;
+    if(performance.now()<_settleUntil){
+      if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
+      return;
+    }
   }
   if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
   // A delayed rAF restore must not overwrite a position the reader changed
@@ -17315,13 +17343,15 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
 }
 
 function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow){
+  if(typeof _messagePinnedAnchorRawIdx==='undefined'){globalThis._messagePinnedAnchorRawIdx=null;globalThis._messagePinnedAnchorAt=0;globalThis._messagePinnedAnchorTopOffset=0;globalThis._messagePinnedWindow=null;globalThis._messageVirtualCompensating=false;}
   if(!preserveScroll||!virtualWindow||!virtualWindow.virtualized||!!(options&&options._virtualFallback)) return false;
   // #7591 v2.9 — inside a measurement-refresh frame the wipe has just clamped
   // scrollTop toward 0, so "reader intersects no row" is a wipe artifact, not a
   // reader state. The compensation writer owns this frame; clamping here
   // poisoned every subsequent frame (measured: recovery wrote ~0, compensation
   // wrote 27-32K on the garbage base, browser clamped to bottom, repeat).
-  if(_messageVirtualCompensating) return false;
+  if(typeof _messageVirtualCompensating!=='undefined'&&_messageVirtualCompensating) return false;
+  if(typeof _loadOlderSettleUntil==='number'&&performance.now()<_loadOlderSettleUntil) return false;
   if(_messageViewportIntersectsRenderedRow()) return false;
   // #7591 — the blank-viewport state is expected mid-gesture: during fast
   // upward scrolling the reader lands inside the estimated topPad before the
@@ -17476,6 +17506,9 @@ function renderMessages(options){
   // manually unpinned; both need to restore the reader's position after the DOM
   // rebuild rather than snap to the bottom. (Codex #4006 r3 follow-up.)
   const scrollSnapshot=(preserveScroll||_messageUserUnpinned)?_captureMessageScrollSnapshot():null;
+  // #7591 v4 — tag the calibration render's snapshot so its restore is exempt
+  // from the prepend shields (see _restoreMessageScrollSnapshot).
+  if(scrollSnapshot&&virtualFallback) scrollSnapshot._settleCalibration=true;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
   if(!S.busy&&Array.isArray(S.messages)&&typeof _hydrateIdLinkedHistoricalToolScenes==='function'){
