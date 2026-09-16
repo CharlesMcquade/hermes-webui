@@ -3901,6 +3901,10 @@ async function _loadOlderMessages() {
     _messagesTruncated = !!responseSession._messages_truncated;
     _oldestIdx = responseSession._messages_offset || 0;
     renderMessages({ preserveScroll: true });
+    // #7591 v2.6 — shield the settle window: measurement-refresh re-renders
+    // scheduled off this prepend must not snapshot-restore (their captures are
+    // mid-wipe garbage; see ui.js). loadOlder's anchor restore below owns position.
+    if (typeof window !== 'undefined') window._loadOlderSettleUntil = performance.now() + 1200;
     if (container) {
       // Prepending older messages must not teleport the reader. Anchor to the
       // first visible rendered row and restore that row's top offset after the

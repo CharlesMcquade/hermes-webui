@@ -717,6 +717,32 @@ function _messageVirtualWindow(opts){
     start++;
   }
   if(start>=tailStart){
+    // #7591 v3.1 — scrollTop inside/beyond the tail-pin region: the forward
+    // walk ran out of rows before covering the viewport (fresh-load boundary:
+    // est heights for the just-prepended rows undershoot real, so targetTop
+    // exceeds every offset). Returning an EMPTY above-tail window collapses
+    // scrollHeight below the reader's scrollTop; the browser clamps them to
+    // the bottom (measured: reader anchored at 20850 → H 31129→17315 → flung
+    // to 16387=bottom, the 'thrown back into what I already read' report).
+    // Walk BACKWARD from tailStart with the same height sources the DOM uses
+    // (cached real heights first) until the window covers the viewport.
+    const viewportBottom=scrollTop+viewportHeight;
+    let bStart=tailStart,bCovered=offset;
+    while(bStart>0&&bCovered>targetTop){
+      bStart--;
+      const h=rowHeightFor(bStart);
+      bCovered-=h;
+    }
+    if(bStart<tailStart){
+      let bEnd=bStart,bCursor=bCovered;
+      while(bEnd<tailStart&&bCursor<viewportBottom){
+        bCursor+=rowHeightFor(bEnd);
+        bEnd++;
+      }
+      let bTopPad=0;
+      for(let i=0;i<bStart;i++) bTopPad+=rowHeightFor(i);
+      return {virtualized:true,start:bStart,end:bEnd,topPad:bTopPad,bottomPad:0,total,tailStart};
+    }
     return {virtualized:true,start:tailStart,end:tailStart,topPad:offset,bottomPad:0,total,tailStart};
   }
   let end=start;
@@ -901,7 +927,7 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
     const tailStart=Math.max(0, total-Math.max(0, Number(keepTailCount)||0));
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
   }
-  return _messageVirtualWindow({
+  const baseWindow=_messageVirtualWindow({
     total:visWithIdx.length,
     scrollTop:container?container.scrollTop:0,
     viewportHeight:container?container.clientHeight:(_messageVirtualEstimatedRowHeight*6),
@@ -910,6 +936,69 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
     roleForIdx:idx=>_messageVirtualRoleForEntry(visWithIdx[idx]),
     keepTailCount,
   });
+  // #7591 v3.0 — anchor containment: while a fresh anchor row is known, the
+  // window must include it. The estimate walk positions the window by scrollTop
+  // against estimate heights; after a prepend the reader's real-rect position
+  // can sit far outside that walk (measured cascade: window re-excluded row
+  // 304, H collapsed, reader flung to the tail). Re-derive start/end around
+  // the anchor row using the same height sources, then recompute pads.
+  if(baseWindow&&baseWindow.virtualized){
+    const pinnedFresh=_messagePinnedAnchorRawIdx!==null&&(performance.now()-_messagePinnedAnchorAt)<3000;
+    if(pinnedFresh&&visWithIdx.length){
+      let anchorVisIdx=-1;
+      for(let i=visWithIdx.length-1;i>=0;i--){
+        const entry=visWithIdx[i];
+        if(entry&&entry.rawIdx===_messagePinnedAnchorRawIdx){anchorVisIdx=i;break;}
+      }
+      // Search found the anchor anywhere (tail rows included: after a prepend
+      // the resolved row commonly IS the first tail-pinned row — exactly where
+      // the estimate number line diverges from the real one).
+      const anchorInWindow=anchorVisIdx>=baseWindow.start&&anchorVisIdx<Math.max(baseWindow.end,anchorVisIdx+1)&&!(anchorVisIdx>=baseWindow.tailStart&&anchorVisIdx<baseWindow.end);
+      const scrollTopNow=container?container.scrollTop:0;
+      const estOverflow=container&&(scrollTopNow+ (container.clientHeight||0))>(baseWindow.topPad+0)+( (function(){let s=0;for(let i=baseWindow.start;i<baseWindow.end;i++){const c=Number(_messageVirtualHeightCache[i]);s+=Number.isFinite(c)&&c>0?c:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));}return s;})())+1;
+      if(_messagePinnedWindow&&_messagePinnedWindow.start<=anchorVisIdx&&anchorVisIdx<_messagePinnedWindow.end){
+        const rowHeightForP=(idx)=>{
+          const cached=Number(_messageVirtualHeightCache[idx]);
+          if(Number.isFinite(cached)&&cached>0) return cached;
+          const role=_messageVirtualRoleForEntry(visWithIdx[idx]);
+          const calibrated=(typeof _messageVirtualCalibratedHeightForRole==='function')?_messageVirtualCalibratedHeightForRole(role):null;
+          return calibrated||_messageVirtualDefaultHeightForRole(role);
+        };
+        const pw=_messagePinnedWindow;
+        let tp=0;
+        for(let i=0;i<pw.start;i++) tp+=rowHeightForP(i);
+        let bp=0;
+        for(let i=pw.end;i<baseWindow.tailStart;i++) bp+=rowHeightForP(i);
+        return {virtualized:true,start:pw.start,end:pw.end,topPad:tp,bottomPad:bp,total:baseWindow.total,tailStart:baseWindow.tailStart};
+      }
+      const needsContainment=anchorVisIdx>=0&&(
+        (anchorVisIdx<baseWindow.tailStart&&(anchorVisIdx<baseWindow.start||anchorVisIdx>=baseWindow.end))
+        || (anchorVisIdx>=baseWindow.tailStart&&estOverflow)
+      );
+      if(needsContainment){
+        const rowHeightFor=(idx)=>{
+          const cached=Number(_messageVirtualHeightCache[idx]);
+          if(Number.isFinite(cached)&&cached>0) return cached;
+          const role=_messageVirtualRoleForEntry(visWithIdx[idx]);
+          const calibrated=(typeof _messageVirtualCalibratedHeightForRole==='function')?_messageVirtualCalibratedHeightForRole(role):null;
+          return calibrated||_messageVirtualDefaultHeightForRole(role);
+        };
+        const viewportHeight=container?container.clientHeight:(_messageVirtualEstimatedRowHeight*6);
+        const bufferPx=(typeof MESSAGE_VIRTUAL_BUFFER_PX==='number')?MESSAGE_VIRTUAL_BUFFER_PX:0;
+        let start=anchorVisIdx,up=0;
+        while(start>0&&up<viewportHeight+bufferPx){start--;up+=rowHeightFor(start);}
+        let end=anchorVisIdx+1,down=0;
+        while(end<baseWindow.tailStart&&down<viewportHeight+bufferPx){down+=rowHeightFor(end);end++;}
+        let topPad=0;
+        for(let i=0;i<start;i++) topPad+=rowHeightFor(i);
+        let bottomPad=0;
+        for(let i=end;i<baseWindow.tailStart;i++) bottomPad+=rowHeightFor(i);
+        _messagePinnedWindow={start,end};
+        return {virtualized:true,start,end,topPad,bottomPad,total:baseWindow.total,tailStart:baseWindow.tailStart};
+      }
+    }
+  }
+  return baseWindow;
 }
 function _messageVirtualPrependedHeightDelta(prependedRenderableCount){
   const count=Math.max(0, Number(prependedRenderableCount)||0);
@@ -1210,11 +1299,26 @@ function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
     ? _suppressBrowserOverflowAnchor(container) : null;
   container.scrollTop+=(rect.top-containerRect.top)-targetTop;
   if(_releaseAnchorSuppression) _releaseAnchorSuppression();
+  // #7591 v3.0 — remember the row this restore placed the reader on.
+  if(row.dataset&&row.dataset.msgIdx!==undefined){
+    _messagePinnedAnchorRawIdx=Number(row.dataset.msgIdx);
+    _messagePinnedAnchorAt=performance.now();
+    _messagePinnedAnchorTopOffset=targetTop;
+  }
   if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
   else requestAnimationFrame(()=>{ setTimeout(()=>{ _programmaticScroll=false; },0); });
   return true;
 }
 let _messageViewportAnchorRemounting=false;
+let _messageVirtualCompensating=false;
+// #7591 v3.0 — last reader row resolved by an anchor restore (rawIdx) + time.
+// Window computations must contain this row while fresh: the estimate walk can
+// disagree with the real-rect position after a prepend, and a window that
+// excludes the reader's row strands them in a pad (fling cascade).
+let _messagePinnedAnchorRawIdx=null;
+let _messagePinnedAnchorAt=0;
+let _messagePinnedAnchorTopOffset=0;
+let _messagePinnedWindow=null;
 function _remountMessageViewportAnchor(anchor){
   const container=$('messages');
   if(!container||!anchor||_messageViewportAnchorRemounting) return false;
@@ -1264,7 +1368,21 @@ function _compensateScrollForMeasurementDelta(renderFn){
   const anchorBefore=_captureMessageViewportAnchor();
   const scrollTopBefore=container.scrollTop;
   container.classList.add('vscroll-measuring');
-  try{ renderFn(); }finally{ container.classList.remove('vscroll-measuring'); }
+  // #7591 v2.7 — single position owner per measurement-refresh frame: the
+  // compensation below re-anchors the reader's row after the rebuild. The
+  // render's internal snapshot restore must NOT also write scrollTop: its
+  // snapshot is captured after the wipe-clamp has already zeroed scrollTop
+  // (measured: reader at 20850 → wipe → capture sees 0 → restore 'restores'
+  // the clamp, and in adjacent frames it flung 3458→51699). While the
+  // compensating flag is set, the snapshot restore defers to this writer.
+  _messageVirtualCompensating=true;
+  try{ renderFn(); }finally{ container.classList.remove('vscroll-measuring'); _messageVirtualCompensating=false; }
+  // #7591 v3.4 — while the anchor pin is fresh, the post-render realign in the
+  // virtualized-render RAF is the single position writer (it re-places the
+  // reader on the pinned row at a REAL row rect). The pad/row-delta writes
+  // below double-count the realign and ping-pong the reader between two
+  // positions ~1 viewport apart (measured 7503↔13008 alternation). Skip them.
+  if(_messagePinnedAnchorRawIdx!==null&&(performance.now()-_messagePinnedAnchorAt)<3000) return;
   if(!anchorBefore) return;
   if(scrollTopBefore<1){
     const spacer=container.querySelector('[data-virtual-spacer="before"]');
@@ -1567,6 +1685,38 @@ function _rememberRenderedUserRowIntrinsicHeights(){
     }
   }
 }
+
+// #7591 v2.8 — pad-only refresh for measurement cycles: when the render window
+// itself did not move (same start/end/tailStart), a measurement refresh does not
+// need to wipe and rebuild the row DOM at all. Rewriting just the spacer heights
+// preserves the reader's viewport natively (rows are untouched; only the pads
+// resize) and eliminates the wipe-clamp→garbage-capture→compensation ping-pong
+// entirely (measured: reader thrown 20850→0→32774 loop on fresh-load boundary).
+function _updateMessageVirtualPadsOnly(virtualWindow){
+  const inner=$('msgInner');
+  if(!inner||!virtualWindow||!virtualWindow.virtualized) return false;
+  const spacers=inner.querySelectorAll('[data-virtual-spacer]');
+  if(!spacers.length) return false;
+  let before=null,gap=null,after=null;
+  spacers.forEach(sp=>{
+    const w=sp.dataset.virtualSpacer;
+    if(w==='before') before=sp; else if(w==='after') after=sp; else gap=sp;
+  });
+  if(!before||!after) return false;
+  // Guard: window must match what is actually rendered (no row churn since the
+  // last render) — compare first/last row idx against the window bounds.
+  const rows=inner.querySelectorAll('[data-msg-idx]');
+  if(!rows.length) return false;
+  const firstIdx=Number(rows[0].dataset.msgIdx);
+  const lastIdx=Number(rows[rows.length-1].dataset.msgIdx);
+  if(firstIdx!==virtualWindow.start||lastIdx!==Math.max(virtualWindow.start,virtualWindow.end-1)) return false;
+  const prevH=inner.scrollHeight;
+  before.style.height=Math.max(0,Math.round(virtualWindow.topPad||0))+'px';
+  after.style.height=Math.max(0,Math.round(virtualWindow.bottomPad||0))+'px';
+  if(gap) gap.style.height='0px';
+  return true;
+}
+
 function _scheduleMessageVirtualizedRender(force){
   const container=$('messages');
   const inner=$('msgInner');
@@ -1594,11 +1744,40 @@ function _scheduleMessageVirtualizedRender(force){
       _messageVirtualWindowKey=liveKey;
       return;
     }
+    // #7591 v2.8 — pad-only fast path: when the freshly computed window equals
+    // the last RENDERED window (no row churn) and only spacer heights moved
+    // (measurement updates), resize the spacers in place. No wipe, no snapshot
+    // capture, no compensation — the browser holds the viewport natively.
+    if(liveKey===_messageVirtualWindowKey&&_updateMessageVirtualPadsOnly(liveWindow)){
+      return;
+    }
     _msgNodeRecycleEnabled=true;
     try{
       _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true }); });
     }
     finally{ _msgNodeRecycleEnabled=false; }
+    // #7591 v3.3 — after a measurement refresh, late-settling content (map
+    // images, lazy details) can shrink rendered heights by thousands of px; the
+    // browser then clamps scrollTop and the reader lands at the bottom even
+    // though their anchor row is still rendered. While the anchor pin is fresh,
+    // re-place the reader on the pinned row at its captured offset.
+    if(_messagePinnedAnchorRawIdx!==null&&(performance.now()-_messagePinnedAnchorAt)>=3000){_messagePinnedAnchorRawIdx=null;_messagePinnedWindow=null;}
+    if(_messagePinnedAnchorRawIdx!==null&&(performance.now()-_messagePinnedAnchorAt)<3000&&!((typeof _recentMessageScrollIntent==='function')&&_recentMessageScrollIntent())){
+      const c2=$('messages');
+      const row2=c2&&c2.querySelector(`[data-msg-idx="${_messagePinnedAnchorRawIdx}"]`);
+      if(c2&&row2&&row2.getClientRects().length){
+        const r2=row2.getBoundingClientRect();
+        const c2r=c2.getBoundingClientRect();
+        const offset=_messagePinnedAnchorTopOffset||0;
+        const target=c2.scrollTop+(r2.top-c2r.top)-offset;
+        if(Math.abs((c2.scrollTop+(r2.top-c2r.top))-offset)>4){
+          _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+          c2.scrollTop=Math.max(0,target);
+          _lastScrollTop=c2.scrollTop;
+          if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
+        }
+      }
+    }
   });
 }
 
@@ -16448,6 +16627,7 @@ function _restoreMessageScrollSnapshot(snapshot){
   // activity rebuilds can remount an older top-of-viewport anchor and yank a
   // pinned streaming transcript upward. Semantic anchors remain for manual
   // unpinned reading positions below.
+  if(_messageVirtualCompensating) return false;
   if(typeof _messageScrollSnapshotInputChanged==='function'&&_messageScrollSnapshotInputChanged(snapshot)){
     if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
     return;
@@ -16461,6 +16641,20 @@ function _restoreMessageScrollSnapshot(snapshot){
   // entirely: abandon the snapshot and let _loadOlderMessages' own restore
   // place the reader.
   if(typeof _loadingOlder!=='undefined'&&_loadingOlder){
+    if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
+    return;
+  }
+  // #7591 v2.6 — the prepend storm: _loadOlderMessages' render triggers
+  // measurement refreshes (RAF → renderMessages({preserveScroll:true})) during
+  // the settle window AFTER _loadingOlder clears. Each one captures a snapshot
+  // MID-DOM-WIPE (scrollTop clamped to 0 by the empty container, anchor offsets
+  // measured against pre-settle geometry) and its restore then yanks the
+  // correctly-anchored reader to garbage coordinates (measured 20850→6996).
+  // Within the settle window the reader's position is loadOlder's anchor's job;
+  // pad changes are handled by _compensateScrollForMeasurementDelta. Defer all
+  // snapshot restores.
+  const _settleUntil=(typeof _loadOlderSettleUntil==='number')?_loadOlderSettleUntil:0;
+  if(performance.now()<_settleUntil){
     if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
     return;
   }
@@ -16738,6 +16932,7 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   // Same-frame live DOM updates (tool/worklog/activity rows) are the hot path for
   // streaming. Pinned followers must stay tail-relative here too; restoring the
   // semantic viewport anchor is only safe for explicitly unpinned readers.
+  if(_messageVirtualCompensating) return false;
   if(typeof _messageScrollSnapshotInputChanged==='function'&&_messageScrollSnapshotInputChanged(snapshot)){
     if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
     return;
@@ -17121,6 +17316,12 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
 
 function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow){
   if(!preserveScroll||!virtualWindow||!virtualWindow.virtualized||!!(options&&options._virtualFallback)) return false;
+  // #7591 v2.9 — inside a measurement-refresh frame the wipe has just clamped
+  // scrollTop toward 0, so "reader intersects no row" is a wipe artifact, not a
+  // reader state. The compensation writer owns this frame; clamping here
+  // poisoned every subsequent frame (measured: recovery wrote ~0, compensation
+  // wrote 27-32K on the garbage base, browser clamped to bottom, repeat).
+  if(_messageVirtualCompensating) return false;
   if(_messageViewportIntersectsRenderedRow()) return false;
   // #7591 — the blank-viewport state is expected mid-gesture: during fast
   // upward scrolling the reader lands inside the estimated topPad before the
