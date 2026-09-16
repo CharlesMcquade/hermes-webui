@@ -16453,6 +16453,17 @@ function _restoreMessageScrollSnapshot(snapshot){
     return;
   }
   if(_restorePinnedMessageScrollSnapshot(snapshot)) return;
+  // #7591 v2.5 — load-older owns the viewport for the prepend instant. It runs
+  // TWO position writers back-to-back (the snapshot restore here + its own
+  // rawIdxDelta-corrected anchor restore in sessions.js). The snapshot here was
+  // captured BEFORE the prepend, so its rawIdx base is stale and any
+  // verify/revert decision it makes is against pre-prepend geometry. Defer
+  // entirely: abandon the snapshot and let _loadOlderMessages' own restore
+  // place the reader.
+  if(typeof _loadingOlder!=='undefined'&&_loadingOlder){
+    if(typeof _abandonMessageScrollSnapshot==='function') _abandonMessageScrollSnapshot();
+    return;
+  }
   // #7591 verify-then-revert: a snapshot restore may legitimately re-anchor the
   // reader across large scrollTop distances when window geometry changed, but
   // it must never swap the CONTENT under the reader's eye. If the restore
