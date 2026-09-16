@@ -61,9 +61,22 @@ session passed a desktop natural-input traversal after turn alignment. Neither
 of those results establishes final acceptance or mobile tool-history quality.
 The timestamped tool-heavy mobile fixture failed in both Chromium and WebKit.
 
-The public tool-heavy fixture still exposes blank mobile viewports. Earlier
-upstream and failed-stack controls also failed browser geometry gates. These
-failures are not permission to weaken the oracle or report this candidate fixed.
+The original tool-heavy mobile "blank viewport" reports counted only indexed
+message segments. Same-frame DOM inspection found visible compact-worklog
+reasoning outside those segments. The browser oracle now includes these
+projections with source-message identities and ancestor-clipped geometry. This
+correction does **not** make the candidate green: the `ca00f0c1` control still
+fails natural mobile traversal in both engines with approximately 1,566px
+content jumps.
+
+The new `activity` case (`SCROLL_FIXTURE=tools`) places a paragraph in an
+activity-only viewport, proves a visibility mutation is detected, and loads
+older history. The `ca00f0c1` control fails in Chromium and WebKit mobile: the
+landmark moves from approximately 100px to -53px. This proves activity-position
+loss across the sequence, not that the prepend is its only position writer.
+Activity-owner implementation and full composed revalidation remain pending.
+Earlier upstream and failed-stack controls also failed browser geometry gates.
+None of these results is permission to report the candidate fixed.
 
 ## Follow-up review fixes
 

@@ -80,7 +80,6 @@ PROBE = r"""() => {
       return {id:m?m._test_id:null,node:ids.get(n),top:r.top-v.top,height:r.height,
         bottom:r.bottom-v.top};
     }).filter(r=>r.id!==null&&r.height>0);
-    const visible=rs.filter(r=>r.bottom>2&&r.top<v.height-2);
     const landmarks=[];
     for(const n of rows()) {
       const nr=n.getBoundingClientRect();
@@ -92,8 +91,42 @@ PROBE = r"""() => {
           landmarks.push({id:id+':'+i,top,bottom:r.bottom-v.top});
       });
     }
+    // Compact worklogs are visible siblings of hidden source segments. Observe
+    // their actual clipped content, not just the indexed message containers.
+    const activityNodes=Array.from(document.querySelectorAll(
+      '#msgInner .tool-card-row,#msgInner .wl-reason,#msgInner .tool-worklog-summary,#msgInner .agent-activity-thinking'));
+    const clippedRect=n=>{
+      const r=n.getBoundingClientRect();let top=r.top,bottom=r.bottom;
+      for(let p=n.parentElement;p&&p!==c;p=p.parentElement){
+        if(['hidden','clip','auto','scroll'].includes(getComputedStyle(p).overflowY)){
+          const pr=p.getBoundingClientRect();top=Math.max(top,pr.top);bottom=Math.min(bottom,pr.bottom);
+        }
+      }
+      return {top:top-v.top,bottom:bottom-v.top,height:Math.max(0,bottom-top)};
+    };
+    for(const n of activityNodes){
+      if(n.closest('[data-msg-idx]'))continue;
+      const rect=clippedRect(n);if(rect.height<=0||getComputedStyle(n).visibility==='hidden')continue;
+      const key=n.dataset.worklogAnchorKey;
+      const source=key&&rows().find(s=>s.dataset.worklogAnchorKey===key);
+      const message=source&&S.messages[Number(source.dataset.msgIdx)];
+      const toolKey=n.dataset.toolDisclosureKey||n.dataset.liveTid;
+      // Identity does not depend on new production anchoring helpers. Full
+      // content distinguishes unindexed projections without shifting ordinals.
+      const turn=n.closest('.assistant-turn');
+      const first=turn?.querySelector('[data-msg-idx]');
+      const turnId=first&&S.messages[Number(first.dataset.msgIdx)]?._test_id;
+      const id=message?message._test_id:'activity:'+(toolKey||(turnId+':'+n.className+':'+n.textContent.trim()));
+      if(!ids.has(n))ids.set(n,++serial);
+      rs.push({id,node:ids.get(n),...rect});
+      Array.from(n.querySelectorAll('p,pre,tr,h1,h2,h3,li')).forEach((p,i)=>{
+        const r=clippedRect(p);if(r.height<=0||r.bottom < -1600||r.top>v.height+1600)return;
+        landmarks.push({id:id+':'+i,top:r.top,bottom:r.bottom});
+      });
+    }
+    rs.sort((a,b)=>a.top-b.top);
     return {time:performance.now(),wheel:window.ownerWheel||0,rows:rs,landmarks,
-      visible:visible.map(r=>r.id),height:v.height,top:c.scrollTop,max:c.scrollHeight-c.clientHeight,
+      visible:rs.filter(r=>r.bottom>2&&r.top<v.height-2).map(r=>r.id),height:v.height,top:c.scrollTop,max:c.scrollHeight-c.clientHeight,
       oldest:_oldestIdx,truncated:_messagesTruncated,session:S.session.session_id,
       selectionLength:String(getSelection()).length};
   };
@@ -442,6 +475,47 @@ def natural_case(page, transport, evidence):
     evidence['requests']=transport.requests
 
 
+def activity_case(page, transport, evidence):
+    """Prepend while the viewport contains only projected Worklog reasoning."""
+    evidence['setup']=page.evaluate("""() => {
+      const c=$('messages');
+      const reasons=Array.from($('msgInner').querySelectorAll('.wl-reason'));
+      const reason=reasons.find(n=>n.textContent.includes('Activity landmark 200'));
+      if(!reason)throw Error('fixture did not project activity reasoning');
+      const group=reason.closest('.tool-worklog-group');
+      group.classList.add('open');group.classList.remove('tool-call-group-collapsed');
+      const mark=Array.from(reason.querySelectorAll('p')).find(p=>p.textContent.startsWith('Activity landmark 200:'));
+      if(!mark)throw Error('missing activity landmark');
+      c.scrollTop+=mark.getBoundingClientRect().top-c.getBoundingClientRect().top-100;
+      const offset=mark.getBoundingClientRect().top-c.getBoundingClientRect().top;
+      const visibleSegments=Array.from($('msgInner').querySelectorAll('[data-msg-idx]')).filter(n=>{
+        const b=n.getBoundingClientRect(),r=c.getBoundingClientRect();return b.height>0&&b.bottom>r.top&&b.top<r.bottom;}).length;
+      const seen=ownerSnapshot().visible.length;
+      reason.style.visibility='hidden';
+      const hidden=ownerSnapshot().visible.length;
+      reason.style.visibility='';
+      return {offset,visibleSegments,oldest:_oldestIdx,seen,hidden};
+    }""")
+    # Capture the placed landmark immediately; a subsequent window/measurement
+    # write is part of the behavior under test, not fixture setup to hide.
+    state="""() => {
+      const c=$('messages'),r=c.getBoundingClientRect();
+      const mark=Array.from($('msgInner').querySelectorAll('.wl-reason p')).find(p=>p.textContent.startsWith('Activity landmark 200:'));
+      const segments=Array.from($('msgInner').querySelectorAll('[data-msg-idx]')).filter(n=>{
+        const b=n.getBoundingClientRect();return b.height>0&&b.bottom>r.top&&b.top<r.bottom;});
+      return {offset:mark?.getBoundingClientRect().top-r.top,visibleSegments:segments.length,oldest:_oldestIdx};
+    }"""
+    before=evidence['setup']
+    assert before['visibleSegments']==0 and 0<before['offset']<200, ('activity-only setup failed',before)
+    assert before['seen'] and not before['hidden'], ('activity visibility mutation bite failed',before)
+    page.evaluate('async()=>await _loadOlderMessages()')
+    after=page.evaluate(state)
+    evidence.update(before=before,after=after)
+    assert after['oldest']<before['oldest'], 'history prepend did not occur'
+    assert after['offset'] is not None and abs(after['offset']-before['offset'])<=4, ('activity prepend drift',before,after)
+    idle(page)
+
+
 def disclosure_case(page, transport, evidence):
     position(page)
     page.evaluate("""() => {
@@ -534,6 +608,9 @@ def main():
                                 page.on('pageerror',lambda e:errors.append(str(e)))
                                 transport=Transport(temp)
                                 transport.streaming = case == 'stream'
+                                if case=='activity':
+                                    m=next(m for m in reversed(transport.data) if m.get('role')=='assistant' and m.get('tool_calls'))
+                                    m['content']='\n\n'.join(f'Activity landmark {n}: public synthetic research reasoning.' for n in range(350))
                                 if case=='disclosure':
                                     m=next(m for m in reversed(transport.data) if m.get('role')=='assistant')
                                     m['content']='<think>'+'\n'.join(f'Public reasoning line {n}' for n in range(250))+'</think>\n\n'+m['content']
@@ -566,6 +643,7 @@ def main():
                                     elif case=='natural':natural_case(page,transport,evidence)
                                     elif case=='cache':cache_case(page,transport,evidence)
                                     elif case=='disclosure':disclosure_case(page,transport,evidence)
+                                    elif case=='activity':activity_case(page,transport,evidence)
                                     else:raise ValueError('unknown case: '+case)
                                     assert not errors, errors
                                     results.append(dict(test=key,status='PASS'))
