@@ -82,3 +82,34 @@ def test_collapsed_activity_cannot_own_visible_reader(width):
         result = page.evaluate("() => {const a=_messageWindowSnapshot();return {index:a.sessionIndex,text:a.node.textContent};}")
         browser.close()
     assert result == {'index': 1, 'text': 'Actual reader'}
+
+
+@pytest.mark.parametrize('width', [1440, 390])
+def test_reason_projection_can_restore_to_its_visible_source(width):
+    source = Path(os.environ.get('SCROLL_ACTIVITY_SOURCE', ROOT / 'static/ui.js')).read_text()
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page(viewport={'width': width, 'height': 844})
+        page.set_content("""<style>body{margin:0}#messages{height:600px;overflow:auto;overflow-anchor:none}
+          p{height:100px;margin:0}</style><div id="messages"><div id="msgInner" data-window-session="one"></div></div>""")
+        page.add_script_tag(content="""
+          const $=id=>document.getElementById(id);const S={session:{session_id:'one'}};
+          let _programmaticScroll=false,_programmaticScrollSetAt=0,_lastScrollTop=0;
+          function _deferClearProgrammaticScroll(){}
+        """ + function(source, '_messageWindowSnapshot') + function(source, '_restoreMessageWindowReader'))
+        result = page.evaluate("""() => {
+          const c=$('messages'),inner=$('msgInner');
+          const text=Array.from({length:25},(_,i)=>`<p>Paragraph ${i}</p>`).join('');
+          inner.innerHTML=`<div hidden data-msg-idx="5" data-session-msg-idx="1007" data-worklog-anchor-key="msg:5"></div>
+            <div class="wl-reason" data-worklog-anchor-key="msg:5">${text}</div>`;
+          c.scrollTop=412;
+          const anchor=_messageWindowSnapshot();
+          const before=anchor.node.getBoundingClientRect().top;
+          inner.innerHTML=`<div style="height:4686px"></div><div data-msg-idx="55" data-session-msg-idx="1007">${text}</div>`;
+          _restoreMessageWindowReader(inner,anchor);
+          const after=inner.querySelectorAll('p')[anchor.landmarkIndex].getBoundingClientRect().top;
+          return {before,after,kind:anchor.activityKind,text:anchor.node.textContent};
+        }""")
+        browser.close()
+    assert result['kind'] == 'reason'
+    assert result['after'] == pytest.approx(result['before'], abs=0.5), result

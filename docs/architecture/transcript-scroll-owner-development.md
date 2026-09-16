@@ -1,7 +1,47 @@
 # Transcript scroll-owner development candidate
 
-**Status: not approved for live deployment.** This branch records a rollback and
-an exercised renderer prototype, not a completed scrolling fix.
+**Status: implementation verified in isolation; ready for a supervised live trial.**
+Not deployed. Final validation below supersedes the historical blocker reports;
+real-device touch momentum and the active production service remain unverified.
+
+## Final validation
+
+The final projection fix retains the source row when a worklog reason becomes a
+normal answer after paging. Previously the source lookup succeeded, then the
+missing `.wl-reason` lookup discarded it and skipped compensation. A focused
+layout test fails on `a3d755cb` with a 4,686px displacement and passes afterward.
+
+Visual inspection also caught incorrect answer bodies despite stable row IDs.
+The existing Markdown cache keyed long inputs by length and short prefix/suffix;
+numbered summaries collided. It now keys complete input within the existing
+bounded cache. Three mode-specific cache tests fail before and pass after. The
+browser oracle now compares synthetic summary headings against their messages;
+the old revision fails that assertion, independently of scroll geometry.
+
+All final browser runs below used identical JS hashes, recorded in
+[`transcript-scroll-owner-validation.json`](transcript-scroll-owner-validation.json):
+
+| Verification | Result |
+| --- | --- |
+| Selected ownership, scrolling, cache, media and neighboring tests | 198 passed |
+| Chromium/WebKit text/lifecycle, desktop/narrow/mobile | 60/60 |
+| Chromium/WebKit natural tool traversal + expanded activity, all widths | 12/12 |
+| Original reported private session, natural traversal, desktop/mobile | 4/4 |
+| Reconnect scene reconstruction, three display modes, two widths/engines | 12/12 |
+| Completion + loaded-window preservation, two modes/widths/engines | 8/8 |
+
+The private fixture was local-only; no transcript or screenshot is included.
+Reconnect uses deterministic SSE fixtures, not a real provider disconnect.
+Completion's existing test explicitly covers virtualization OFF; the ownership
+and natural-traversal matrix covers ON. Mobile means emulated viewport with
+trusted wheel input, **not** physical iOS/Android touch momentum. No live-service
+restart, user setting change, or production deployment was performed.
+
+Synthetic visual evidence (stills supplement, not replace, motion assertions):
+
+- [Before: cache displays the wrong summary](../images/transcript-scroll-owner/before-content.png)
+- [After: correct summary](../images/transcript-scroll-owner/after-content.png)
+- [Mobile: reading inside expanded activity](../images/transcript-scroll-owner/mobile-activity.png)
 
 ## Scope
 
