@@ -3761,10 +3761,6 @@ async function _loadOlderMessages() {
   if (!sid || !S.messages.length) return;
   if (_oldestIdx <= 0) { _messagesTruncated = false; return; }
   _loadingOlder = true;
-  // #7591 v4 — capture the reader's anchor BEFORE any prepend render can move
-  // them: the settle-placement below must restore THIS content position.
-  let settleAnchor = null;
-  try { if (typeof _captureMessageViewportAnchor === 'function') settleAnchor = _captureMessageViewportAnchor(); } catch (_) {}
   // Snapshot the generation BEFORE we await. If S.messages is wholesale
   // replaced while the request is in flight, the post-await check below
   // bails out so we never prepend stale older messages onto a freshly
@@ -3905,10 +3901,6 @@ async function _loadOlderMessages() {
     _messagesTruncated = !!responseSession._messages_truncated;
     _oldestIdx = responseSession._messages_offset || 0;
     renderMessages({ preserveScroll: true });
-    // #7591 v2.6 — shield the settle window: measurement-refresh re-renders
-    // scheduled off this prepend must not snapshot-restore (their captures are
-    // mid-wipe garbage; see ui.js). loadOlder's anchor restore below owns position.
-    if (typeof window !== 'undefined') window._loadOlderSettleUntil = performance.now() + 1200;
     if (container) {
       // Prepending older messages must not teleport the reader. Anchor to the
       // first visible rendered row and restore that row's top offset after the
@@ -3929,51 +3921,6 @@ async function _loadOlderMessages() {
         container.scrollTop = oldTop + addedHeight;
         requestAnimationFrame(()=>{ _programmaticScroll = false; });
       }
-    }
-    // #7591 v4 — measure-once settle: the estimate walk cannot know the real
-    // heights of the just-prepended rows (they were never rendered), so the
-    // first windowed recompute around the reader's real-rect anchor position
-    // mis-places the window and the reader gets clamped/flung (the fresh-load
-    // boundary bug). Render the transcript ONCE without windowing during the
-    // settle window: every row's real height enters the measurement cache, the
-    // reader holds via the anchor restore above, and the windowed steady state
-    // resumes from accurate geometry. Virtualization itself stays on — this is
-    // a one-shot calibration render after each prepend.
-    // The long-transcript rebuild mounts progressively, so the render's own
-    // snapshot restore can run before the anchor row exists; re-place the
-    // reader once the row mounts (bounded poll), keyed to its captured offset.
-    if (typeof renderMessages === 'function' && settleAnchor && window._loadOlderSettleUntil && performance.now() < window._loadOlderSettleUntil) {
-      try {
-        renderMessages({ preserveScroll: true, _virtualFallback: true });
-        if (settleAnchor) {
-          let tries = 0;
-          let lastH = -1;
-          let stableFrames = 0;
-          const settlePlace = () => {
-            tries++;
-            const c = document.getElementById('messages');
-            const h = c ? c.scrollHeight : 0;
-            stableFrames = (h === lastH && h > 0) ? stableFrames + 1 : 0;
-            lastH = h;
-            let row = null;
-            if (c && settleAnchor.key) row = Array.from(c.querySelectorAll('[data-message-anchor-key]')).find(el => el.dataset.messageAnchorKey === settleAnchor.key);
-            if (!row && c && Number.isFinite(settleAnchor.sessionIdx)) row = c.querySelector(`[data-session-msg-idx="${settleAnchor.sessionIdx}"]`);
-            // place once the mount has settled (H stable) and the row exists;
-            // keep polling while either condition fails (bounded).
-            if (c && row && row.getClientRects && row.getClientRects().length && stableFrames >= 2) {
-              const cr = c.getBoundingClientRect();
-              const rr = row.getBoundingClientRect();
-              _programmaticScroll = true;
-              _programmaticScrollSetAt = performance.now();
-              c.scrollTop = Math.max(0, c.scrollTop + (rr.top - cr.top) - (Number(settleAnchor.topOffset) || 0));
-              requestAnimationFrame(() => { _programmaticScroll = false; });
-            } else if (tries < 120) {
-              requestAnimationFrame(settlePlace);
-            }
-          };
-          requestAnimationFrame(settlePlace);
-        }
-      } catch (_) {}
     }
     _scrollPinned = false;
   } catch(e) {

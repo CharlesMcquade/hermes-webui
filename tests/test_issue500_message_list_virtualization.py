@@ -260,18 +260,12 @@ let _messageVirtualHeightCacheLen = 2;
 let _messageVirtualHeightCacheSrc = null;
 let _messageVirtualEstimatedRowHeight = 200;
 let _messageVirtualWindowKey = 'stale-key';
-// Harness mirrors production's #7591 calibration dependency (no means set →
-// seeding is a no-op in this test).
-let _messageVirtualMeasuredMeansByRole = null;
-function _messageVirtualCalibratedHeightForRole(){ return null; }
-function _messageVirtualRoleForEntry(){ return 'default'; }
 function _clearMessageVirtualHeightCache() {
   _messageVirtualHeightCache = [];
   _messageVirtualHeightCacheEntries = [];
   _messageVirtualHeightCacheLen = 0;
   _messageVirtualHeightCacheSrc = null;
   _messageVirtualEstimatedRowHeight = MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
-  _messageVirtualMeasuredMeansByRole = null;
   _messageVirtualWindowKey = '';
 }
 eval(extractFunc('_messageVirtualHeightEntryMatches'));
@@ -314,18 +308,12 @@ let _messageVirtualHeightCacheLen = 2;
 let _messageVirtualHeightCacheSrc = null;
 let _messageVirtualEstimatedRowHeight = 200;
 let _messageVirtualWindowKey = 'stale-key';
-// Harness mirrors production's #7591 calibration dependency (no means set →
-// seeding is a no-op in this test).
-let _messageVirtualMeasuredMeansByRole = null;
-function _messageVirtualCalibratedHeightForRole(){ return null; }
-function _messageVirtualRoleForEntry(){ return 'default'; }
 function _clearMessageVirtualHeightCache() {
   _messageVirtualHeightCache = [];
   _messageVirtualHeightCacheEntries = [];
   _messageVirtualHeightCacheLen = 0;
   _messageVirtualHeightCacheSrc = null;
   _messageVirtualEstimatedRowHeight = MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
-  _messageVirtualMeasuredMeansByRole = null;
   _messageVirtualWindowKey = '';
 }
 eval(extractFunc('_messageVirtualHeightEntryMatches'));
@@ -430,9 +418,6 @@ def test_render_messages_has_one_shot_virtual_blank_viewport_fallback():
 def test_virtual_blank_viewport_recovery_evicts_stale_cache_before_fallback():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
-// Harness mirrors production: $ exists (null ⇒ no container ⇒ recovery falls
-// through to the full-render fallback path this test pins).
-function $(id){ return null; }
 let deletes = [];
 let renderCalls = [];
 const _sessionHtmlCache = {
@@ -921,14 +906,10 @@ def test_compensate_scroll_for_measurement_delta_shifts_scroll_when_anchor_moves
     source = _extract_func_script(js) + """
 let scrollTopValue = 200;
 let scrollHistory = [];
-// Harness mirrors production's dependency chain: the #7591 compensation bound
-// constant + a realistic clientHeight for the container mock.
-const MESSAGE_VIRTUAL_COMPENSATION_MAX_VIEWPORTS = 2;
 const container = {
   get scrollTop(){ return scrollTopValue; },
   set scrollTop(v){ scrollHistory.push(v); scrollTopValue = v; },
   getBoundingClientRect(){ return {top: 50, bottom: 650}; },
-  get clientHeight(){ return 600; },
   classList: { add(){}, remove(){} },
   querySelector(selector){
     if(selector === '[data-msg-idx="42"]'){
@@ -1034,9 +1015,6 @@ let _lastScrollTop = 0;
 let scrollSetCount = 0;
 const performance = { now(){ return 1000; } };
 function clearTimeout(){}
-// Harness mirrors production's dependency chain: the #7591 compensation bound
-// constant + a realistic clientHeight for the container mock.
-const MESSAGE_VIRTUAL_COMPENSATION_MAX_VIEWPORTS = 2;
 const container = {
   get scrollTop(){ return scrollTopValue; },
   set scrollTop(v){
@@ -1044,7 +1022,6 @@ const container = {
     scrollTopValue = v;
   },
   getBoundingClientRect(){ return {top: 50, bottom: 650}; },
-  get clientHeight(){ return 600; },
   classList: { add(){}, remove(){} },
   querySelector(selector){
     if(selector === '[data-msg-idx="42"]'){
@@ -1163,382 +1140,4 @@ console.log(JSON.stringify({
     )
     assert metrics["timerCleared"] is True, (
         "_clearMessageVirtualHeightCache must call clearTimeout on the pending settle timer"
-    )
-
-
-def test_message_virtual_window_uses_calibrated_role_means_for_uncached_rows():
-    """#7591: unmeasured rows use the measured per-role mean, not the flat constant.
-
-    The measured mean for 'tool_call' rows (2800px) replaces the flat 400px
-    constant when the render loop has calibrated from real measurements, so the
-    estimated geometry tracks reality (issue #7591 measured the flat constants
-    producing a 34K px pad for ~11K px of real content).
-    """
-    js = UI_JS_PATH.read_text(encoding="utf-8")
-    source = _extract_func_script(js) + """
-eval(extractFunc('_messageVirtualDefaultHeightForRole'));
-// Harness mirrors production's dependency chain: calibration store + lookup.
-const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS = { user:120, process_wakeup:96, assistant:160, tool_call:400, default:140 };
-let _messageVirtualMeasuredMeansByRole = { tool_call: 2800, tool_call_count: 5 };
-function _messageVirtualCalibratedHeightForRole(role){
-  const means = _messageVirtualMeasuredMeansByRole;
-  if(!means||typeof means!=='object') return null;
-  const v = Number(means[role]);
-  return (Number.isFinite(v)&&v>0)?Math.round(v):null;
-}
-eval(extractFunc('_messageVirtualWindow'));
-const metrics = _messageVirtualWindow({
-  total: 240,
-  scrollTop: 3 * 2800,   // 3 calibrated rows above the viewport
-  viewportHeight: 720,
-  heights: [],           // nothing measured per-row yet
-  defaultHeight: 140,
-  bufferPx: 240,
-  threshold: 80,
-  keepTailCount: 50,
-  roleForIdx: (idx)=>'tool_call',
-});
-console.log(JSON.stringify(metrics));
-"""
-    metrics = json.loads(_run_node(source))
-    assert metrics["virtualized"] is True
-    # Uncached tool_call rows must use the calibrated mean (2800): scrolling to
-    # 3*2800 puts exactly 2 rows above the viewport (2*2800=5600 ≤ targetTop
-    # 8160 < 3*2800) → topPad must be 5600, not the flat 2*400=800.
-    assert metrics["topPad"] == 5600, (
-        "rowHeightFor must use the measured per-role mean (2800px) for unmeasured rows, "
-        f"not the flat 400px constant (topPad was {metrics['topPad']})"
-    )
-
-
-def test_message_virtual_window_falls_back_to_flat_constants_without_calibration():
-    """#7591: with no calibration data (fresh session), behavior is unchanged."""
-    js = UI_JS_PATH.read_text(encoding="utf-8")
-    source = _extract_func_script(js) + """
-eval(extractFunc('_messageVirtualDefaultHeightForRole'));
-const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS = { user:120, process_wakeup:96, assistant:160, tool_call:400, default:140 };
-let _messageVirtualMeasuredMeansByRole = null;
-function _messageVirtualCalibratedHeightForRole(role){
-  const means = _messageVirtualMeasuredMeansByRole;
-  if(!means||typeof means!=='object') return null;
-  const v = Number(means[role]);
-  return (Number.isFinite(v)&&v>0)?Math.round(v):null;
-}
-eval(extractFunc('_messageVirtualWindow'));
-const metrics = _messageVirtualWindow({
-  total: 240,
-  scrollTop: 3 * 400,   // 3 flat-constant rows above the viewport
-  viewportHeight: 720,
-  heights: [],
-  defaultHeight: 140,
-  bufferPx: 240,
-  threshold: 80,
-  keepTailCount: 50,
-  roleForIdx: (idx)=>'tool_call',
-});
-console.log(JSON.stringify(metrics));
-"""
-    metrics = json.loads(_run_node(source))
-    assert metrics["virtualized"] is True
-    # No calibration → flat tool_call constant (400px): 2 rows above the
-    # viewport → topPad 800.
-    assert metrics["topPad"] == 800, (
-        f"without calibration data, unmeasured rows must keep the flat role constant (topPad was {metrics['topPad']})"
-    )
-
-
-def test_measurement_pass_updates_per_role_calibrated_means():
-    """#7591: the measure pass maintains per-role means consumed by rowHeightFor."""
-    js = UI_JS_PATH.read_text(encoding="utf-8")
-    source = _extract_func_script(js) + """
-let _messageVirtualHeightCache = [null, null, null];
-let _messageVirtualHeightCacheEntries = [];
-let _messageVirtualHeightCacheLen = 3;
-let _messageVirtualHeightCacheSrc = {};
-let _messageVirtualEstimatedRowHeight = 140;
-let _messageVirtualMeasuredMeansByRole = null;
-let _messageVirtualMeasurementCycleKey = '';
-let _messageVirtualMeasurementRetryCount = 0;
-let _messageVirtualScrollActive = false;
-let _messageVirtualDeferredMeasurement = null;
-const S = { messages: [{}, {}, {}] };
-// Harness mirrors production: the measure pass reads $('msgInner').
-function $(id){ return id === 'msgInner' ? {} : null; }
-function _measureMessageVirtualRow(inner, entry){ return 2000 + entry.rawIdx * 10; }
-function _messageVirtualRoleForEntry(entry){ return 'tool_call'; }
-function _scheduleMessageVirtualMeasurementRefresh(){}
-function _markMessageVirtualMeasurementsSettled(){}
-const inner = {};
-const renderVisWithIdx = [{rawIdx:0},{rawIdx:1},{rawIdx:2}];
-const renderVisibleIdxs = [0,1,2];
-const virtualWindow = {virtualized:true,start:0,end:3,total:3,tailStart:0};
-eval(extractFunc('_updateMessageVirtualMeasurements'));
-_updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
-console.log(JSON.stringify({
-  means: _messageVirtualMeasuredMeansByRole,
-  cache: _messageVirtualHeightCache,
-}));
-"""
-    metrics = json.loads(_run_node(source))
-    means = metrics["means"]
-    assert means is not None, "measure pass must populate the calibration store"
-    # rows measured 2000, 2010, 2020 → running mean after 3rd = (0*2000+1*2010)/1 ... final = (mean(2000,2010)*2+2020)/3 ≈ 2010
-    assert 2000 <= means["tool_call"] <= 2020, (
-        f"per-role mean must track the measured rows, got {means.get('tool_call')}"
-    )
-    assert means["tool_call_count"] == 3
-    assert metrics["cache"] == [2000, 2010, 2020]
-
-
-def test_clear_message_virtual_height_cache_resets_calibration():
-    """#7591: calibration is per-session state — cleared with the height cache."""
-    js = UI_JS_PATH.read_text(encoding="utf-8")
-    source = _extract_func_script(js) + """
-eval(extractFunc('_messageVirtualDefaultHeightForRole'));
-const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS = { user:120, process_wakeup:96, assistant:160, tool_call:400, default:140 };
-let _messageVirtualHeightCache = [100];
-let _messageVirtualHeightCacheEntries = [];
-let _messageVirtualHeightCacheLen = 1;
-let _messageVirtualHeightCacheSrc = {};
-let _messageVirtualEstimatedRowHeight = 500;
-let _messageVirtualMeasuredMeansByRole = { tool_call: 2800, tool_call_count: 5 };
-let _messageVirtualWindowKey = 'k';
-let _messageVirtualMeasurementCycleKey = 'c';
-let _messageVirtualMeasurementRetryCount = 2;
-let _messageVirtualScrollActive = true;
-let _messageVirtualScrollSettleTimer = 7;
-let _messageVirtualDeferredMeasurement = {};
-let clearTimeoutCalled = 0;
-function clearTimeout(){ clearTimeoutCalled++; }
-function _clearUserRowIntrinsicHeightCache(){}
-eval(extractFunc('_clearMessageVirtualHeightCache'));
-_clearMessageVirtualHeightCache();
-console.log(JSON.stringify({
-  means: _messageVirtualMeasuredMeansByRole,
-}));
-"""
-    metrics = json.loads(_run_node(source))
-    assert metrics["means"] is None, (
-        "_clearMessageVirtualHeightCache must reset the calibration store so a new session re-seeds from constants"
-    )
-
-
-def test_blank_viewport_recovery_clamps_to_edge_instead_of_full_render():
-    """#7591 core regression: mid-gesture blank viewport must NOT re-render the
-    whole transcript (the oscillation engine). It must clamp the reader to the
-    nearest rendered edge and refresh the window — scrollHeight never collapses.
-    """
-    js = UI_JS_PATH.read_text(encoding="utf-8")
-    source = _extract_func_script(js) + """
-const ROW_HEIGHT = 120;
-// Reader is stranded ABOVE the rendered window (inside the estimated topPad):
-// the whole window sits BELOW the viewport (viewport 0-914, first rendered
-// row at 954). Clamp = bring firstRect.top (954) to cRect.top (0):
-// delta = +954 → scrollTop 28000 + 954 = 28954.
-let scrollTopValue = 28000;
-let scrollHistory = [];
-let renderCalls = [];
-const firstRow = { getBoundingClientRect(){ return {top: 954, bottom: 954 + ROW_HEIGHT}; } };
-const lastRow = { getBoundingClientRect(){ return {top: 1714, bottom: 1834}; } };
-const container = {
-  get scrollTop(){ return scrollTopValue; },
-  set scrollTop(v){ scrollHistory.push(v); scrollTopValue = v; },
-  get scrollHeight(){ return 57111; },
-  get clientHeight(){ return 914; },
-  getBoundingClientRect(){ return {top: 0, bottom: 914}; },
-  classList: { add(){}, remove(){} },
-  querySelectorAll(){ return [firstRow, lastRow]; },
-};
-function $(id){ return id === 'messages' ? container : null; }
-function _messageViewportIntersectsRenderedRow(){ return false; }
-function _freshProgrammaticScrollActive(){ return false; }
-let _programmaticScroll = false;
-let _programmaticScrollSetAt = 0;
-let _lastScrollTop = 0;
-function _deferClearProgrammaticScroll(){}
-let _messageVirtualWindowKey = 'old';
-function _scheduleMessageVirtualizedRender(force){ renderCalls.push(force); }
-let fullRenderCalls = [];
-function renderMessages(o){ fullRenderCalls.push(o); }
-const _sessionHtmlCache = { delete(){} };
-let _sessionHtmlCacheSid = null;
-const S = { session: { session_id: 'sid' } };
-eval(extractFunc('_maybeRecoverVirtualizedBlankViewport'));
-const recovered = _maybeRecoverVirtualizedBlankViewport({}, true, {virtualized:true});
-console.log(JSON.stringify({
-  recovered,
-  scrollHistory,
-  windowedRefreshCalled: renderCalls.length === 1,
-  fullRenderCalls,
-}));
-"""
-    metrics = json.loads(_run_node(source))
-    assert metrics["recovered"] is True, (
-        "blank-viewport mid-gesture must still trigger the recovery path"
-    )
-    # Reader stranded in the pad above the window: clamp to the first rendered
-    # row → 28000 + 954 = 28954.
-    assert metrics["scrollHistory"] == [28954], (
-        f"recovery must clamp to the nearest rendered edge, got {metrics['scrollHistory']}"
-    )
-    assert metrics["windowedRefreshCalled"] is True, (
-        "recovery must refresh the windowed render after the clamp"
-    )
-    assert metrics["fullRenderCalls"] == [], (
-        "#7591: mid-gesture recovery must NOT re-render the whole transcript — "
-        "clamp to the rendered edge and refresh the windowed render instead"
-    )
-
-
-def test_blank_viewport_recovery_downward_clamps_to_last_row():
-    """#7591 sibling: blank viewport while moving down clamps to the window end."""
-    js = UI_JS_PATH.read_text(encoding="utf-8")
-    source = _extract_func_script(js) + """
-// Reader overshot BELOW the rendered window (bottomPad side): the whole
-// window sits ABOVE the viewport (viewport 0-914; window ends at -94, i.e.
-// first row spans -860..-740, last row -214..-94). Clamp = bring
-// lastRect.bottom (-94) to cRect.bottom (914): delta = +1008 →
-// scrollTop 50000 + 1008 = 51008.
-const ROW_HEIGHT = 120;
-let scrollTopValue = 50000;
-let scrollHistory = [];
-let renderCalls = [];
-const firstRow = { getBoundingClientRect(){ return {top: -860, bottom: -740}; } };
-const lastRow = { getBoundingClientRect(){ return {top: -214, bottom: -94}; } };
-const container = {
-  get scrollTop(){ return scrollTopValue; },
-  set scrollTop(v){ scrollHistory.push(v); scrollTopValue = v; },
-  get scrollHeight(){ return 57111; },
-  get clientHeight(){ return 914; },
-  getBoundingClientRect(){ return {top: 0, bottom: 914}; },
-  classList: { add(){}, remove(){} },
-  querySelectorAll(){ return [firstRow, lastRow]; },
-};
-function $(id){ return id === 'messages' ? container : null; }
-function _messageViewportIntersectsRenderedRow(){ return false; }
-function _freshProgrammaticScrollActive(){ return false; }
-let _programmaticScroll = false;
-let _programmaticScrollSetAt = 0;
-let _lastScrollTop = 0;
-function _deferClearProgrammaticScroll(){}
-let _messageVirtualWindowKey = 'old';
-function _scheduleMessageVirtualizedRender(force){ renderCalls.push(force); }
-let fullRenderCalls = [];
-function renderMessages(o){ fullRenderCalls.push(o); }
-const _sessionHtmlCache = { delete(){} };
-let _sessionHtmlCacheSid = null;
-const S = { session: { session_id: 'sid' } };
-eval(extractFunc('_maybeRecoverVirtualizedBlankViewport'));
-const recovered = _maybeRecoverVirtualizedBlankViewport({}, true, {virtualized:true});
-console.log(JSON.stringify({
-  recovered,
-  scrollHistory,
-  windowedRefreshCalled: renderCalls.length === 1,
-  fullRenderCalls,
-}));
-"""
-    metrics = json.loads(_run_node(source))
-    assert metrics["recovered"] is True
-    # Window entirely above the viewport: clamp brings the window end flush
-    # with the viewport bottom → 50000 + (-94 - 914) = 48992.
-    assert metrics["scrollHistory"] == [48992], (
-        f"downward overshoot must clamp the window end into view, got {metrics['scrollHistory']}"
-    )
-    assert metrics["windowedRefreshCalled"] is True
-    assert metrics["fullRenderCalls"] == [], (
-        "#7591: downward blank viewport must not trigger the full-render fallback either"
-    )
-
-
-def test_compensation_fling_guard_skips_huge_pad_deltas():
-    """#7591: pad-delta compensation larger than 2 viewports is estimate error —
-    must be skipped, not applied (applying it was one half of the oscillation).
-    """
-    js = UI_JS_PATH.read_text(encoding="utf-8")
-    source = _extract_func_script(js) + """
-let scrollTopValue = 12000;
-let scrollHistory = [];
-// clientHeight 914 → guard bound = 2*914 = 1828; padDelta = -33720 ≫ bound.
-const MESSAGE_VIRTUAL_COMPENSATION_MAX_VIEWPORTS = 2;
-const spacer = { style: { height: '340px' } };
-const container = {
-  get scrollTop(){ return scrollTopValue; },
-  set scrollTop(v){ scrollHistory.push(v); scrollTopValue = v; },
-  get clientHeight(){ return 914; },
-  getBoundingClientRect(){ return {top: 0, bottom: 914}; },
-  classList: { add(){}, remove(){} },
-  querySelectorAll(){ return []; },
-  querySelector(selector){
-    if(selector === '[data-virtual-spacer="before"]') return spacer;
-    if(selector === '[data-msg-idx="7"]') return null;  // anchor recycled out of window
-    if(selector === '[data-session-msg-idx="7"]') return null;
-    return null;
-  },
-};
-function $(id){ return id === 'messages' ? container : null; }
-function _captureMessageViewportAnchor(){
-  return {rawIdx: 7, sessionIdx: 7, topOffset: 40, topPadBefore: 33720 + 340};
-}
-let _programmaticScroll = false;
-let _programmaticScrollSetAt = 0;
-let _programmaticScrollResetTimer = 0;
-let _lastScrollTop = 0;
-const performance = { now(){ return 1000; } };
-function clearTimeout(){}
-function setTimeout(cb, ms){ cb(); return 1; }
-function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollResetTimer);_programmaticScrollResetTimer=setTimeout(()=>{_programmaticScroll=false;},ms||80);}
-function _scheduleMessageVirtualizedRender(){}
-eval(extractFunc('_compensateScrollForMeasurementDelta'));
-_compensateScrollForMeasurementDelta(()=>{});
-console.log(JSON.stringify({scrollHistory}));
-"""
-    metrics = json.loads(_run_node(source))
-    assert metrics["scrollHistory"] == [], (
-        "a pad delta larger than 2 viewports is estimate error — compensation must skip it"
-    )
-
-
-def test_compensation_fling_guard_allows_normal_pad_deltas():
-    """#7591: small legitimate pad deltas (pad was 340 → 0 ⇒ −340) still apply."""
-    js = UI_JS_PATH.read_text(encoding="utf-8")
-    source = _extract_func_script(js) + """
-let scrollTopValue = 12000;
-let scrollHistory = [];
-const MESSAGE_VIRTUAL_COMPENSATION_MAX_VIEWPORTS = 2;
-const spacer = { style: { height: '0px' } };
-const container = {
-  get scrollTop(){ return scrollTopValue; },
-  set scrollTop(v){ scrollHistory.push(v); scrollTopValue = v; },
-  get clientHeight(){ return 914; },
-  getBoundingClientRect(){ return {top: 0, bottom: 914}; },
-  classList: { add(){}, remove(){} },
-  querySelectorAll(){ return []; },
-  querySelector(selector){
-    if(selector === '[data-virtual-spacer="before"]') return spacer;
-    if(selector === '[data-msg-idx="7"]') return null;
-    if(selector === '[data-session-msg-idx="7"]') return null;
-    return null;
-  },
-};
-function $(id){ return id === 'messages' ? container : null; }
-function _captureMessageViewportAnchor(){
-  return {rawIdx: 7, sessionIdx: 7, topOffset: 40, topPadBefore: 340};
-}
-let _programmaticScroll = false;
-let _programmaticScrollSetAt = 0;
-let _programmaticScrollResetTimer = 0;
-let _lastScrollTop = 0;
-const performance = { now(){ return 1000; } };
-function clearTimeout(){}
-function setTimeout(cb, ms){ cb(); return 1; }
-function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollResetTimer);_programmaticScrollResetTimer=setTimeout(()=>{_programmaticScroll=false;},ms||80);}
-function _scheduleMessageVirtualizedRender(){}
-eval(extractFunc('_compensateScrollForMeasurementDelta'));
-_compensateScrollForMeasurementDelta(()=>{});
-console.log(JSON.stringify({scrollHistory}));
-"""
-    metrics = json.loads(_run_node(source))
-    # padDelta = 0 - 340 = -340 → scrollTop 12000 - 340 = 11660
-    assert metrics["scrollHistory"] == [11660], (
-        f"legitimate small pad compensation must still apply, got {metrics['scrollHistory']}"
     )
