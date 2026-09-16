@@ -17120,18 +17120,14 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
   // extend coverage — the window recomputes from the clamped scrollTop and
   // mounts rows around the reader without ever rewriting the whole transcript.
   const container=$('messages');
-  // #7591 — a fresh programmatic-scroll flag means a restore/jump write is
-  // still settling; running the gesture clamp then would compound two
-  // writers. Fall through to the legacy full-render fallback in that case
-  // (bounded by the verify-then-revert below).
-  if(container&&typeof _freshProgrammaticScrollActive==='function'&&_freshProgrammaticScrollActive()){
-    if(_sessionHtmlCacheSid&&S.session&&S.session.session_id===_sessionHtmlCacheSid){
-      _sessionHtmlCache.delete(_sessionHtmlCacheSid);
-    }
-    _messageVirtualWindowKey='';
-    renderMessages({preserveScroll:true,_virtualFallback:true});
-    return true;
-  }
+  // #7591 v2.3 — NEVER full-render as a recovery. The full render is the
+  // oscillation engine: it flips scrollHeight by tens of viewports, which the
+  // next snapshot restore treats as geometry death, and the two writers
+  // ping-pong (traced: restore→0, fullrender→36K, restore→0 …). Whatever the
+  // programmatic-flag state, recovery is clamp + windowed refresh; the clamp
+  // below is geometry-driven and safe to run even while a restore write is
+  // settling (it lands the reader on real rows — strictly better than
+  // rendering 100K px of DOM mid-gesture).
   if(container){
     const rows=Array.from(container.querySelectorAll('[data-msg-idx]'));
     const firstRow=rows.length?rows[0]:null;
