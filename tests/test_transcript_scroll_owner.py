@@ -56,6 +56,7 @@ const reader=target.children[15], oldOffset=reader.getBoundingClientRect().top;
 const staged=new List(Array.from({length:50},(_,i)=>new Row(i+5,100)));
 eval(extractFunc('_messageWindowNodeKey'));
 eval(extractFunc('_restoreMessageWindowReader'));
+eval(extractFunc('_initializeMessageWindowOwnership'));
 eval(extractFunc('_commitMessageWindow'));
 _commitMessageWindow(target,staged,{node:reader,sessionIndex:15,key:'m15',offset:oldOffset},true);
 assert.equal(reader.getBoundingClientRect().top,oldOffset);
