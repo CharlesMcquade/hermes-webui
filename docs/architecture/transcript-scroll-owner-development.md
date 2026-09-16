@@ -74,7 +74,8 @@ activity-only viewport, proves a visibility mutation is detected, and loads
 older history. The `ca00f0c1` control fails in Chromium and WebKit mobile: the
 landmark moves from approximately 100px to -53px. This proves activity-position
 loss across the sequence, not that the prepend is its only position writer.
-Activity-owner implementation and full composed revalidation remain pending.
+The follow-up activity-owner and disclosure-identity fixes pass this case at all
+three viewport widths in both engines. Natural traversal remains a separate gate.
 Earlier upstream and failed-stack controls also failed browser geometry gates.
 None of these results is permission to report the candidate fixed.
 
@@ -86,13 +87,27 @@ now fixed. The new `cache` and `disclosure` browser cases fail against `9a5add3b
 follow-up candidate in Chromium and WebKit at desktop, narrow, and mobile widths
 (12 checks). The targeted 35 unit tests pass as well.
 
-Remaining review findings are source-traced, not claimed browser reproductions:
+Activity and live-turn follow-up:
 
-- The nearest-message fallback still does not anchor within expanded activity
-  siblings. Anchor activity to its owning turn and a within-activity landmark.
-- Unconditional whole-live-turn reuse can discard a richer staged projection;
-  absence of a staged live key can remove parser-ahead content. Reuse the existing
-  owner-validated segment/structural-superset reconciliation before commit.
+- Reader snapshots now resolve worklog reasoning/tool projections to their source
+  and retain a within-content landmark. Activity disclosure state uses a
+  session-relative source key and the existing disclosure restoration mechanism;
+  raw loaded-slice indices no longer erase expansion intent on prepend.
+- The `activity` case uses the real disclosure click handler and upward wheel
+  input before placing its landmark. It fails on `ca00f0c1` in both mobile
+  engines and passes on the candidate in desktop, narrow, and mobile (6 checks).
+  Isolated activity helper layout tests cover reasoning and tool bodies.
+- Owned commits now share the ordinary renderer's live-turn reconciliation,
+  preserving the parser-owned segment without discarding richer staged content.
+  All 8 real-browser reconciliation tests fail against `ca00f0c1` and pass on
+  the candidate, covering both owned-window entry points in both engines.
+- Follow-up verification: 119 selected unit/neighboring tests; 24 cache,
+  disclosure, streaming and switch browser checks; 48 text browser checks.
+  The combined text command timed out after completing Chromium, so WebKit was
+  rerun separately to completion. These are not natural tool-history acceptance.
+- The temporary natural diagnosis script catches assertions into evidence fields;
+  its process-level PASS is diagnostic completion, **not** an acceptance pass.
+  Natural tool-heavy traversal remains unresolved and blocks deployment.
 - Historical scene hydration and disclosure open-state restoration already run
   before the owned early return. The disclosure defect was detached layout, not
   general omission of hydration. Do not report that broader claim as established.
