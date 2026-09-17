@@ -670,6 +670,8 @@ function _messageVirtualWindow(opts){
     const cached=Number(heights[idx]);
     if(typeof heights[idx]==='number'&&Number.isFinite(cached)&&cached>=0) return cached;
     if(opts&&typeof opts.collapsedForIdx==='function'&&opts.collapsedForIdx(idx)) return 0;
+    const estimate=opts&&typeof opts.estimateForIdx==='function'?opts.estimateForIdx(idx):null;
+    if(Number.isFinite(estimate)&&estimate>0) return estimate;
     return roleForIdx?Math.max(1,_messageVirtualDefaultHeightForRole(roleForIdx(idx))):defaultHeight;
   };
   if(total<=Math.max(threshold, keepTailCount)){
@@ -857,12 +859,29 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
     const tailStart=Math.max(0, total-Math.max(0, Number(keepTailCount)||0));
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
   }
+  // Compact tool-only transparent rows are much shorter than the expanded
+  // tool-call fallback. Use one current measurement per source, not render
+  // frequency, to cover cold neighbors without retaining an entire turn.
+  const transparent=typeof chatActivityMode==='function'&&chatActivityMode()==='transparent_stream';
+  const toolCount=entry=>{
+    const m=entry&&entry.m;
+    return m&&m.role==='assistant'&&!m.content&&!m.reasoning&&Array.isArray(m.tool_calls)?m.tool_calls.length:0;
+  };
+  let toolHeight=0,measuredTools=0;
+  if(transparent){
+    for(let i=0;i<visWithIdx.length;i++){
+      const count=toolCount(visWithIdx[i]),height=_messageVirtualHeightCache[i];
+      if(count&&Number.isFinite(height)&&height>0){toolHeight+=height;measuredTools+=count;}
+    }
+  }
   const result=_messageVirtualWindow({
     total:visWithIdx.length,
     scrollTop:container?container.scrollTop:0,
     viewportHeight:container?container.clientHeight:(_messageVirtualEstimatedRowHeight*6),
     heights:_messageVirtualHeightCache,
     defaultHeight:_messageVirtualEstimatedRowHeight,
+    estimateForIdx:idx=>transparent&&measuredTools&&toolCount(visWithIdx[idx])
+      ? toolCount(visWithIdx[idx])*toolHeight/measuredTools : null,
     roleForIdx:idx=>_messageVirtualRoleForEntry(visWithIdx[idx]),
     collapsedForIdx:idx=>{
       const m=visWithIdx[idx]?.m;
@@ -874,9 +893,12 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
     keepTailCount,
     reader:typeof _messageWindowReader==='function'?_messageWindowReader(visWithIdx):null,
   });
-  if(result.virtualized){
-    // Assistant turns own their worklog and final-answer geometry together.
-    // Cutting a turn at an arbitrary raw message changes which segments fold.
+  if(result.virtualized&&!(typeof chatActivityMode==='function'&&chatActivityMode()==='transparent_stream')){
+    // Compact/hidden projections own their worklog and final-answer geometry
+    // together. Transparent Stream paints source rows independently: aligning
+    // its window (including the pinned tail) to a whole turn is unbounded.
+    // Its context maps still consume the full source list, not the mounted slice.
+    // Cutting a folded turn at an arbitrary raw message changes which segments fold.
     const startOfTurn=index=>{
       while(index>0&&visWithIdx[index]?.m?.role==='assistant'&&visWithIdx[index-1]?.m?.role==='assistant') index--;
       return index;
@@ -1392,13 +1414,37 @@ function _measureMessageVirtualRow(inner, entry){
   if(!inner||!entry) return 0;
   const primary=inner.querySelector(`[data-msg-idx="${entry.rawIdx}"]`);
   if(!primary) return 0;
-  let totalHeight=Math.max(0, primary.getBoundingClientRect().height||0);
+  // Transparent event rows reserve a trailing CSS margin outside their border
+  // box. Omitting it makes each window eviction shrink the prefix by one pixel
+  // per event, forcing a compensating scroll write during native wheel input.
+  const measuredHeight=node=>{
+    const height=Math.max(0,node.getBoundingClientRect().height||0);
+    if(height>0&&node.matches&&node.matches('.transparent-event-row')){
+      return height+(parseFloat(getComputedStyle(node).marginBottom)||0);
+    }
+    return height;
+  };
+  let totalHeight=measuredHeight(primary);
   if(primary.classList.contains('assistant-segment')){
+    // Transparent reasoning precedes its visible source segment. Charge it to
+    // that source, not the previous row: otherwise mounting the next source
+    // changes the previous row's measured height and oscillates the window.
+    const isLeadingThinking=node=>node&&node.matches&&node.matches('.transparent-thinking-event');
+    if(!primary.classList.contains('assistant-segment-worklog-source')){
+      for(let before=primary.previousElementSibling;isLeadingThinking(before);before=before.previousElementSibling){
+        totalHeight+=measuredHeight(before);
+      }
+    }
     let sibling=primary.nextElementSibling;
     while(sibling){
       if(sibling.hasAttribute('data-msg-idx')) break;
+      if(isLeadingThinking(sibling)){
+        let owner=sibling.nextElementSibling;
+        while(isLeadingThinking(owner)) owner=owner.nextElementSibling;
+        if(owner&&owner.matches('.assistant-segment[data-msg-idx]:not(.assistant-segment-worklog-source)')) break;
+      }
       if(!(sibling.matches&&sibling.matches('.tool-call-group,.tool-card-row,.agent-activity-thinking,.thinking-card-row'))) break;
-      totalHeight+=Math.max(0, sibling.getBoundingClientRect().height||0);
+      totalHeight+=measuredHeight(sibling);
       sibling=sibling.nextElementSibling;
     }
   }
@@ -1516,26 +1562,47 @@ function _messageWindowSnapshot(){
   const inner=$('msgInner');
   if(!container||!inner||inner.dataset.windowSession!==S.session?.session_id) return null;
   const top=container.getBoundingClientRect().top;
+  const viewportHeight=container.clientHeight;
   const sources=Array.from(inner.querySelectorAll('[data-msg-idx]'));
+  // Snapshot capture is read-only. Reuse each geometry/style read within this
+  // capture, not across frames: sorting many candidates must not repeatedly
+  // walk and measure the same clipped ancestor chain on every comparison.
+  const rects=new Map(),styles=new Map(),painted=new Map();
+  const rectFor=node=>{
+    if(!rects.has(node)) rects.set(node,node.getBoundingClientRect());
+    return rects.get(node);
+  };
+  const styleFor=node=>{
+    if(!styles.has(node)) styles.set(node,getComputedStyle(node));
+    return styles.get(node);
+  };
   // Worklog projections are siblings of their hidden source segments. Do not
   // give projections data-msg-idx: measurement must count the source only once.
   const paintedRect=node=>{
-    const rect=node.getBoundingClientRect();
+    if(painted.has(node)) return painted.get(node);
+    const rect=rectFor(node);
     let top=rect.top,bottom=rect.bottom;
-    if(getComputedStyle(node).visibility==='hidden') return {top,bottom:top,height:0};
+    if(styleFor(node).visibility==='hidden'){
+      const hidden={top,bottom:top,height:0};painted.set(node,hidden);return hidden;
+    }
     for(let parent=node.parentElement;parent&&parent!==container;parent=parent.parentElement){
-      if(['hidden','clip','auto','scroll'].includes(getComputedStyle(parent).overflowY)){
-        const bounds=parent.getBoundingClientRect();
+      if(['hidden','clip','auto','scroll'].includes(styleFor(parent).overflowY)){
+        const bounds=rectFor(parent);
         top=Math.max(top,bounds.top);bottom=Math.min(bottom,bounds.bottom);
       }
     }
-    return {top,bottom,height:Math.max(0,bottom-top)};
+    const result={top,bottom,height:Math.max(0,bottom-top)};
+    painted.set(node,result);
+    return result;
   };
   const candidates=Array.from(inner.querySelectorAll('[data-msg-idx],.wl-reason[data-worklog-anchor-key],.tool-card-row[data-tool-disclosure-key]'))
     .filter(node=>paintedRect(node).height>0);
   const sourceFor=node=>{
     if(node.matches('[data-msg-idx]')) return node;
     if(node.dataset.worklogAnchorKey) return sources.find(source=>source.dataset.worklogAnchorKey===node.dataset.worklogAnchorKey);
+    const sourceIndex=node.dataset.toolSourceSessionIdx;
+    if(sourceIndex!==undefined&&sourceIndex!==''&&Number.isFinite(Number(sourceIndex)))
+      return {dataset:{sessionMsgIdx:sourceIndex}};
     const key=node.dataset.toolDisclosureKey;
     const rawIdx=(S.messages||[]).findIndex(message=>(message.tool_calls||[]).some(tc=>_toolDisclosureIdentity(tc)===key));
     return rawIdx<0?null:{dataset:{sessionMsgIdx:_messageSessionIndexForRawIdx(rawIdx)}};
@@ -1544,22 +1611,25 @@ function _messageWindowSnapshot(){
   // Rejecting every offscreen row here abandons ownership precisely at a cold
   // boundary, when estimates are being replaced by measured content.
   candidates.sort((a,b)=>{
-    const distance=node=>{const r=paintedRect(node);return r.bottom<=top?top-r.bottom:r.top>=top+container.clientHeight?r.top-top-container.clientHeight:0;};
+    const distance=node=>{const r=paintedRect(node);return r.bottom<=top?top-r.bottom:r.top>=top+viewportHeight?r.top-top-viewportHeight:0;};
     return distance(a)-distance(b);
   });
   for(const node of candidates){
-    const rect=node.getBoundingClientRect();
+    const rect=rectFor(node);
     const source=sourceFor(node);
     if(rect.height>0&&source){
       const landmarks=Array.from(node.querySelectorAll('p,pre,table,li,h1,h2,h3,h4'));
       const landmarkIndex=landmarks.findIndex(el=>{
-        const r=el.getBoundingClientRect();return r.height>0&&r.bottom>top&&r.top<top+container.clientHeight;
+        // A collapsed detail can still have a layout box inside the viewport.
+        // Only actually painted content may own the reader's within-row offset.
+        const r=paintedRect(el);return r.height>0&&r.bottom>top&&r.top<top+viewportHeight;
       });
       const landmark=landmarks[landmarkIndex]||node;
       return {node:landmark,row:node,landmarkIndex,sessionIndex:Number(source.dataset.sessionMsgIdx),
         activityKind:node===source?'':node.dataset.worklogAnchorKey?'reason':'tool',
         activityKey:node.dataset.toolDisclosureKey||'',
-        key:source.dataset.messageAnchorKey||'',offset:landmark.getBoundingClientRect().top-top,rowOffset:rect.top-top};
+        activitySourceIndex:node.dataset.toolSourceSessionIdx??null,
+        key:source.dataset.messageAnchorKey||'',offset:rectFor(landmark).top-top,rowOffset:rect.top-top};
     }
   }
   return null;
@@ -1739,8 +1809,12 @@ function _restoreMessageWindowReader(target,anchor){
         row=(key?Array.from(target.querySelectorAll('.wl-reason[data-worklog-anchor-key]'))
           .find(node=>node.dataset.worklogAnchorKey===key):null)||row;
       }else if(anchor.activityKind==='tool'){
-        row=Array.from(target.querySelectorAll('.tool-card-row[data-tool-disclosure-key]'))
-          .find(node=>node.dataset.toolDisclosureKey===anchor.activityKey);
+        const matches=Array.from(target.querySelectorAll('.tool-card-row[data-tool-disclosure-key]'))
+          .filter(node=>node.dataset.toolDisclosureKey===anchor.activityKey&&
+            (anchor.activitySourceIndex==null||node.dataset.toolSourceSessionIdx===String(anchor.activitySourceIndex)));
+        // Disclosure identity alone is not source identity (replayed calls can
+        // share a tool ID). Never compensate against an ambiguous replacement.
+        row=matches.length===1?matches[0]:null;
       }
       if(row&&anchor.landmarkIndex>=0) row=row.querySelectorAll('p,pre,table,li,h1,h2,h3,h4')[anchor.landmarkIndex]||row;
     }
@@ -14505,6 +14579,7 @@ function _anchorSceneHasErroredTerminalState(scene){
   return _ANCHOR_SCENE_ERRORED_TERMINAL_STATES.has(state);
 }
 function _renderSettledAnchorSceneTransparentForMessage(message, segment, rawIdx){
+  if(_sourceWindowOwnsHistoricalScene(message)) return false;
   if(!message||!message._anchor_activity_scene||!segment) return false;
   if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
@@ -16299,6 +16374,16 @@ function _idLinkedHistoricalTurnScene(messages, turnStart, turnEnd, options){
   return {ownerIndex,scene};
 }
 
+// These scenes are derived from individually addressable source messages. In a
+// transparent virtual window those sources, not the final-summary aggregate,
+// own projection. Weak identity keeps this distinction browser-local and does
+// not change persisted scenes or retain discarded session data.
+const _sourceWindowHistoricalScenes=new WeakSet();
+function _sourceWindowOwnsHistoricalScene(message){
+  return typeof window!=='undefined'&&window._virtualizeTranscript!==false&&
+    typeof isTransparentStream==='function'&&isTransparentStream()&&
+    !!message&&!!message._anchor_activity_scene&&_sourceWindowHistoricalScenes.has(message._anchor_activity_scene);
+}
 function _hydrateIdLinkedHistoricalToolScenes(messages, options){
   const list=Array.isArray(messages)?messages:[];
   let turnStart=-1;
@@ -16312,7 +16397,10 @@ function _hydrateIdLinkedHistoricalToolScenes(messages, options){
     const owner=list[hydratedTurn.ownerIndex];
     try{owner._anchor_activity_scene=hydratedTurn.scene;}
     catch(e){return;}
-    if(owner._anchor_activity_scene===hydratedTurn.scene) hydrated+=1;
+    if(owner._anchor_activity_scene===hydratedTurn.scene){
+      _sourceWindowHistoricalScenes.add(hydratedTurn.scene);
+      hydrated+=1;
+    }
   };
   for(let rawIdx=0;rawIdx<list.length;rawIdx++){
     const message=list[rawIdx];
@@ -17532,8 +17620,10 @@ function renderMessages(options){
       thinkingText=_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents);
     }
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
-    const nextRendered=renderVisWithIdx[vi+1];
-    const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant'||(vi+1===headRenderCount&&renderTailStart>windowEnd));
+    // Finality is a source property, not the edge of a mounted window. In
+    // Transparent Stream a turn can continue beyond either virtual spacer.
+    const nextRendered=visWithIdx[renderVisibleIdxs[vi]+1];
+    const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant');
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
       // Static regression tests intentionally look for msg-media-img/msg-file-badge near this branch.
@@ -17936,7 +18026,7 @@ function renderMessages(options){
   const anchorOwnedAssistantRawIdxs=new Set();
   for(const [rawIdx,seg] of assistantSegments){
     const msg=S.messages[rawIdx];
-    if(!msg||!msg._anchor_activity_scene||!seg) continue;
+    if(!msg||!msg._anchor_activity_scene||!seg||_sourceWindowOwnsHistoricalScene(msg)) continue;
     const turn=seg.closest('.assistant-turn');
     if(!turn) continue;
     turn.querySelectorAll('.assistant-segment[data-msg-idx]').forEach(node=>{
@@ -18028,7 +18118,9 @@ function renderMessages(options){
       return next;
     };
     fallbackToolSources.forEach(({m,rawIdx})=>{
-      const assistantToolAnchorIdx=_assistantToolAnchorIdxForMessage(S.messages,rawIdx);
+      // Transparent cards belong to their declaring source even when an older
+      // turn's visible answer is loaded later or outside the mounted window.
+      const assistantToolAnchorIdx=isTransparentStream()?rawIdx:_assistantToolAnchorIdxForMessage(S.messages,rawIdx);
       // OpenAI format: top-level tool_calls field on the assistant message
       (m.tool_calls||[]).forEach(tc=>{
         if(!tc||typeof tc!=='object') return;
@@ -18357,6 +18449,8 @@ function renderMessages(options){
             segmentSeq,
             burstId,
           });
+          if(Number.isInteger(aIdx)&&aIdx>=0&&S.messages[aIdx])
+            toolRow.dataset.toolSourceSessionIdx=String(_messageSessionIndexForRawIdx(aIdx));
           insertAfterCursor(toolRow);
         }
         _syncTransparentEventControls(turn);

@@ -3,6 +3,9 @@
 
 Run: .venv/bin/python tests/browser_transcript_scroll_owner.py
 BROWSERS=chromium,webkit (default); VIEWPORTS=desktop,narrow,mobile (default).
+SCROLL_ACTIVITY_MODE=compact_worklog|transparent_stream|hide_all_activity.
+SCROLL_FIXTURE=tools supports SCROLL_TOOL_TURNS=12 and SCROLL_TOOL_STEPS=55;
+use 4 turns x 240 steps to exercise oversized assistant turns.
 --baseline-ref REV serves immutable git versions of ui.js and sessions.js.
 Artifacts, including failures and the exact source hashes, go outside the repo.
 The oracle compares *content* coordinates and DOM identity, never scrollTop
@@ -69,9 +72,12 @@ def messages():
         return [dict(m, _test_id=i) for i,m in enumerate(data)]
     if os.environ.get('SCROLL_FIXTURE') == 'tools':
         result = []
-        for turn in range(12):
+        turns=int(os.environ.get('SCROLL_TOOL_TURNS','12'))
+        steps=int(os.environ.get('SCROLL_TOOL_STEPS','55'))
+        assert turns>0 and steps>0, 'tool fixture dimensions must be positive'
+        for turn in range(turns):
             result.append(dict(role='user', content=f'Public research request {turn}'))
-            for step in range(55):
+            for step in range(steps):
                 tid = f'public-{turn}-{step}'
                 result.append(dict(role='assistant', content='', tool_calls=[dict(
                     id=tid, type='function', function=dict(name='web_search', arguments=json.dumps({'query': f'public topic {step}'})))]))
@@ -196,12 +202,17 @@ def movement(a, b):
     return old['top'] - new['top']
 
 
+def assert_snapshot(frame):
+    assert not frame.get('contentErrors'), ('wrong rendered message content', frame['contentErrors'])
+    assert frame['visible'], ('blank viewport', frame)
+    assert len(frame['rows']) < COUNT // 2, ('unbounded mounted transcript', len(frame['rows']))
+
+
 def assert_frames(frames, direction, *, identity=True):
     assert len(frames) >= 3, 'sampler did not observe browser frames'
+    assert_snapshot(frames[0])
     for a, b in zip(frames, frames[1:], strict=False):
-        assert not b.get('contentErrors'), ('wrong rendered message content', b['contentErrors'])
-        assert b['visible'], ('blank viewport', b)
-        assert len(b['rows']) < COUNT // 2, ('unbounded mounted transcript', len(b['rows']))
+        assert_snapshot(b)
         delta = movement(a, b)
         # Wheel dispatch/compositor presentation can straddle a sample. Two
         # 600px events of slack tolerate that, but never a tall-row teleport.
@@ -318,7 +329,7 @@ def idle(page):
     page.wait_for_timeout(1500)
     after = snapshot(page)
     assert abs(movement(before,after)) <= 3, ('delayed idle snap', before,after)
-    assert after['visible'], ('blank idle viewport',after)
+    assert_snapshot(after)
 
 
 def pump(page, direction, count=30):
@@ -501,6 +512,7 @@ def stream_case(page, transport, evidence):
 def natural_case(page, transport, evidence):
     """Cold tail to older history using trusted input, no forced tall-row setup."""
     evidence['initial']=snapshot(page)
+    assert_snapshot(evidence['initial'])
     for label, direction in [('up',-1),('down',1),('reverse',-1)]:
         frames=pump(page,direction,int(os.environ.get('SCROLL_WHEEL_COUNT','80')))
         evidence[label]=frames
@@ -618,6 +630,9 @@ def main():
     parser.add_argument('--artifacts',default='/tmp/hermes-scroll-evidence')
     parser.add_argument('--cases',default='continuity,identity,prepend,input,switch,image,cold,stream')
     args=parser.parse_args()
+    activity_mode=os.environ.get('SCROLL_ACTIVITY_MODE','compact_worklog')
+    if activity_mode not in ('compact_worklog','transparent_stream','hide_all_activity'):
+        raise ValueError('invalid SCROLL_ACTIVITY_MODE: '+activity_mode)
     oracle_self_test()
     artifact=Path(args.artifacts)/('baseline' if args.baseline_ref else 'candidate')
     artifact.mkdir(parents=True,exist_ok=True)
@@ -625,6 +640,10 @@ def main():
     for name in ('ui.js','sessions.js'):
         sources[name]=subprocess.check_output(['git','show',f'{args.baseline_ref}:static/{name}'],cwd=ROOT) if args.baseline_ref else (ROOT/'static'/name).read_bytes()
     provenance=dict(ref=args.baseline_ref,head=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),
+                    activity_mode=activity_mode,
+                    fixture=os.environ.get('SCROLL_FIXTURE','text'),
+                    tool_turns=os.environ.get('SCROLL_TOOL_TURNS','12'),
+                    tool_steps=os.environ.get('SCROLL_TOOL_STEPS','55'),
                     source_sha256={k:hashlib.sha256(v).hexdigest() for k,v in sources.items()})
     (artifact/'provenance.json').write_text(json.dumps(provenance,indent=2))
     results=[]
@@ -672,7 +691,12 @@ def main():
                                 try:
                                     page.goto(base,wait_until='load')
                                     wait(page,"typeof loadSession==='function' && S._bootReady===true")
-                                    page.evaluate("window._virtualizeTranscript=true;window._sessionEndlessScrollEnabled=true")
+                                    page.evaluate("""mode=>{window._virtualizeTranscript=true;
+                                      window._sessionEndlessScrollEnabled=true;
+                                      window._chatActivityDisplayMode=mode;
+                                      window._transparentStream=mode==='transparent_stream';}
+                                    """,activity_mode)
+                                    assert page.evaluate("chatActivityMode()") == activity_mode
                                     if case=='disclosure':page.evaluate("window._simplifiedToolCalling=false;window._showThinking=true")
                                     page.evaluate("async()=>await loadSession('fixture')")
                                     # Grow through genuine cold paginated responses, never assign S.messages.
@@ -706,7 +730,12 @@ def main():
                                             page.screenshot(path=str(artifact/(key+'.png')))
                                     except Exception as exc:evidence['capture_error']=str(exc)
                                     (artifact/(key+'.json')).write_text(json.dumps(evidence,indent=2))
-                                    print(json.dumps(results[-1]),flush=True)
+                                    console_result=results[-1]
+                                    if os.environ.get('SCROLL_SESSION_FILE') and console_result['status']=='FAIL':
+                                        # Assertions include painted row text. Keep full evidence
+                                        # local, never echo a private transcript into job notices.
+                                        console_result=dict(test=key,status='FAIL',error='Private fixture failure; inspect local artifacts.')
+                                    print(json.dumps(console_result),flush=True)
                                     context.close()
                     finally:browser.close()
         finally:

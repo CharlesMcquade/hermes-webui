@@ -18,9 +18,10 @@ submitted as a merge of the divergent development fork.
 - `_messageWindowSnapshot` captures a painted source row or activity projection,
   including a within-content landmark and session-relative source index.
   Hidden or clipped activity cannot own the viewport.
-- `_currentMessageVirtualWindow` retains that reader, distinguishes measured zero
-  from an unknown height, and aligns assistant turns so a virtual gap does not
-  change grouping semantics.
+- `_currentMessageVirtualWindow` retains that reader and distinguishes measured
+  zero from an unknown height. Compact/hidden projections align assistant turns
+  to preserve grouping. Transparent Stream instead windows individual source rows
+  so a large turn cannot expand the source window without bound.
 - `_loadOlderMessages` retains its existing request/session validation. It samples
   the reader after fetch completion and passes it into the owned prepend path.
 - `_commitMessageWindow` stages rows off-DOM, inserts before removal, reuses
@@ -112,14 +113,62 @@ The reporter confirmed the development-fork replacement scrolls well in the
 actual browser, with virtualization enabled. That is separate evidence from
 these upstream-port tests.
 
-A live tool-heavy **Transparent Stream** trial still exceeded its mounted-row
-acceptance bound, reaching **555 observed rows**. Passing the default Compact
-Worklog synthetic matrix does not resolve this. Whole-turn alignment can retain
-large turns; the bounded-rendering contract still needs a solution and an
-explicit all-display-mode gate before promoting this draft.
+A live tool-heavy **Transparent Stream** trial of the published scroll-owner
+replacement exceeded its mounted-row acceptance bound, reaching **555 observed
+rows**. The follow-up source-window candidate addresses whole-turn expansion,
+per-source tool ownership after prepend, and mount-dependent historical scene
+aggregation. Browser-synthesized scenes are tracked by weak object identity;
+server-supplied scenes remain authoritative and are not replaced with inferred
+legacy metadata. Final-answer classification uses the full source list rather
+than the mounted window edge.
+
+The source-history follow-up passes the unchanged natural traversal gate on
+Chromium/WebKit at desktop, narrow, and mobile widths:
+
+- Oversized public 4-turn × 240-tool history: **6/6**, at most **146** observed rows.
+- Ordinary public 12-turn × 55-tool history: **6/6**, at most **137** observed rows.
+- Original private reproduction: **6/6**, at most **155** observed rows; only
+  aggregate results are reported, never private transcript artifacts.
+- Compact activity/prepend/traversal: **12/12**; hidden oversized traversal: **6/6**.
+- Text/lifecycle matrix rerun: **60/60**.
+- Broader 90-module neighboring selection: **959 passed, 2 skipped**.
+
+The WebKit backward jump was isolated to a collapsed card's unpainted paragraph
+being selected as a landmark. Snapshot selection now clips descendants as well
+as candidate rows. Repeated tool IDs additionally require an exact source owner
+when replacing a detached card; disclosure identity alone is insufficient.
+Leading reasoning belongs to its following source, transparent event margins
+participate in measurement, and snapshot geometry/style reads are cached only
+within one synchronous capture. These have executed failing-before/passing-after
+regressions, independent of the composed traversal gate.
+
+[Follow-up public results and source hashes](../images/transcript-scroll-owner/transparent-results.json)
+identify the tested production bytes. Earlier `results.json` above records the
+original port, not this follow-up. Final synthetic images:
+[desktop](../images/transcript-scroll-owner/transparent-desktop.png) and
+[mobile](../images/transcript-scroll-owner/transparent-mobile.png).
+
+The strict browser oracle checks the initial snapshot, sampling frames, and idle
+state as well as motion; the observed-row bound remains below 190. Run both
+ordinary and oversized public tool turns with an explicit activity mode:
+
+```bash
+SCROLL_ACTIVITY_MODE=transparent_stream SCROLL_FIXTURE=tools \
+  SCROLL_TOOL_TURNS=4 SCROLL_TOOL_STEPS=240 \
+  BROWSERS=chromium,webkit VIEWPORTS=desktop,narrow,mobile \
+  .venv/bin/python tests/browser_transcript_scroll_owner.py \
+  --cases natural --artifacts /tmp/hermes-transparent-bound
+```
+
+A separate scope gap remains for server-supplied scenes: their existing
+"Show earlier steps" path materializes the omitted prefix, and just-settled
+scenes are exempt from the settled-row cap. These are disclosure bounds, not
+persistent virtual-row bounds. Passing source-history traversal must not be
+reported as a universal scene bound. Server-scene reveal/revisit/replacement and
+live-to-settled handoff require separate bounded-projection coverage.
 
 The full repository suite, physical-device touch momentum, real provider/network
-reconnect, all-display-mode bounded traversal, browser auth-on behavior, and
+reconnect, server-scene bounded disclosure/revisit, browser auth-on behavior, and
 composition with open PRs #7280/#7283 were not certified here. Live reconciliation
 coverage uses synthetic transport and checks parser connectivity, not provider
 reliability. Fork-only completion/reconnect scripts are not part of this port

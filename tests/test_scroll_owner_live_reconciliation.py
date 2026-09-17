@@ -107,3 +107,24 @@ def test_richer_staged_projection_keeps_structure_and_parser_segment(page, owned
     assert result['connected'] and result['sameTail'], result
     assert result['count'] == 2, result
     assert 'Earlier segment' in result['text'] and 'Tail parser ahead continued' in result['text'], result
+
+
+@pytest.mark.parametrize('live,restore,saved_open,expected_open', [
+    (False, False, True, False),  # ordinary settlement ignores the live open state
+    (False, True, True, True),    # owned-window rebuild preserves explicit intent
+    (False, True, False, False),
+    (True, False, True, True),
+    (True, False, False, False),
+])
+def test_activity_disclosure_restoration_is_opt_in(page, live, restore, saved_open, expected_open):
+    result = page.evaluate("""({live,restore,savedOpen})=>{
+      window._worklogDetailsExpandedByDefault=false;
+      const key='disclosure-contract';
+      _writeActivityDisclosureState(key,savedOpen);
+      const host=document.createElement('div');
+      document.getElementById('msgInner').append(host);
+      const group=ensureActivityGroup(host,{activityKey:key,live,restoreDisclosure:restore});
+      return {open:!group.classList.contains('tool-call-group-collapsed'),
+        expanded:group.querySelector('.activity-summary').getAttribute('aria-expanded')};
+    }""", {'live': live, 'restore': restore, 'savedOpen': saved_open})
+    assert result == {'open': expected_open, 'expanded': str(expected_open).lower()}
