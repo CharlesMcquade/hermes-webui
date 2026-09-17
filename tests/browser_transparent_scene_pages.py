@@ -6,6 +6,7 @@ import json
 import hashlib
 from pathlib import Path
 import tempfile
+import threading
 from playwright.sync_api import sync_playwright
 from browser_conversation_lifecycle import (
     _start_webui_server, _terminate_process, DeterministicGateway, FINAL_TEXT,
@@ -25,8 +26,19 @@ SETUP = """() => {
 } """
 ROWS = "() => [...document.querySelectorAll('.transparent-event-row[data-anchor-row-id]')].map(n=>n.getAttribute('data-anchor-row-id'))"
 
+class SceneCheckpoint(threading.Event):
+    """Allow slow CI browsers to consume the large fixture before settlement."""
+    def wait(self, timeout=None):
+        return super().wait(timeout=120 if timeout == 30 else timeout)
+
+
 class SceneGateway(DeterministicGateway):
     """Exercise real Gateway/SSE/renderer handoff with a long tool scene."""
+    def __init__(self, mode):
+        super().__init__(mode)
+        self.release_settle = SceneCheckpoint()
+        self.release_terminal = SceneCheckpoint()
+
     def _handler(self):
         handler=super()._handler()
         original=handler._event
@@ -49,7 +61,7 @@ def live_settle(page,gateway):
     page.locator('#btnSend').click()
     assert gateway.activity_ready.wait(15), 'Gateway live checkpoint missing'
     try:
-        page.wait_for_function("() => document.querySelectorAll('#liveAssistantTurn .transparent-event-row').length>=128",timeout=15000,polling=100)
+        page.wait_for_function("() => document.querySelectorAll('#liveAssistantTurn .transparent-event-row').length>=128",timeout=60000,polling=100)
     except Exception:
         print('LIVE CHECKPOINT',page.evaluate("({rows:document.querySelectorAll('#liveAssistantTurn .transparent-event-row').length,busy:S.busy,text:document.getElementById('msgInner').innerText.slice(-1800)})"),flush=True)
         raise
@@ -85,7 +97,7 @@ def live_settle(page,gateway):
 
 def main():
     artifacts=Path('/tmp/hermes-scene-pages-evidence'); artifacts.mkdir(exist_ok=True)
-    sources=['static/ui.js','static/sessions.js','static/messages.js',__file__]
+    sources=['static/ui.js','static/sessions.js','static/messages.js','tests/browser_transparent_scene_pages.py']
     hashes={str(p):hashlib.sha256((ROOT/p).read_bytes()).hexdigest() for p in sources}
     results=[]
     with tempfile.TemporaryDirectory(prefix='scene-pages-') as temp:

@@ -5,7 +5,6 @@
 
 const LOCALES = {
   en: {
-    show_later_steps: 'Show later steps ({0})',
     offline_title: 'Connection lost',
     offline_browser_detail: 'Your browser reports that this device is offline.',
     offline_network_detail: 'Hermes is unreachable from this browser right now.',
