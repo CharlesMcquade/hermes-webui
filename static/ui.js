@@ -1756,37 +1756,48 @@ function _reconcilePreservedLiveTurn(inner, _preservedLiveTurn){
 function _commitMessageWindow(target, staged, anchor, reuse){
   const container=$('messages');
   // Browser anchoring and JS compensation must not both own this transaction.
+  const previousAnchor=container.style.overflowAnchor||'';
+  const previousPriority=container.style.getPropertyPriority?.('overflow-anchor')||'';
   container.style.overflowAnchor='none';
-  const previous=new Map();
-  for(const node of Array.from(target.children)){
-    const key=_messageWindowNodeKey(node);
-    if(key&&key!=='live'&&reuse&&target.dataset.windowSession===S.session?.session_id) previous.set(key,node);
+  try{
+    const previous=new Map();
+    for(const node of Array.from(target.children)){
+      const key=_messageWindowNodeKey(node);
+      if(key&&key!=='live'&&reuse&&target.dataset.windowSession===S.session?.session_id) previous.set(key,node);
+    }
+    const desired=Array.from(staged.children).map(node=>{
+      const key=_messageWindowNodeKey(node), old=previous.get(key);
+      // Identity alone is not a content version: anchor keys intentionally use a
+      // short prefix. Compare the unenhanced render, not the mutated live DOM
+      // (syntax highlighting, disclosures, media and selection live there).
+      node._messageWindowMarkup=node.outerHTML.replace(/contain-intrinsic-size: auto [\d.]+px;/g,'');
+      return old&&old._messageWindowMarkup===node._messageWindowMarkup?old:node;
+    });
+    // Insert before removing: the live scroller never sees an empty transcript.
+    for(let i=0;i<desired.length;i++){
+      const node=desired[i];
+      if(node.parentElement===target) continue;
+      const successor=desired.slice(i+1).find(next=>next.parentElement===target)||null;
+      target.insertBefore(node,successor);
+    }
+    const keep=new Set(desired);
+    for(const node of Array.from(target.children)) if(!keep.has(node)) node.remove();
+    for(let i=0;i<desired.length;i++){
+      if(target.children[i]!==desired[i]) target.insertBefore(desired[i],target.children[i]||null);
+    }
+    _restoreMessageWindowReader(target,anchor);
+    for(const node of target.querySelectorAll('[data-session-msg-idx]')){
+      node.dataset.msgIdx=String(_messageRawIdxForSessionIndex(Number(node.dataset.sessionMsgIdx)));
+    }
+    _initializeMessageWindowOwnership(target);
+  }finally{
+    // Flush this synchronous transaction while JS still owns anchoring. Restore
+    // before yielding: queued mobile/viewport suppression releases cannot race
+    // us, and a pre-existing 'none' remains owned by its original release.
+    void container.offsetHeight;
+    if(previousPriority) container.style.setProperty('overflow-anchor',previousAnchor,previousPriority);
+    else container.style.overflowAnchor=previousAnchor;
   }
-  const desired=Array.from(staged.children).map(node=>{
-    const key=_messageWindowNodeKey(node), old=previous.get(key);
-    // Identity alone is not a content version: anchor keys intentionally use a
-    // short prefix. Compare the unenhanced render, not the mutated live DOM
-    // (syntax highlighting, disclosures, media and selection live there).
-    node._messageWindowMarkup=node.outerHTML.replace(/contain-intrinsic-size: auto [\d.]+px;/g,'');
-    return old&&old._messageWindowMarkup===node._messageWindowMarkup?old:node;
-  });
-  // Insert before removing: the live scroller never sees an empty transcript.
-  for(let i=0;i<desired.length;i++){
-    const node=desired[i];
-    if(node.parentElement===target) continue;
-    const successor=desired.slice(i+1).find(next=>next.parentElement===target)||null;
-    target.insertBefore(node,successor);
-  }
-  const keep=new Set(desired);
-  for(const node of Array.from(target.children)) if(!keep.has(node)) node.remove();
-  for(let i=0;i<desired.length;i++){
-    if(target.children[i]!==desired[i]) target.insertBefore(desired[i],target.children[i]||null);
-  }
-  _restoreMessageWindowReader(target,anchor);
-  for(const node of target.querySelectorAll('[data-session-msg-idx]')){
-    node.dataset.msgIdx=String(_messageRawIdxForSessionIndex(Number(node.dataset.sessionMsgIdx)));
-  }
-  _initializeMessageWindowOwnership(target);
 }
 function _initializeMessageWindowOwnership(inner){
   inner.dataset.windowSession=S.session?.session_id||'';

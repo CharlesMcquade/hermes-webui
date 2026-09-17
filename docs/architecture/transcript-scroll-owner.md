@@ -214,6 +214,25 @@ page. Screenshots illustrate controls, not continuous-motion proof.
 | Narrow | ![Before](../images/transcript-scroll-owner/scene-before-narrow.png) | ![After](../images/transcript-scroll-owner/scene-after-narrow.png) |
 | Mobile | ![Before](../images/transcript-scroll-owner/scene-before-mobile.png) | ![After](../images/transcript-scroll-owner/scene-after-mobile.png) |
 
+## Native anchoring transaction release
+
+Owned commits suppress native overflow anchoring only while mutating and
+compensating the transcript. A `finally` block flushes transaction layout, then
+restores the exact previous inline value and priority before yielding. This
+preserves touch CSS `auto`, desktop CSS `none`, and any pre-existing mobile or
+shared suppression owner; nested synchronous commits do not create a competing
+asynchronous release.
+
+The frozen pre-fix build fails the touch resting-anchor browser assertion.
+Executed regressions cover success, insertion/restore/ownership exceptions,
+nested commits, prior empty/auto/none values, inline priority, overlapping shared
+and mobile suppression, and late image growth after input invalidates the JS
+snapshot. Chromium touch retains the reader within one pixel; desktop remains
+native-anchoring disabled by CSS. The browser regression runs through pytest.
+Both-engine desktop/narrow/mobile reruns pass oversized natural traversal (6/6)
+and the text/lifecycle matrix (60/60). [Tested source hashes and results](../images/transcript-scroll-owner/native-anchor-results.json)
+identify this follow-up separately from the earlier evidence.
+
 ## Scope limits
 
 The total transcript bound is an opted-in virtualization contract, not a promise
