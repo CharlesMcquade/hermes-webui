@@ -53,7 +53,54 @@ class SceneGateway(DeterministicGateway):
         return handler
 
 
-def live_settle(page,gateway):
+def live_settle(page, gateway):
+    # Keep diagnostics local to this synthetic fixture. Record the snapshots
+    # production actually chose, without taking extra geometry snapshots or
+    # changing timing, pin state, row selection, or the continuity assertions.
+    page.evaluate("""() => {
+      const trace=[];
+      const originals=new Map();
+      const snapshot=s=>s?{pinned:s.pinned,reader:s.transparentSceneReader}:null;
+      for(const name of ['_captureMessageScrollSnapshot','_retainTransparentSceneReader','clearLiveToolCards']){
+        const original=window[name];
+        if(typeof original!=='function') throw Error('Missing diagnostic hook '+name);
+        originals.set(name,original);
+        window[name]=function(...args){
+          const result=original.apply(this,args);
+          trace.push({name,time:performance.now(),pinned:_scrollPinned,
+            unpinned:_messageUserUnpinned,
+            snapshot:snapshot(name==='_captureMessageScrollSnapshot'?result:args[0])});
+          if(trace.length>128) trace.shift();
+          return result;
+        };
+      }
+      window.__sceneSettleDiagnostics={trace,restore(){
+        for(const [name,original] of originals) window[name]=original;
+        delete window.__sceneSettleDiagnostics;
+      }};
+    }""")
+    try:
+        return _live_settle(page, gateway)
+    except Exception:
+        print('SCENE SETTLE DIAGNOSTICS', json.dumps(page.evaluate("""() => ({
+          trace:window.__sceneSettleDiagnostics.trace,
+          pinned:_scrollPinned,unpinned:_messageUserUnpinned,
+          busy:S.busy,activeStreamId:S.activeStreamId,
+          rows:[...document.querySelectorAll('.transparent-event-row[data-anchor-row-id]')]
+            .map(row=>row.getAttribute('data-anchor-row-id')),
+          scenes:(S.messages||[]).filter(m=>m._anchor_activity_scene).map(m=>{
+            const scene=m._anchor_activity_scene;
+            const state=_transparentScenePages.get(scene);
+            return {streamId:scene.stream_id,start:state&&state.start,
+              rows:(scene.activity_rows||[]).map(row=>row.row_id||row.local_id)};
+          })
+        })""")), flush=True)
+        raise
+    finally:
+        page.evaluate('() => window.__sceneSettleDiagnostics.restore()')
+
+
+def _live_settle(page,gateway):
     gateway.activity_ready.clear();gateway.release_settle.clear()
     gateway.final_prefix_ready.clear();gateway.release_terminal.clear()
     page.evaluate("S.session=null;S.messages=[];clearMessageRenderCache();renderMessages()")
