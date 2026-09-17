@@ -1,4 +1,4 @@
-# Transcript window ownership (draft implementation)
+# Transcript window ownership
 
 ## Problem and scope
 
@@ -107,7 +107,7 @@ All screenshots contain generated fixture data only.
 | Desktop | ![Before desktop](../images/transcript-scroll-owner/before-desktop.png) | ![After desktop](../images/transcript-scroll-owner/after-desktop.png) |
 | Narrow | ![Before narrow](../images/transcript-scroll-owner/before-narrow.png) | ![After narrow](../images/transcript-scroll-owner/after-narrow.png) |
 
-## Remaining gates — not merge-ready
+## Source-history follow-up verification
 
 The reporter confirmed the development-fork replacement scrolls well in the
 actual browser, with virtualization enabled. That is separate evidence from
@@ -160,15 +160,71 @@ SCROLL_ACTIVITY_MODE=transparent_stream SCROLL_FIXTURE=tools \
   --cases natural --artifacts /tmp/hermes-transparent-bound
 ```
 
-A separate scope gap remains for server-supplied scenes: their existing
-"Show earlier steps" path materializes the omitted prefix, and just-settled
-scenes are exempt from the settled-row cap. These are disclosure bounds, not
-persistent virtual-row bounds. Passing source-history traversal must not be
-reported as a universal scene bound. Server-scene reveal/revisit/replacement and
-live-to-settled handoff require separate bounded-projection coverage.
+## Server-scene navigation and publication verification
 
-The full repository suite, physical-device touch momentum, real provider/network
-reconnect, server-scene bounded disclosure/revisit, browser auth-on behavior, and
+The separate server-scene path now uses bounded earlier/later pages rather than
+materializing an omitted prefix. The normal page is 30 rows (10-row slack); a
+shared budget reduces pages when multiple canonical server scenes are loaded.
+The budget derives from source owners, not transient mounted DOM. All normalized
+canonical rows remain accessible in order, and final prose and full tool counts
+remain outside the page selection. Expand/collapse changes only mounted details;
+it does not navigate. Scene-object WeakMap state survives same-scene rebuilds
+and is invalidated by replacement of the scene or its row array. Click handlers
+resolve the segment's current source index after reindexing.
+
+The just-settled exemption is removed. Session-list idle reconciliation preserves
+the live DOM until the transcript replacement owns its removal. A stream-qualified
+scene-row snapshot retains an unpinned reader through settlement; the existing
+input/session guards still reject stale restores. Approval/clarification cleanup
+must not infer follow from a small bottom gap when the reader explicitly unpinned.
+
+Publication checks on the combined production sources:
+
+- Server-scene earlier/later navigation, complete 127-row access, cache rehydration,
+  expand/collapse, error details, replacement, and actual local Gateway/SSE
+  live-to-settled continuity: Chromium/WebKit × desktop/narrow/mobile, **6/6**.
+- A 140-source-row / 70-scene-owner fixture exercises cold mount, virtual remount,
+  prepend, same-index replacement and reindexed clicks with the unchanged **<190**
+  row oracle, in both engines at all three widths.
+- Source precedence regression fails before the fix: an earlier duplicate
+  content-prefix key must not override the exact session-relative source. Only
+  an unambiguous fallback may compensate when that source is absent.
+- Combined-source reruns: **6/6** oversized transparent, **6/6** original private
+  reproduction, **12/12** compact, **6/6** hidden, **60/60** text/lifecycle.
+- Targeted 115-module local suite: **1,218 passed, 28 skipped**. This selection
+  includes scene browser gates and approval/clarification/idle-state neighbors.
+
+[Publication results and tested source hashes](../images/transcript-scroll-owner/publication-results.json)
+keep this evidence separate from earlier source revisions. CI runs the two new
+scene scripts through `tests/test_transparent_scene_pages_browser.py`, using the
+installed Chromium engine; local runs request both engines.
+
+```bash
+BROWSERS=chromium,webkit ./scripts/test.sh -q tests/test_transparent_scene_pages_browser.py
+```
+
+### Scene navigation before/after (synthetic)
+
+The baseline reveal mounts all 127 rows; after navigation replaces one bounded
+page. Screenshots illustrate controls, not continuous-motion proof.
+
+| Width | Before | After |
+| --- | --- | --- |
+| Desktop | ![Before](../images/transcript-scroll-owner/scene-before-desktop.png) | ![After](../images/transcript-scroll-owner/scene-after-desktop.png) |
+| Narrow | ![Before](../images/transcript-scroll-owner/scene-before-narrow.png) | ![After](../images/transcript-scroll-owner/scene-after-narrow.png) |
+| Mobile | ![Before](../images/transcript-scroll-owner/scene-before-mobile.png) | ![After](../images/transcript-scroll-owner/scene-after-mobile.png) |
+
+## Scope limits
+
+The total transcript bound is an opted-in virtualization contract, not a promise
+for virtualization disabled. Scene paging bounds each disclosure even when it is
+disabled, but does not window the entire list. Live streaming rows before settlement
+are not newly virtualized by this change. Scene-owner count changes can resize the
+shared page budget; the executed prepend case covers 70→71 owners, not every budget
+boundary. These limits are explicit rather than a claim of universal bounded DOM.
+
+Physical-device touch momentum, real provider/network
+reconnect, browser auth-on behavior, and
 composition with open PRs #7280/#7283 were not certified here. Live reconciliation
 coverage uses synthetic transport and checks parser connectivity, not provider
 reliability. Fork-only completion/reconnect scripts are not part of this port
@@ -176,5 +232,5 @@ and their historical passes are not counted above.
 
 Related work: #6151/#6155 discuss default-on virtualization and performance;
 #7280 addresses synchronous post-process drift; #7283 addresses height-estimator
-calibration. This draft does not claim to supersede those proposals or authorize
-a default change. Keep #7591 open pending upstream integration and remaining gates.
+calibration. This change does not claim to supersede those proposals or authorize
+a default change. Keep #7591 open pending upstream integration.

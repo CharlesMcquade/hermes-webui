@@ -868,7 +868,9 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   _forgetObservedStreamingSession(sid);
   if (typeof hideApprovalCard==='function') hideApprovalCard(true);
   if (typeof hideLiveRunStatus==='function') hideLiveRunStatus(sid);
-  if (typeof clearLiveToolCards==='function') clearLiveToolCards();
+  // The list owns status, not transcript replacement. Keep the live scene
+  // until done/reload can snapshot and atomically replace it with settled rows.
+  if (typeof clearLiveToolCards==='function') clearLiveToolCards({preserveDom:true});
   if (changed&&typeof updateSendBtn==='function') updateSendBtn();
   if (changed&&typeof _scheduleActiveSessionIdleReload==='function') _scheduleActiveSessionIdleReload(sid);
   return changed;
