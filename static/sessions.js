@@ -5626,6 +5626,14 @@ function _touchStartBoundaryNearViewport(list, state, lookahead){
       // trigger — otherwise the user deep-scrolling downward would drain the
       // entire prefix via repeated prepends.
       const distance=rowRect.top-listRect.top;
+      // Overshoot guard: an iPadOS scroll-indicator fling can strand the
+      // viewport ENTIRELY ABOVE the rendered window (inside the before-spacer).
+      // distance is then large positive, which the bound below would accept —
+      // but the user sees only blank spacer and a prepend would fire from a
+      // position the user never actually reached. Upward prepends require real
+      // contact with rendered content: the viewport bottom must reach the
+      // first row's top.
+      if(listRect.bottom<=rowRect.top) return false;
       return distance<=margin && distance>=-(listRect.height||0);
     }
   }
@@ -6065,18 +6073,36 @@ function _updateTouchGroupSpacers(list, state, startIndex, endIndex){
   }
 }
 
-/// Update sentinel visibility after an interval change.
+/// Create/update the touch loading affordances after an interval change.
+///
+/// Directional (gate fix): the BOTTOM affordance appears only when the suffix
+/// is missing (end < total). A bounded deep-active window whose missing rows
+/// are ABOVE the viewport must not indefinitely claim "Loading more…" about
+/// the bottom. A distinct TOP affordance appears when the prefix is missing
+/// (start > 0). Batching direction itself is independent of the bottom
+/// sentinel: _touchNextBatchDirection() keys off live DOM boundaries on both
+/// edges, not off sentinel visibility.
 function _updateTouchSentinel(list, total, startIndex, endIndex){
-  const sentinel=list.querySelector('[data-touch-sentinel]');
-  if(!sentinel) return;
   const interval=_touchIntervalState(total, startIndex, endIndex);
-  if(interval.complete){
-    sentinel.style.display='none';
-    if(_touchSentinelObserver) _touchSentinelObserver.unobserve(sentinel);
-  }else{
-    sentinel.style.display='';
-    sentinel.textContent=t('loading_more');
-    if(_touchSentinelObserver) _touchSentinelObserver.observe(sentinel);
+  const bottom=list.querySelector('[data-touch-sentinel]');
+  if(bottom){
+    if(interval.end>=interval.total){
+      bottom.style.display='none';
+      if(_touchSentinelObserver) _touchSentinelObserver.unobserve(bottom);
+    }else{
+      bottom.style.display='';
+      bottom.textContent=t('loading_more');
+      if(_touchSentinelObserver) _touchSentinelObserver.observe(bottom);
+    }
+  }
+  const top=list.querySelector('[data-touch-sentinel-top]');
+  if(top){
+    if(interval.start<=0){
+      top.style.display='none';
+    }else{
+      top.style.display='';
+      top.textContent=t('loading_more');
+    }
   }
 }
 
@@ -6101,10 +6127,22 @@ function _scheduleContinuousBatch(){
   const start=Math.max(0, Number(_sessionTouchStartIndex)||0);
   const end=Math.min(total, Math.max(start, Number(_sessionTouchLoadedCount)||0));
   if(start<=0&&end>=total) return;
-  const sentinel=list.querySelector('[data-touch-sentinel]');
-  if(!sentinel || sentinel.style.display==='none') return;
+  // Determine the direction from the live DOM boundaries FIRST, then gate on
+  // the affordance for that direction only. A deep-active window has the
+  // bottom sentinel hidden (end==total) but still needs upward prepends —
+  // keying the whole scheduler off bottom-sentinel visibility would strand
+  // the missing prefix behind a hidden affordance.
   const direction=_touchNextBatchDirection(list, state, 200);
   if(!direction) return;
+  // Directional affordance cross-check: an EXISTING hidden affordance vetoes
+  // its direction (e.g. bottom hidden means end==total — no downward batch).
+  // A missing element carries no signal and must not block: hand-composed or
+  // pre-setup DOM may lack the top sentinel while the interval state still
+  // authoritatively reports start>0.
+  const topSentinel=list.querySelector('[data-touch-sentinel-top]');
+  if(direction==='up'&&topSentinel&&topSentinel.style.display==='none') return;
+  const bottomSentinel=list.querySelector('[data-touch-sentinel]');
+  if(direction==='down'&&bottomSentinel&&bottomSentinel.style.display==='none') return;
   const token=++_touchBatchToken;
   const owner={gen:_sessionTouchGen, list:list, token:token, raf:0, direction:direction};
   _touchContinuousBatchOwner=owner;
@@ -6158,7 +6196,10 @@ function _createTouchGroupWrapper(g, state){
       gc[g.label]=!isCollapsed;
       localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(gc));
     }catch(e){}
-    renderSessionListFromCache();
+    // Direct user action: force bypasses the touch-scroll cooldown so the
+    // spacers and row counts are reconciled immediately instead of up to
+    // ~1.25s later via the deferred render.
+    renderSessionListFromCache({force:true});
   };
   wrapper.appendChild(hdr);
   wrapper.appendChild(body);
@@ -6207,7 +6248,12 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
   // Keep per-group spacers from the initial render — they correctly represent
   // unloaded height within each group. Do NOT create a global bottom spacer
   // (that would place early-group unloaded rows after later-group headers).
-  // Create/update the sentinel after all groups.
+  // Create/update the directional loading affordances after all groups: the
+  // bottom sentinel (suffix missing, end<total) and the top sentinel (prefix
+  // missing, start>0) are independent. Each shows only for its own missing
+  // direction, so a bounded deep-active window (missing rows above the
+  // viewport) never shows a bottom "Loading more…" spinner pointing at rows
+  // that are not there.
   let sentinel=list.querySelector('[data-touch-sentinel]');
   if(!sentinel){
     sentinel=document.createElement('div');
@@ -6215,15 +6261,28 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
     sentinel.className='session-touch-sentinel';
     list.appendChild(sentinel);
   }
+  let topSentinel=list.querySelector('[data-touch-sentinel-top]');
+  if(!topSentinel){
+    topSentinel=document.createElement('div');
+    topSentinel.setAttribute('data-touch-sentinel-top','');
+    topSentinel.className='session-touch-sentinel session-touch-sentinel-top';
+    list.insertBefore(topSentinel, list.firstChild||null);
+  }
   const interval=_touchIntervalState(total, _sessionTouchStartIndex, _sessionTouchLoadedCount);
-  if(interval.complete){
+  if(interval.end>=interval.total){
     sentinel.style.display='none';
   }else{
     sentinel.style.display='';
     sentinel.textContent=t('loading_more');
   }
+  if(interval.start<=0){
+    topSentinel.style.display='none';
+  }else{
+    topSentinel.style.display='';
+    topSentinel.textContent=t('loading_more');
+  }
   _ensureTouchSentinelObserver(list);
-  if(!interval.complete&&_touchSentinelObserver) _touchSentinelObserver.observe(sentinel);
+  if(interval.end<interval.total&&_touchSentinelObserver) _touchSentinelObserver.observe(sentinel);
   // Event-driven batch trigger: a passive scroll listener on the list arms
   // ONE coalesced RAF per scroll burst. The IntersectionObserver can stall
   // after one append (sentinel stays intersecting, no new transition fires),
@@ -8420,10 +8479,19 @@ function _sessionVirtualWindow(opts){
   // active session deep in a huge sidebar: render a bounded active-centered
   // touch window instead of synchronously painting every preceding row.
   if(typeof _isTouchPrimary==='function'&&_isTouchPrimary()){
-    let start=0;
-    let loadedCount=Math.min(total, _sessionTouchLoadedCount||SESSION_TOUCH_INITIAL_BATCH);
+    // Preserve the CURRENT bounded [start,end) touch interval across
+    // unchanged-scope repaints (timestamp/SSE/background refreshes). The
+    // deep-active window is bounded only on its FIRST paint of a scope; a
+    // later ordinary call that unconditionally resets start=0 would repaint
+    // [0, loadedCount) — synchronously rendering every preceding row and
+    // freezing the touch sidebar. The scope fingerprint in
+    // renderSessionListFromCache resets BOTH bounds to the initial batch on a
+    // real scope change (profile/project/filter/search/collapse/active/count/
+    // row identity), so bounds surviving to this point mean the same scope.
+    let start=Math.max(0, Number(_sessionTouchStartIndex)||0);
+    let loadedCount=Math.min(total, Math.max(start, Number(_sessionTouchLoadedCount)||0));
     const activeIdx=Number.isFinite(Number(opts&&opts.activeIndex))?Number(opts.activeIndex):-1;
-    if(activeIdx>=0&&activeIdx<total&&activeIdx>=loadedCount){
+    if(activeIdx>=0&&activeIdx<total&&(activeIdx<start||activeIdx>=loadedCount)){
       const windowRows=Math.max(SESSION_TOUCH_INITIAL_BATCH, visibleRows+(buffer*2));
       start=Math.max(0, Math.min(activeIdx-buffer, Math.max(0,total-windowRows)));
       loadedCount=Math.min(total, start+windowRows);
@@ -8528,12 +8596,14 @@ function _ensureSessionVirtualScrollHandler(list){
 
 function _markSessionListPointerDown(){
   _sessionListPointerActive=true;
-  _sessionListLastScrollAt=Date.now();
+  // Pointer activity is tracked ONLY via the active-pointer latch above. A
+  // plain tap (down+up, zero scroll events) must NOT enter the momentum
+  // cooldown: the scroll timestamp is written exclusively by real scroll
+  // events, so direct-action renders after a tap are never deferred ~1.2s.
 }
 
 function _markSessionListPointerUp(){
   _sessionListPointerActive=false;
-  _sessionListLastScrollAt=Date.now();
   if(_pendingSessionListPayload) _schedulePendingSessionListApply();
 }
 
@@ -9142,7 +9212,10 @@ function renderSessionListFromCache(){
       caret.classList.toggle('collapsed',!isCollapsed);
       _groupCollapsed[g.label]=!isCollapsed;
       _saveCollapsed();
-      renderSessionListFromCache();
+      // Direct user action: force bypasses the touch-scroll cooldown (the
+      // initial render's collapse handler previously hit the deferred path
+      // when the user had scrolled within the last 1.2s).
+      renderSessionListFromCache({force:true});
     };
     wrapper.appendChild(hdr);
     let groupTopPad=0;
