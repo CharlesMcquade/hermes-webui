@@ -555,12 +555,14 @@ console.log(JSON.stringify(result));
 
 @_node_tests
 def test_setup_and_observer_use_interval_direction_for_unloaded_prefix():
-    """Setup/observer must treat [start,total) as incomplete and prepend.
+    """Deep-active window: directional affordances + prepend still flows.
 
     A deep-active touch render can have the suffix fully loaded while the
-    prefix is still virtual. The sentinel must remain enabled, and an observer
-    trigger near the first real row must route through _touchNextBatchDirection()
-    to prepend, not return early on end>=total or unconditionally append.
+    prefix is still virtual. The BOTTOM affordance must be hidden (end==total
+    — it must not claim "Loading more…" about rows that do not exist below),
+    a distinct TOP affordance must show (start>0), and an upward trigger must
+    still route through _touchNextBatchDirection() to prepend — batching
+    direction is independent of the bottom sentinel's visibility.
     """
     total = 120
     flat_rows = [{"group": {"label": "G"}, "session": {"session_id": f"s{i}"}} for i in range(total)]
@@ -615,7 +617,9 @@ const realPrepend = _prependTouchBatch;
 _appendTouchBatch = function() {{ appendCalls++; realAppend(); }};
 _prependTouchBatch = function() {{ prependCalls++; realPrepend(); }};
 _setupTouchSentinel(list, {total}, {json.dumps(flat_rows)}, function(s) {{ return makeSessionItem(s.session_id); }}, 's60', {total}, 40);
-const sentinelShownAfterSetup = list._sentinel.style.display !== 'none';
+const bottomHiddenAfterSetup = list._sentinel.style.display === 'none';
+const topSentinelAfterSetup = list.querySelector('[data-touch-sentinel-top]');
+const topShownAfterSetup = topSentinelAfterSetup && topSentinelAfterSetup.style.display !== 'none';
 const observedAfterSetup = observed;
 const observer = _touchSentinelObserver;
 if (observer && observer._fire) observer._fire(true);
@@ -623,7 +627,8 @@ drainMicrotasks();
 global.Promise = realPromise;
 const sids = list._items.map(function(i) {{ return i.dataset.sid; }});
 console.log(JSON.stringify({{
-  sentinelShownAfterSetup: sentinelShownAfterSetup,
+  bottomHiddenAfterSetup: bottomHiddenAfterSetup,
+  topShownAfterSetup: topShownAfterSetup,
   observedAfterSetup: observedAfterSetup,
   appendCalls: appendCalls,
   prependCalls: prependCalls,
@@ -635,8 +640,13 @@ console.log(JSON.stringify({{
 }}));
 """
     result = json.loads(_run_node_vm(source))
-    assert result["sentinelShownAfterSetup"] is True
-    assert result["observedAfterSetup"] is True
+    assert result["bottomHiddenAfterSetup"] is True
+    assert result["topShownAfterSetup"] is True
+    # Bottom observer must NOT be attached when end==total — the bottom
+    # sentinel is hidden, so observing it would be dead work. The upward
+    # prepend trigger flows through the continuous-batch scheduler / scroll
+    # handler instead.
+    assert result["observedAfterSetup"] is False
     assert result["appendCalls"] == 0
     assert result["prependCalls"] == 1
     assert result["start"] == 0
@@ -1228,6 +1238,18 @@ function makeList() {
   list._bottomSpacer = null;
   list.querySelector = function(sel) {
     if (sel === '[data-touch-sentinel]') return this._sentinel;
+    if (sel === '[data-touch-sentinel-top]') {
+      if (this._topSentinel) return this._topSentinel;
+      // _setupTouchSentinel inserts a newly created top sentinel into
+      // children — find it by its production className.
+      for (const c of this.children) {
+        if (c && c.className && String(c.className).indexOf('session-touch-sentinel-top') >= 0) {
+          this._topSentinel = c;
+          return c;
+        }
+      }
+      return null;
+    }
     if (sel === '[data-touch-bottom-spacer]') return this._bottomSpacer;
     if (sel.startsWith('.session-date-group[data-group-label=')) {
       const label = sel.match(/"([^"]+)"/)[1];
