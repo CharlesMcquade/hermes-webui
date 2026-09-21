@@ -784,12 +784,23 @@ def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
     notice.  Matching the transient pre-switch strings would persist false
     notices for turns that never completed the switch, and would capture the
     OLD model/provider before the change — inverting the PR's contract.
+
+    Emission shapes accepted here (both are CONFIRMED post-switch notices naming
+    the NEW model, verified against the current agent via a dead-provider probe):
+      - "⚠️ Model fallback: <old> via <prov> unavailable (<reason>); using <new>
+        via <prov>." — current agent (chat_completion_helpers), kind='warn'
+        via _emit_warning (Aug 2026 agent rework of provider transitions).
+      - "Switched to fallback model: ..." — legacy agent shape, kind='lifecycle'
+        via _emit_status. Kept for older agents still on that emission.
     """
     k = str(kind or '').strip().lower()
     m = str(message or '').strip().lower()
     return (
-        k == 'lifecycle'
-        and 'switched to fallback' in m
+        k in ('lifecycle', 'warn')
+        and (
+            'switched to fallback' in m
+            or 'model fallback:' in m
+        )
     )
 
 
