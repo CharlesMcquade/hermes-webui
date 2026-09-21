@@ -14344,13 +14344,26 @@ def _run_agent_streaming(
 _LOCAL_STEERABLE_PHASES = frozenset({"starting", "running"})
 
 
-def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
+def _steer_bound_stream(
+    sid: str,
+    stream_id: str,
+    text: str,
+    *,
+    display_text: str,
+    files=None,
+) -> dict | None:
     """Deliver to a verified live worker; None retains cache-only compatibility.
 
-    Never perform HTTP writes or cache/database teardown under stream locks.
+    Ownership verification happens under STREAMS_LOCK; the durable acceptance
+    transaction runs OUTSIDE it. The run journal's per-run lock plus the
+    acceptance fence serialize delivery with terminal teardown (a fence closed
+    by cancel/completion rejects the Steer with stream_dead), so no stream
+    lock needs to be held across journal I/O. Never perform HTTP writes or
+    cache/database teardown under stream locks.
     """
     from api import config as cfg
 
+    verified_agent = None
     with cfg.STREAMS_LOCK:
         agent = cfg.AGENT_INSTANCES.get(stream_id)
         owner = cfg.stream_owner_session_id(stream_id)
@@ -14383,18 +14396,53 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
             return {"accepted": False, "fallback": "stream_dead", "stream_id": None}
         if not callable(getattr(agent, "steer", None)):
             return {"accepted": False, "fallback": "agent_lacks_steer", "stream_id": None}
-        # steer() only stashes input; serializing it with stream teardown keeps
-        # cancel from detaching the selected worker before delivery.
-        try:
-            accepted = bool(agent.steer(text))
-        except Exception:
-            logger.debug("Stream-bound steer failed for session %s", sid, exc_info=True)
-            return {"accepted": False, "fallback": "steer_error", "stream_id": stream_id}
-        return {"accepted": accepted, "fallback": None, "stream_id": stream_id}
+        # steer() only stashes input; the verified worker is handed to the
+        # journal transaction below, OUTSIDE the stream lock. The transaction
+        # (not this lock) serializes acceptance with cancel/completion: the
+        # acceptance fence is closed under the per-run journal lock before any
+        # terminal append, so a Steer racing teardown is rejected stream_dead
+        # instead of being journaled into a finished turn.
+        verified_agent = agent
+
+    if verified_agent is None:
+        return None
+    try:
+        outcome = _accept_and_publish_steer_event(
+            verified_agent,
+            sid,
+            stream_id,
+            text,
+            display_text=display_text,
+            files=files,
+        )
+    except Exception:
+        logger.debug("Stream-bound steer failed for session %s", sid, exc_info=True)
+        return {"accepted": False, "fallback": "steer_error", "stream_id": stream_id}
+    response = {
+        "accepted": bool(outcome.get("accepted")),
+        "fallback": outcome.get("fallback"),
+        "stream_id": stream_id,
+    }
+    if response["accepted"]:
+        response["durable"] = bool(outcome.get("durable"))
+        response["published"] = bool(outcome.get("published"))
+        journaled = outcome.get("event")
+        if isinstance(journaled, dict):
+            response["steer_event"] = {
+                "version": journaled.get("version", 1),
+                "type": "steer_delivered",
+                "event": "steer_delivered",
+                "event_id": journaled.get("event_id"),
+                "seq": journaled.get("seq"),
+                "run_id": journaled.get("run_id"),
+                "session_id": journaled.get("session_id", sid),
+                "stream_id": stream_id,
+                "created_at": journaled.get("created_at"),
+                "payload": dict(outcome.get("payload") or {}),
+            }
+    return response
 
 
-def _accept_and_publish_steer_event(agent, session_id: str, stream_id: str, text: str):
-    """Accept and journal one steer before a terminal event can win the run."""
 def _steer_attachment_paths(value) -> list[str]:
     """Return bounded, single-line attachment paths for runtime guidance."""
     if not isinstance(value, list):
@@ -14644,7 +14692,10 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         session = None
     stream_id = getattr(session, "active_stream_id", None) or None
     if stream_id:
-        result = _steer_bound_stream(sid, stream_id, text)
+        result = _steer_bound_stream(
+            sid, stream_id, text,
+            display_text=display_text, files=display_files,
+        )
         if result is not None:
             return j(handler, result)
 
@@ -14699,23 +14750,15 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                            "stream_id": None})
 
     # Cache-only compatibility: no registered worker for this stream. The
-    # liveness/ownership revalidation and the enqueue must share the same
-    # stream-ownership edge as Stop (STREAMS_LOCK -> ACTIVE_RUNS_LOCK). A Stop
-    # that claims cancellation between an unlocked check and agent.steer()
-    # would strand guidance this response still reports as accepted. steer()
-    # only stashes input; interrupt, persistence, and HTTP writes stay outside
-    # the lock, and the cached agent is never evicted or closed here.
-    #
-    # Ownership must be proven positively, not merely unrefuted: BOTH the
-    # stream owner AND the active-run session must equal the requesting
-    # session. Missing metadata is ambiguous and fails closed (stream_dead);
-    # an unfenced cache object is never steered on absent ownership.
-    #
-    # The active-run backend is revalidated the same way. With no registered
-    # worker, the backend tag is the only proof that an in-process runtime
-    # owns this run: Gateway resolves to its own outcome, the explicit local
-    # tag may enqueue, and a missing, empty, or foreign backend fails closed.
+    # liveness/ownership revalidation shares the same stream-ownership edge as
+    # Stop (STREAMS_LOCK -> ACTIVE_RUNS_LOCK). Ownership must be proven
+    # positively — BOTH the stream owner AND the active-run session must equal
+    # the requesting session; missing metadata is ambiguous and fails closed
+    # (stream_dead). The durable acceptance transaction itself runs OUTSIDE
+    # the stream lock: the acceptance fence closed by cancel/completion under
+    # the per-run journal lock is what rejects a delivery racing teardown.
     result = {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+    verified = False
     with _cfg.STREAMS_LOCK:
         if active_stream_id in _cfg.STREAMS:
             owner = _cfg.stream_owner_session_id(active_stream_id)
@@ -14734,17 +14777,51 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                               "stream_id": active_stream_id}
                 elif (backend == WEBUI_LOCAL_CHAT_BACKEND
                       and run.get("phase") in _LOCAL_STEERABLE_PHASES):
-                    try:
-                        accepted = bool(agent.steer(text))
-                    except Exception as exc:
-                        logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
-                        result = {"accepted": False, "fallback": "steer_error",
-                                  "stream_id": active_stream_id}
-                    else:
-                        result = {"accepted": accepted, "fallback": None,
-                                  "stream_id": active_stream_id}
+                    verified = True
 
-    return j(handler, result)
+    if not verified:
+        return j(handler, result)
+
+    # Cache-only compatibility delivery. steer() only stashes input; the
+    # durable acceptance transaction below runs OUTSIDE the stream lock —
+    # the acceptance fence closed by cancel/completion under the per-run
+    # journal lock is what rejects a delivery racing teardown (stream_dead),
+    # never this ownership edge.
+    try:
+        outcome = _accept_and_publish_steer_event(
+            agent,
+            sid,
+            active_stream_id,
+            text,
+            display_text=display_text,
+            files=display_files,
+        )
+    except Exception as exc:
+        logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
+        return j(handler, {"accepted": False, "fallback": "steer_error",
+                           "stream_id": active_stream_id})
+
+    accepted = bool(outcome.get("accepted"))
+    response = {"accepted": accepted, "fallback": outcome.get("fallback"),
+                "stream_id": active_stream_id}
+    if accepted:
+        response["durable"] = bool(outcome.get("durable"))
+        response["published"] = bool(outcome.get("published"))
+        journaled = outcome.get("event")
+        if isinstance(journaled, dict):
+            response["steer_event"] = {
+                "version": journaled.get("version", 1),
+                "type": "steer_delivered",
+                "event": "steer_delivered",
+                "event_id": journaled.get("event_id"),
+                "seq": journaled.get("seq"),
+                "run_id": journaled.get("run_id"),
+                "session_id": journaled.get("session_id", sid),
+                "stream_id": active_stream_id,
+                "created_at": journaled.get("created_at"),
+                "payload": dict(outcome.get("payload") or {}),
+            }
+    return j(handler, response)
 
 
 def cancel_stream(stream_id: str) -> bool:
@@ -14860,6 +14937,24 @@ def cancel_stream(stream_id: str) -> bool:
         # Stop and Steer share STREAMS_LOCK -> ACTIVE_RUNS_LOCK ordering.
         # Publish cancellation and detach ownership before releasing the edge;
         # later Steer cannot enqueue into a turn already claimed by Stop.
+        #
+        # #7188 rework: close the acceptance fence BEFORE the eager pop so a
+        # late Steer arriving after cancel_stream() has popped STREAMS but
+        # before the cancel event is journaled is rejected. The fence is
+        # path-shared with the completion and error teardowns.
+        #
+        # #7188 CORE #5 (run-journal identity split): capture ONE immutable
+        # journal session id from the admission-time ACTIVE_RUNS row (stamped
+        # before any compression rotation) and use it for every fence operation
+        # AND every terminal-event publish. The continuation id (rotated by
+        # compression into agent.session_id) is used only for session/scene
+        # persistence, never for run-journal identity.
+        _journal_session_id = active_run_session_id or _snap_owner_session_id
+        if _journal_session_id:
+            try:
+                RunJournalWriter(str(_journal_session_id), str(stream_id)).close_acceptance_fence()
+            except Exception:
+                logger.debug("Failed to close acceptance fence on cancel for stream %s", stream_id)
         if stream_present:
             streams.pop(stream_id, None)
             cancel_flags.pop(stream_id, None)
