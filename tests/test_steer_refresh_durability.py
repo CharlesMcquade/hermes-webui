@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from api import run_journal
+from api import config, run_journal
 
 ROOT = Path(__file__).resolve().parents[1]
 NODE = shutil.which("node")
@@ -78,6 +78,8 @@ def test_structured_steer_paths_must_be_real_session_uploads(tmp_path, monkeypat
 def test_accepted_steer_is_journaled_and_broadcast_with_one_event_identity(monkeypatch):
     from api import streaming
     from api.config import (
+        ACTIVE_RUNS,
+        ACTIVE_RUNS_LOCK,
         AGENT_INSTANCES,
         SESSION_AGENT_CACHE,
         SESSION_AGENT_CACHE_LOCK,
@@ -103,6 +105,11 @@ def test_accepted_steer_is_journaled_and_broadcast_with_one_event_identity(monke
         old_agents = dict(AGENT_INSTANCES)
         AGENT_INSTANCES.clear()
         AGENT_INSTANCES[stream_id] = agent
+    # Master's positive-ownership gate: stream owner AND active-run session
+    # must both equal the requesting session before any Steer is accepted.
+    monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
+    with ACTIVE_RUNS_LOCK:
+        ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "legacy", "phase": "running"}
 
     journal_event = {
         "event_id": f"{stream_id}:7",
