@@ -9135,8 +9135,13 @@ function renderSessionListFromCache(){
     ].join('|');
     const prevFingerprint=list.dataset.sessionTouchScope||'';
     if(prevFingerprint!==scopeFingerprint){
-      // Reset the canonical touch loaded count BEFORE the window calculation so
-      // _sessionVirtualWindow sees the correct _sessionTouchLoadedCount.
+      // Reset BOTH canonical touch bounds BEFORE the window calculation so
+      // _sessionVirtualWindow sees the correct start/loadedCount. Resetting
+      // only the loaded count leaves a stale nonzero _sessionTouchStartIndex
+      // from a previous deep-active interval, and the next scope's window
+      // collapses to [staleStart, staleStart) — an empty sidebar — whenever
+      // the new scope has no active row to re-anchor on.
+      _sessionTouchStartIndex=0;
       _sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH;
       list.dataset.sessionTouchScope=scopeFingerprint;
     }
