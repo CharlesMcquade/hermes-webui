@@ -1,0 +1,111 @@
+{
+  "errors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 400 (Bad Request)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 400 (Bad Request)"
+  ],
+  "asserts": {
+    "A_before": {
+      "topbar": "",
+      "doc": "Good title options: \"Fixing workspace ordering\", \"Workspace order fix\", \"Session labels\" \u2014 Hermes",
+      "row": "HHermesThe repository splits into api/, static/, tests/ and docs/.\u2191to response",
+      "session": "22d2b724f1fe",
+      "sessionTitle": "Good title options: \"Fixing workspace ordering\", \"Workspace order fix\", \"Session labels\""
+    },
+    "A_server_events": [
+      [
+        "title_status",
+        {
+          "session_id": "22d2b724f1fe",
+          "status": "agent_ok",
+          "reason": "agent_ok",
+          "title": "Repository Layout Guide"
+        }
+      ],
+      [
+        "title",
+        {
+          "session_id": "22d2b724f1fe",
+          "target_session_id": "22d2b724f1fe",
+          "title": "Repository Layout Guide"
+        }
+      ],
+      [
+        "stream_end",
+        {
+          "session_id": "22d2b724f1fe"
+        }
+      ]
+    ],
+    "A_persisted_title": "Repository Layout Guide",
+    "A_llm_title_generated": true,
+    "A_browser_frames": [
+      {
+        "status_only": {
+          "session_id": "22d2b724f1fe",
+          "status": "agent_ok",
+          "reason": "agent_ok",
+          "title": "Repository Layout Guide"
+        }
+      },
+      {
+        "session_id": "22d2b724f1fe",
+        "target_session_id": "22d2b724f1fe",
+        "title": "Repository Layout Guide"
+      }
+    ],
+    "A_after": {
+      "topbar": "",
+      "doc": "Repository Layout Guide \u2014 Hermes",
+      "row": "HHermesThe repository splits into api/, static/, tests/ and docs/.\u2191to response",
+      "session": "22d2b724f1fe",
+      "sessionTitle": "Repository Layout Guide"
+    },
+    "B_before": {
+      "topbar": "",
+      "doc": "hello there \u2014 Hermes",
+      "row": "HHermesIt feels fast.\u2191to response",
+      "session": "229ff53d2c39",
+      "sessionTitle": "hello there"
+    },
+    "B_server_events": [
+      [
+        "title_status",
+        {
+          "session_id": "229ff53d2c39",
+          "status": "skipped",
+          "reason": "llm_invalid_aux",
+          "title": "hello there",
+          "raw_preview": "Good title options: \"Repo layout orientation\", \"Repository structure guide\", \"Project map overview\""
+        }
+      ],
+      [
+        "stream_end",
+        {
+          "session_id": "229ff53d2c39"
+        }
+      ]
+    ],
+    "B_persisted_title": "hello there",
+    "B_llm_title_generated": false,
+    "B_browser_frames": [
+      {
+        "status_only": {
+          "session_id": "229ff53d2c39",
+          "status": "skipped",
+          "reason": "llm_invalid_aux",
+          "title": "hello there",
+          "raw_preview": "Good title options: \"Repo layout orientation\", \"Repository structure guide\", \"Project map overview\""
+        }
+      }
+    ],
+    "B_after": {
+      "topbar": "",
+      "doc": "hello there \u2014 Hermes",
+      "row": "HHermesIt feels fast.\u2191to response",
+      "session": "229ff53d2c39",
+      "sessionTitle": "hello there"
+    }
+  }
+}
