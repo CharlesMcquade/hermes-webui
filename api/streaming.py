@@ -10113,6 +10113,26 @@ def _run_agent_streaming(
             target = AGENT_INSTANCES.get(stream_id) or agent
             if stream_id in STREAMS and not cancel_event.is_set():
                 update_active_run(stream_id, phase="finalizing")
+        # Greptile outside-diff P1 (PR head 9e8c41913e): close the journal's
+        # acceptance fence BEFORE the final drain. A Steer that passed the
+        # ownership check while the run was still steerable could otherwise
+        # acquire the open journal transaction after the drain began and be
+        # journaled as delivered guidance the runtime never consumes. With the
+        # fence closed first, that transaction is rejected (fence_closed ->
+        # stream_dead). Lock ordering is preserved: close_acceptance_fence
+        # takes the per-run journal lock BEFORE the fence lock, matching
+        # accept_and_append_if_nonterminal, so an in-flight acceptance cannot
+        # be overtaken by the fence close + drain. Journal identity is
+        # unchanged: the fence closes through the admission-time writer.
+        if run_journal is not None:
+            try:
+                run_journal.close_acceptance_fence()
+            except Exception:
+                logger.debug(
+                    "Failed to close acceptance fence before final steer drain "
+                    "for session %s stream %s", session_id, stream_id,
+                    exc_info=True,
+                )
         leftovers = list(_returned_pending_steer)
         try:
             drain = getattr(target, '_drain_pending_steer', None)
