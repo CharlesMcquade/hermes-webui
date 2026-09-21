@@ -113,12 +113,12 @@ class TestHandleChatSteerHappyPath:
         from api.config import (
             ACTIVE_RUNS,
             ACTIVE_RUNS_LOCK,
+            AGENT_INSTANCES,
             SESSION_AGENT_CACHE,
             SESSION_AGENT_CACHE_LOCK,
             STREAMS,
             STREAMS_LOCK,
         )
-        from api.config import AGENT_INSTANCES, SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK, STREAMS, STREAMS_LOCK
         sid, stream_id = "sid_happy", "stream_happy"
         agent = MagicMock()
         agent.steer = MagicMock(return_value=True)
@@ -149,9 +149,18 @@ class TestHandleChatSteerHappyPath:
         assert body["published"] is True
         assert body["steer_event"]["type"] == "steer_delivered"
 
-    def test_steers_exact_active_stream_agent_not_retired_session_cache(self, _clear_caches):
+    def test_steers_exact_active_stream_agent_not_retired_session_cache(self, _clear_caches, monkeypatch):
         from api.streaming import _handle_chat_steer
-        from api.config import AGENT_INSTANCES, SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK, STREAMS, STREAMS_LOCK
+        from api import config
+        from api.config import (
+            ACTIVE_RUNS,
+            ACTIVE_RUNS_LOCK,
+            AGENT_INSTANCES,
+            SESSION_AGENT_CACHE,
+            SESSION_AGENT_CACHE_LOCK,
+            STREAMS,
+            STREAMS_LOCK,
+        )
         import queue as _q
 
         sid, stream_id = "sid_generation", "stream_current"
@@ -162,6 +171,11 @@ class TestHandleChatSteerHappyPath:
         with STREAMS_LOCK:
             STREAMS[stream_id] = _q.Queue()
             AGENT_INSTANCES[stream_id] = active_agent
+        # Master's positive-ownership gate: the stream-bound worker is only
+        # selected when the owner registry and active run name this session.
+        monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "legacy", "phase": "running"}
 
         session = MagicMock(active_stream_id=stream_id)
         with patch("api.streaming.get_session", return_value=session), patch(
@@ -227,9 +241,16 @@ class TestHandleChatSteerFallbacks:
             "stream_id": stream_id,
         }
 
-    def test_agent_lacks_steer_method(self, _clear_caches):
+    def test_agent_lacks_steer_method(self, _clear_caches, monkeypatch):
         from api.streaming import _handle_chat_steer
-        from api.config import AGENT_INSTANCES, STREAMS, STREAMS_LOCK
+        from api import config
+        from api.config import (
+            ACTIVE_RUNS,
+            ACTIVE_RUNS_LOCK,
+            AGENT_INSTANCES,
+            STREAMS,
+            STREAMS_LOCK,
+        )
         import queue as _q
 
         sid, stream_id = "sid_old", "stream_old"
@@ -238,6 +259,11 @@ class TestHandleChatSteerFallbacks:
         with STREAMS_LOCK:
             STREAMS[stream_id] = _q.Queue()
             AGENT_INSTANCES[stream_id] = agent
+        # Master's positive-ownership gate must pass so the test reaches the
+        # agent-capability check rather than failing closed on missing ownership.
+        monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": "legacy", "phase": "running"}
         with patch("api.streaming.get_session", return_value=MagicMock(active_stream_id=stream_id)):
             handler = _make_handler()
             _handle_chat_steer(handler, {"session_id": sid, "text": "hint"})
@@ -305,12 +331,12 @@ class TestHandleChatSteerFallbacks:
         from api.config import (
             ACTIVE_RUNS,
             ACTIVE_RUNS_LOCK,
+            AGENT_INSTANCES,
             SESSION_AGENT_CACHE,
             SESSION_AGENT_CACHE_LOCK,
             STREAMS,
             STREAMS_LOCK,
         )
-        from api.config import AGENT_INSTANCES, SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK, STREAMS, STREAMS_LOCK
         sid, stream_id = "sid_throws", "stream_throws"
         agent = MagicMock()
         agent.steer = MagicMock(side_effect=RuntimeError("boom"))
