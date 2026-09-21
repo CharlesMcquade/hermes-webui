@@ -49,6 +49,9 @@ def test_touch_window_reset_only_on_scope_change():
         "Bounds reset must be gated on a fingerprint CHANGE"
     assert "_sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH" in window, \
         "Reset must restore the initial batch size"
+    assert "_sessionTouchStartIndex=0" in window, \
+        "Reset must also zero the start index — a stale deep-active start " \
+        "collapses the next scope's window to [staleStart, staleStart)"
 
 
 @_node_tests
@@ -86,12 +89,25 @@ function extractFunc(name) {{
 }}
 eval(extractFunc('_sessionVirtualWindow'));
 
-// renderSessionListFromCache's scope-fingerprint reset: on a scope CHANGE it
-// resets both bounds BEFORE calling _sessionVirtualWindow.
-function scopeReset() {{
-  _sessionTouchStartIndex = 0;
-  _sessionTouchLoadedCount = SESSION_TOUCH_INITIAL_BATCH;
+// Extract the PRODUCTION scope-fingerprint reset from
+// renderSessionListFromCache — do NOT hand-copy it here. The gate caught a
+// false-green where the local helper reset both bounds while production
+// (at the time) reset only _sessionTouchLoadedCount, hiding the zero-row
+// regression. Extract the actual block so the test follows production.
+const renderFn = extractFunc('renderSessionListFromCache');
+const resetStart = renderFn.indexOf('if(prevFingerprint!==scopeFingerprint)');
+if (resetStart < 0) throw new Error('scope-fingerprint reset branch not found');
+const CLOSE_BRACE = String.fromCharCode(125); // f-string-safe literal close brace
+const resetBlock = renderFn.slice(
+  resetStart, renderFn.indexOf(CLOSE_BRACE, renderFn.indexOf('_sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH', resetStart)) + 1
+);
+if (!resetBlock.includes('_sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH')) {{
+  throw new Error('reset block extraction failed');
 }}
+let prevFingerprint = '';               // simulate a scope fingerprint CHANGE
+let scopeFingerprint = 'scope-A';
+let list = {{ dataset: {{}} }};             // production writes the new fingerprint here
+function scopeReset() {{ eval(resetBlock); }}
 
 const opts = {{
   total: 10000,
@@ -114,6 +130,7 @@ console.log(JSON.stringify({{
   w1rows: w1.end - w1.start,
   w2rows: w2.end - w2.start,
   w2start: w2.start,
+  w1start: w1.start,
   w2end: w2.end,
   activeVisible: 9999 >= w2.start && 9999 < w2.end,
 }}));
@@ -123,7 +140,7 @@ console.log(JSON.stringify({{
         f"First deep-active render must be bounded, got {result['w1rows']} rows"
     assert result["w2rows"] <= 80, \
         f"Second unchanged-scope render must STAY bounded, got {result['w2rows']} rows"
-    assert result["w2start"] == result["w2start"], result
+    assert result["w2start"] == result["w1start"], result
     assert result["activeVisible"], "Active row must remain inside the bounded window"
 
 
@@ -157,10 +174,22 @@ function extractFunc(name) {{
 }}
 eval(extractFunc('_sessionVirtualWindow'));
 
-function scopeReset() {{
-  _sessionTouchStartIndex = 0;
-  _sessionTouchLoadedCount = SESSION_TOUCH_INITIAL_BATCH;
+// Extract the PRODUCTION scope-fingerprint reset (same rationale as the
+// consecutive-renders test above — no hand-copied local helper).
+const renderFn = extractFunc('renderSessionListFromCache');
+const resetStart = renderFn.indexOf('if(prevFingerprint!==scopeFingerprint)');
+if (resetStart < 0) throw new Error('scope-fingerprint reset branch not found');
+const CLOSE_BRACE = String.fromCharCode(125); // f-string-safe literal close brace
+const resetBlock = renderFn.slice(
+  resetStart, renderFn.indexOf(CLOSE_BRACE, renderFn.indexOf('_sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH', resetStart)) + 1
+);
+if (!resetBlock.includes('_sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH')) {{
+  throw new Error('reset block extraction failed');
 }}
+let prevFingerprint = '';               // simulate a scope fingerprint CHANGE
+let scopeFingerprint = 'scope-A';
+let list = {{ dataset: {{}} }};             // production writes the new fingerprint here
+function scopeReset() {{ eval(resetBlock); }}
 
 const opts = {{
   total: 10000,
