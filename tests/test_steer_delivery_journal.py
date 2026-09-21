@@ -13,11 +13,15 @@ from api import run_journal
 @pytest.fixture
 def isolated_steer_state():
     from api.config import (
+        ACTIVE_RUNS,
+        ACTIVE_RUNS_LOCK,
         AGENT_INSTANCES,
         SESSION_AGENT_CACHE,
         SESSION_AGENT_CACHE_LOCK,
         STREAMS,
         STREAMS_LOCK,
+        STREAM_SESSION_OWNERS,
+        STREAM_SESSION_OWNERS_LOCK,
     )
 
     with SESSION_AGENT_CACHE_LOCK:
@@ -28,6 +32,12 @@ def isolated_steer_state():
         STREAMS.clear()
         agents_snapshot = dict(AGENT_INSTANCES)
         AGENT_INSTANCES.clear()
+    with ACTIVE_RUNS_LOCK:
+        runs_snapshot = dict(ACTIVE_RUNS)
+        ACTIVE_RUNS.clear()
+    with STREAM_SESSION_OWNERS_LOCK:
+        owners_snapshot = dict(STREAM_SESSION_OWNERS)
+        STREAM_SESSION_OWNERS.clear()
     try:
         yield SESSION_AGENT_CACHE, STREAMS, AGENT_INSTANCES
     finally:
@@ -39,6 +49,24 @@ def isolated_steer_state():
             STREAMS.update(streams_snapshot)
             AGENT_INSTANCES.clear()
             AGENT_INSTANCES.update(agents_snapshot)
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS.clear()
+            ACTIVE_RUNS.update(runs_snapshot)
+        with STREAM_SESSION_OWNERS_LOCK:
+            STREAM_SESSION_OWNERS.clear()
+            STREAM_SESSION_OWNERS.update(owners_snapshot)
+
+
+def _steer_owner(stream_id, sid):
+    """Register the stream-ownership master's positive-ownership gate requires."""
+    from api import config
+
+    with config.STREAM_SESSION_OWNERS_LOCK:
+        config.STREAM_SESSION_OWNERS[stream_id] = sid
+    with config.ACTIVE_RUNS_LOCK:
+        config.ACTIVE_RUNS[stream_id] = {
+            "session_id": sid, "backend": "legacy", "phase": "running",
+        }
 
 
 def _handler():
@@ -71,6 +99,8 @@ def test_accepted_steer_uses_one_journal_identity_for_live_broadcast(
     with STREAMS_LOCK:
         streams[stream_id] = stream
         agents[stream_id] = agent
+
+    _steer_owner(stream_id, sid)
 
     session = MagicMock(active_stream_id=stream_id)
     journal_event = {
@@ -153,6 +183,8 @@ def test_rejected_steer_does_not_create_a_delivery_event(isolated_steer_state):
         streams[stream_id] = stream
         agents[stream_id] = agent
 
+    _steer_owner(stream_id, sid)
+
     def reject(_writer, _event_name, _payload, accept, *, publish=None):
         assert accept() is False
         assert publish is not None
@@ -195,6 +227,8 @@ def test_journal_failure_does_not_turn_runtime_acceptance_into_http_failure(
     with STREAMS_LOCK:
         streams[stream_id] = stream
         agents[stream_id] = agent
+
+    _steer_owner(stream_id, sid)
 
     persistence_error = OSError("disk unavailable")
 
@@ -263,6 +297,8 @@ def test_publication_failure_keeps_durable_event_in_http_response(isolated_steer
         streams[stream_id] = stream
         agents[stream_id] = agent
 
+    _steer_owner(stream_id, sid)
+
     journal_event = {
         "version": 1,
         "event_id": f"{stream_id}:4",
@@ -325,6 +361,8 @@ def test_terminal_journal_wins_race_without_late_delivery_event(
     with STREAMS_LOCK:
         streams[stream_id] = stream
         agents[stream_id] = agent
+
+    _steer_owner(stream_id, sid)
 
     def test_writer(session_id, run_id):
         return run_journal.RunJournalWriter(
