@@ -551,7 +551,16 @@ def test_agent_status_callback_wiring():
 
 
 def test_fallback_lifecycle_message_predicate_matches_agent_emitters():
-    # Confirmed post-switch notices from the Agent (the ONLY path that persists)
+    # Current agent CONFIRMED post-switch notice (dead-provider probe, verbatim):
+    # kind='warn' via _emit_warning, names the NEW model. The matcher originally
+    # only accepted the legacy "Switched to fallback model:" lifecycle shape;
+    # the agent's provider-transition rework (Aug 2026) changed the emission.
+    assert _is_fallback_lifecycle_message(
+        "warn",
+        "⚠️ Model fallback: dead-model-test via custom:vllm-dead-test unavailable "
+        "(provider overloaded); using gpt-5.6-sol via copilot.",
+    )
+    # Legacy agent shape retained for older agents.
     assert _is_fallback_lifecycle_message(
         "lifecycle",
         "🔄 Switched to fallback model: m1 via p1 → m2 via p2",
@@ -560,8 +569,9 @@ def test_fallback_lifecycle_message_predicate_matches_agent_emitters():
         "lifecycle",
         "Switched to fallback model: GLM-5.2-300K via custom:vllm-cwb101 → DeepSeek-V4-Flash-262K via custom:vllm-cwb101",
     )
-    # Transient pre-switch notices must NOT match (they fire before the model
-    # changes, carry OLD model info, and may never complete the switch)
+    # Confirmed-only contract: transient pre-switch chatter ("switching to",
+    # "trying fallback") must NOT become a persistent notice — those are gated
+    # through _is_transient_fallback_warning instead.
     assert not _is_fallback_lifecycle_message(
         "lifecycle",
         "Rate limited — switching to fallback provider...",
@@ -571,8 +581,18 @@ def test_fallback_lifecycle_message_predicate_matches_agent_emitters():
         "Non-retryable error (HTTP 500) — trying fallback...",
     )
     assert not _is_fallback_lifecycle_message(
+        "warn",
+        "Rate limited — switching to fallback provider...",
+    )
+    # warn kind is still phrase-gated: unrelated degraded-path warnings
+    # (auxiliary failures, compression blocks) must not surface as fallbacks.
+    assert not _is_fallback_lifecycle_message(
         "tool",
         "Switched to fallback model: m1 via p1 → m2 via p2",
+    )
+    assert not _is_fallback_lifecycle_message(
+        "warn",
+        "Configured compression model `x` failed (boom). Recovered using your main model.",
     )
     assert not _is_fallback_lifecycle_message(
         "lifecycle",
