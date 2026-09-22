@@ -331,13 +331,20 @@ def _active_run_ids_for_session(
             for run_key, _stale_sid in stale_keys:
                 (_cfg.ACTIVE_RUNS or {}).pop(run_key, None)
         for run_key, _stale_sid in stale_keys:
+            # Snapshot the owner BEFORE unregister_stream_owner erases it so
+            # the abandonment helper can attribute any accepted notice it
+            # transfers to the owner-scoped dead-letter (stale-cleanup
+            # data-loss fix).
+            _stale_owner_session_id = _cfg.stream_owner_session_id(_stale_sid)
             _cfg.unregister_stream_owner(run_key)
             # Retire settlement participant/fence state for the abandoned
             # stream so stale-run cleanup does not leak settlement registries
             # (gate-certifier blocker #3: stale-run participant/fence cleanup).
             try:
                 from api.streaming import _abandon_stale_stream_settlement
-                _abandon_stale_stream_settlement(_stale_sid)
+                _abandon_stale_stream_settlement(
+                    _stale_sid, owner_session_id=_stale_owner_session_id,
+                )
             except Exception:
                 logger.debug(
                     "Failed to abandon stale stream settlement for %s",

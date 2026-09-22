@@ -637,7 +637,8 @@ function _messageIsRenderable(m){
   const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
   const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
   const hasReasoningAnchor=hasTc||hasTu||_messageHasReasoningPayload(m);
-  const hasAssistantVisibleAnchor=hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m);
+  const hasFallbackNotice=m.role==='assistant'&&m._fallbackNotice&&typeof m._fallbackNotice==='object'&&!Array.isArray(m._fallbackNotice)&&window._showFallbackNotices!==false;
+  const hasAssistantVisibleAnchor=hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)||hasFallbackNotice;
   return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasReasoningAnchor||hasAssistantVisibleAnchor)));
 }
 function _getVisibleMessagesWithIdx(){
@@ -15170,8 +15171,9 @@ function _fallbackNoticeHtml(notice){
   const toModel=String(notice.to_model||'');
   const toProvider=String(notice.to_provider||'');
   const modelLabel=toModel?(toProvider?`${toModel} (${toProvider})`:toModel):'';
+  const iconHtml=/^\s*⚠️?/u.test(message)?'':`<span class="fallback-notice-icon" role="img" aria-label="Warning">⚠️</span>`;
   return `<div class="fallback-notice" data-fallback-notice="1">`+
-    `<span class="fallback-notice-icon" role="img" aria-label="Warning">⚠️</span>`+
+    iconHtml+
     `<span class="fallback-notice-text">${esc(message)}</span>`+
     (modelLabel?`<span class="fallback-notice-model" title="${esc(modelLabel)}">${esc(modelLabel)}</span>`:'')+
     `</div>`;
@@ -17777,7 +17779,7 @@ function renderMessages(options){
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
     const hasVisibleBody=!!(String(content||'').trim()||filesHtml||recoveryHtml||fallbackNoticeHtml);
-    if(fallbackNoticeHtml){
+    if(fallbackNoticeHtml&&!messageBelongsInWorklog){
       seg.insertAdjacentHTML('afterbegin', fallbackNoticeHtml);
     }
     if(statusHtml){
@@ -17787,6 +17789,16 @@ function renderMessages(options){
       seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
     }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
       seg.classList.add('assistant-segment-anchor');
+    }
+    if(fallbackNoticeHtml&&messageBelongsInWorklog){
+      const turnBlocks=_assistantTurnBlocks(currentAssistantTurn);
+      const noticeSeg=document.createElement('div');
+      noticeSeg.className='assistant-segment fallback-notice-only';
+      noticeSeg.dataset.msgIdx=rawIdx;
+      noticeSeg.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+      noticeSeg.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+      noticeSeg.insertAdjacentHTML('beforeend',fallbackNoticeHtml);
+      turnBlocks.appendChild(noticeSeg);
     }
     _assistantTurnBlocks(currentAssistantTurn).appendChild(seg);
     assistantSegments.set(rawIdx, seg);

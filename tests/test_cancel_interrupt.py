@@ -1722,10 +1722,10 @@ class TestCancelInterrupt:
     def test_worker_first_save_failure_notice_survives_for_cancel_persist(self):
         """Worker-first save failure composed end-to-end: the worker's
         _finalize_cancelled_turn save() RAISES, so _STREAM_WORKER_SAVED stays
-        empty and the worker's retirement does NOT pop the notice.  The notice
-        remains in _STREAM_FALLBACK_NOTICES for cancel_stream to pick up, and a
-        subsequent cancel_stream persists it durably on the session row
-        (gate-certifier #2: at least one durable owner exists at all times).
+        empty. Worker retirement leaves the exact accepted notice with the
+        bounded dead-letter owner, rather than an orphaned live-map copy.
+        A subsequent cancel_stream reclaims that token without a fresh callback
+        and persists it on the session row; ownership is not itself durability.
         """
         import threading
         from unittest.mock import patch, Mock
@@ -1765,11 +1765,11 @@ class TestCancelInterrupt:
         # Worker finalizes and its save FAILS
         _finalize_cancelled_turn(ws, stream_id=stream_id)
         assert stream_id not in _STREAM_WORKER_SAVED
-        # Worker retirement must NOT pop (not durably saved)
+        # Worker retirement transfers ownership, not durability, to dead-letter.
         _retire_worker_cancelled_state(stream_id)
-        assert stream_id in _STREAM_FALLBACK_NOTICES, (
-            "worker dropped the only live notice after its save failure"
-        )
+        import api.streaming as st
+        assert stream_id not in _STREAM_FALLBACK_NOTICES
+        assert st._STREAM_FALLBACK_DEAD_LETTER[stream_id]['notice'] == _notice
 
         # Now cancel runs: its session save SUCCEEDS -> notice persisted durably
         q = queue.Queue()
@@ -1778,7 +1778,6 @@ class TestCancelInterrupt:
         STREAM_PARTIAL_TEXT[stream_id] = "partial"
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
-        _publish_test_notice(stream_id, _notice)  # still parked
 
         cs = Mock()
         cs.session_id = session_id

@@ -1316,7 +1316,7 @@ def _retire_worker_cancelled_state(stream_id: str) -> None:
         _retire_worker_cancelled_state_locked(stream_id)
 
 
-def _abandon_stale_stream_settlement(stream_id: str) -> None:
+def _abandon_stale_stream_settlement(stream_id: str, owner_session_id: str | None = None) -> None:
     """Bounded abandonment helper for stale active run/owner cleanup.
 
     Called by the stale-run reapers
@@ -1329,20 +1329,54 @@ def _abandon_stale_stream_settlement(stream_id: str) -> None:
     generations, dead-letters, and live notices for the abandoned stream
     (gate-certifier blocker #3: stale-run participant/fence cleanup).
 
-    This helper routes BOTH reapers through one bounded abandonment path that
-    unconditionally retires every settlement registry the stream may have
-    populated.  Unlike ``_retire_worker_cancelled_state_locked`` (which has
-    conditional compare-and-retire logic for the normal/cancel participant
-    paths), this helper is called when the stream is being ABANDONED — no
-    worker or cancel participant will ever complete settlement, so every
-    registry entry must be cleared unconditionally.  It never stamps or saves.
+    This helper routes BOTH reapers through one bounded abandonment path.
+    Unlike ``_retire_worker_cancelled_state_locked`` (which has conditional
+    compare-and-retire logic for the normal/cancel participant paths), this
+    helper is called when the stream is being ABANDONED — no worker or cancel
+    participant will ever complete settlement, so settlement registries are
+    cleared unconditionally.  It never stamps or saves.
+
+    Fallback-notice ownership is NOT discarded blindly (re-gate at 65e7d50d,
+    stale-cleanup data-loss blocker):
+
+    1. An unexpired live notice is transferred to the owner-scoped
+       ``_STREAM_FALLBACK_DEAD_LETTER`` under the same ``STREAMS_LOCK``
+       critical section that clears the live map, so the newest accepted
+       generation stays recoverable by a later cancel/finalize for its
+       bounded window instead of being silently dropped at the 180 s reaper
+       ceiling (the dead-letter contract allows 300 s).
+    2. An existing unexpired dead-letter is PRESERVED until its own
+       ``deadline_at`` — compare-delete after successful persistence is owned
+       by the normal settlement paths, not by stale-run abandonment.  Only
+       entries at/past their deadline retire here (via
+       ``_expire_dead_letter_if_due_locked``), so repeated cleanup is
+       idempotent and bounded.
+
+    ``owner_session_id`` must be snapshotted by the CALLER from the stream-
+    owner registry BEFORE it unregisters the stale run, and passed in here:
+    after ``unregister_stream_owner`` runs, the ownership attribution is gone
+    and the dead-letter entry would be recorded ownerless.
     """
     if not stream_id:
         return
     try:
         with STREAMS_LOCK:
+            live_notice = _clean_fallback_notice(
+                _STREAM_FALLBACK_NOTICES.get(stream_id)
+            )
+            if live_notice is not None:
+                _store_fallback_dead_letter_locked(
+                    stream_id,
+                    live_notice,
+                    generation=_current_notice_generation(stream_id),
+                    owner_session_id=owner_session_id,
+                    terminal_status='failed',
+                )
             _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
-            _STREAM_FALLBACK_DEAD_LETTER.pop(stream_id, None)
+            # Preserve an unexpired dead-letter until its own deadline;
+            # compare-delete after persistence belongs to the settlement
+            # paths, not stale-run abandonment. Expired entries retire here.
+            _expire_dead_letter_if_due_locked(stream_id)
             _STREAM_SETTLEMENT_PARTICIPANTS.pop(stream_id, None)
             _STREAM_SETTLEMENT_COMPLETED.pop(stream_id, None)
             _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
@@ -1412,20 +1446,12 @@ def _turn_final_save_commit(
     try:
         yield
     except Exception:
-        if stream_id is not None and _saved_generation is not None:
-            _owner_session_id = str(getattr(session, 'session_id', '') or '') or None
-            _owner_profile = getattr(session, 'profile', None)
+        if stream_id is not None:
             with STREAMS_LOCK:
                 _STREAM_WORKER_SAVED.pop(stream_id, None)
-                if _saved_notice is not None:
-                    _store_fallback_dead_letter_locked(
-                        stream_id,
-                        _saved_notice,
-                        generation=_saved_generation,
-                        owner_session_id=_owner_session_id,
-                        owner_profile=_owner_profile,
-                        terminal_status='failed',
-                    )
+                _transfer_failed_fallback_notice_locked(
+                    stream_id, session, _saved_generation, _saved_notice,
+                )
         raise
     else:
         if stream_id is not None and _saved_generation is not None:
@@ -1441,6 +1467,31 @@ def _turn_final_save_commit(
             durable_generation=_saved_generation,
             durable_notice=_saved_notice,
         )
+
+
+def _transfer_failed_fallback_notice_locked(stream_id, session, generation, notice):
+    """Fence publication and transfer the newest accepted token, under STREAMS_LOCK.
+
+    A failed save owns its captured row, not necessarily the latest publication.
+    Retry failures must also never replace a newer dead-letter with an old row.
+    """
+    generation = int(generation or 0)
+    notice = _clean_fallback_notice(notice)
+    live = _STREAM_FALLBACK_NOTICES.get(stream_id)
+    live_generation = _current_notice_generation(stream_id)
+    if live is not None and live_generation >= generation:
+        generation, notice = live_generation, _clean_fallback_notice(live)
+    dead = _STREAM_FALLBACK_DEAD_LETTER.get(stream_id)
+    if dead is not None and int(dead.get('generation') or 0) > generation:
+        generation = int(dead['generation'])
+        notice = _clean_fallback_notice(_dead_letter_notice(dead))
+    if notice is not None:
+        _store_fallback_dead_letter_locked(
+            stream_id, notice, generation=generation,
+            owner_session_id=str(getattr(session, 'session_id', '') or '') or None,
+            owner_profile=getattr(session, 'profile', None), terminal_status='failed',
+        )
+    _STREAM_SETTLEMENT_TERMINAL.add(stream_id)
 
 
 def _settle_latest_fallback_notice_before_teardown(
@@ -1681,6 +1732,17 @@ def _retire_worker_cancelled_state_locked(stream_id: str) -> None:
     if _worker_durably_saved and _dead_letter_matches_generation(_dl_entry, int(_saved_gen)):
         _retire_fallback_dead_letter_after_persist_locked(stream_id, int(_saved_gen))
     _STREAM_WORKER_SAVED.pop(stream_id, None)
+    # A failed save can hand the current generation to the bounded owner even
+    # when the worker registered a participant (cancelled-turn finalization).
+    # Do not leave a duplicate live token after that participant completes.
+    if (
+        _fb_entry is not None
+        and _dead_letter_matches_generation(_dl_entry, _current_notice_generation(stream_id))
+        and not _fb_entry.get('_cancel_claimed')
+        and stream_id not in _STREAM_CANCEL_CLAIMED
+    ):
+        _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
+        _notice_retired = True
 
     # Ordinary no-counterpart teardown: the worker durably saved the exact
     # generation that is current, and no cancel/settlement counterpart ever
@@ -1707,28 +1769,7 @@ def _retire_worker_cancelled_state_locked(stream_id: str) -> None:
         # a completed-worker tombstone). Failed persistence has already moved
         # the exact token to the bounded dead-letter owner; the live map is no
         # longer an additional owner in that case.
-        # Single-owner invariant: when the bounded dead-letter owns the EXACT
-        # current live generation (a failed/exhausted normal-settlement loop
-        # transferred B there), the live map must stop being a second owner of
-        # the same token.  Retire B from the map (and its generation token)
-        # while PRESERVING the dead-letter for retry/deadline ownership — even
-        # when an older generation A was durably saved.  Conversely, a
-        # dead-letter for an OLDER generation must not retire the live map or
-        # the counter that still tracks B's publication.
-        _dl_owns_live_generation = _dead_letter_matches_generation(
-            _dl_entry, _current_notice_generation(stream_id),
-        )
-        if (_dl_entry is not None and _dl_owns_live_generation
-                and not _fb_entry.get('_cancel_claimed')
-                and stream_id not in _STREAM_CANCEL_CLAIMED):
-            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
-            _notice_retired = True
-        elif _dl_entry is not None and not _worker_durably_saved:
-            _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
-        if _fb_entry is None or _notice_retired or (
-            _dl_entry is not None
-            and (_dl_owns_live_generation or not _worker_durably_saved)
-        ):
+        if _fb_entry is None or _notice_retired:
             _STREAM_NOTICE_GENERATION.pop(stream_id, None)
         _STREAM_SETTLEMENT_TERMINAL.discard(stream_id)
         _expire_dead_letter_if_due_locked(stream_id)
@@ -3558,19 +3599,11 @@ def _finalize_cancelled_turn(
     except Exception:
         logger.debug("Failed to persist cancelled turn", exc_info=True)
         if stream_id is not None:
-            owner_session_id = str(getattr(session, 'session_id', '') or '') or None
-            owner_profile = getattr(session, 'profile', None)
             with STREAMS_LOCK:
                 _STREAM_WORKER_SAVED.pop(stream_id, None)
-                if _saved_notice is not None:
-                    _store_fallback_dead_letter_locked(
-                        stream_id,
-                        _saved_notice,
-                        generation=_saved_generation,
-                        owner_session_id=owner_session_id,
-                        owner_profile=owner_profile,
-                        terminal_status='failed',
-                    )
+                _transfer_failed_fallback_notice_locked(
+                    stream_id, session, _saved_generation, _saved_notice,
+                )
         # The first save failed — active_stream_id was already cleared
         # in-memory above but did NOT reach durable storage.  Retry the save
         # so the cleared active_stream_id is persisted and the sidebar does
@@ -15098,6 +15131,13 @@ def cancel_stream(stream_id: str) -> dict:
     # the claim set is idempotent.
     with streams_lock:
         _STREAM_CANCEL_CLAIMED.add(stream_id)
+        # Reclaim a failed worker's exact bounded token for cancel settlement;
+        # no fresh callback should be needed to recover already accepted data.
+        if stream_id not in _STREAM_FALLBACK_NOTICES:
+            _dead = _STREAM_FALLBACK_DEAD_LETTER.get(stream_id)
+            if _dead is not None:
+                _STREAM_FALLBACK_NOTICES[stream_id] = _clean_fallback_notice(_dead_letter_notice(_dead))
+                _STREAM_NOTICE_GENERATION[stream_id] = int(_dead.get('generation') or 0)
         _fb_entry = _STREAM_FALLBACK_NOTICES.get(stream_id)
         if _fb_entry is not None:
             _fb_entry['_cancel_claimed'] = True
@@ -15457,6 +15497,11 @@ def cancel_stream(stream_id: str) -> dict:
                                 )
                         try:
                             _cs.save()
+                            if _fb_generation_id is not None:
+                                with streams_lock:
+                                    _retire_fallback_dead_letter_after_persist_locked(
+                                        stream_id, _fb_generation_id,
+                                    )
                         except Exception:
                             # Save failure: leave the notice in the map so
                             # the worker's _persist_cancelled_turn can pick
