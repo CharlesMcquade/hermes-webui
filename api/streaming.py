@@ -9849,6 +9849,14 @@ def _run_agent_streaming(
         # already registered the stream owner, so release it here to avoid
         # leaking a STREAM_SESSION_OWNERS entry that the teardown finally never sees.
         unregister_stream_owner(stream_id)
+        # cancel_stream() can pop STREAMS[stream_id] between the route's
+        # is_alive() observation and the worker's own registration: this
+        # pre-start exit may be the ONLY path that ever runs for a row the
+        # route registered with phase="starting" (alive-to-cancel race,
+        # gate review 221beca7 #3). Retire it unconditionally — a worker
+        # that DID register upgraded the same row, and a row that was
+        # never created pops as a no-op.
+        unregister_active_run(stream_id)
         try:
             clear_session_writeback_owner_if_owned(session_id, stream_id)
         except Exception:
