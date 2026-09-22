@@ -1179,6 +1179,13 @@ def _run_gateway_chat_streaming(
         # SESSION_WRITEBACK_OWNERS does not leak on this pre-start cancellation
         # path (the teardown finally below never runs when we early-return here).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
+        # cancel_stream() can pop STREAMS[stream_id] between the route's
+        # is_alive() observation and this worker's registration: retire the
+        # route's concrete starting row here too (alive-to-cancel race,
+        # gate review 221beca7 #3). Registration below never happened on
+        # this path, so this pop cannot retire a live run.
+        from api.config import unregister_active_run as _unregister_active_run
+        _unregister_active_run(stream_id)
         return
     try:
         register_active_run(
