@@ -238,7 +238,7 @@ def _accepts_gzip(handler) -> bool:
     return 'gzip' in ae
 
 
-def _safe_write(handler, body: bytes) -> None:
+def _safe_write(handler, body: bytes, *, raise_disconnect: bool = False) -> None:
     """Write response body, ignoring expected client disconnect errors.
 
     Logs disconnects at debug level so they are observable without
@@ -249,6 +249,8 @@ def _safe_write(handler, body: bytes) -> None:
         handler.end_headers()
         handler.wfile.write(body)
     except _CLIENT_DISCONNECT_ERRORS as exc:
+        if raise_disconnect:
+            raise
         import logging
         logging.getLogger("hermes.webui").debug(
             "Client disconnected mid-response (%s): %s",
@@ -270,11 +272,12 @@ def _json_response_body(payload, *, pretty: bool = True) -> bytes:
     return _json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
 
 
-def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bool = True) -> None:
+def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bool = True, raise_disconnect: bool = False) -> None:
     """Send a JSON response.
 
     *extra_headers*: optional dict of additional headers to include
     (e.g., {'Set-Cookie': '...'}).  Headers are sent before end_headers().
+    *raise_disconnect*: let lifecycle callers cancel an action if replying fails.
     """
     body = _json_response_body(payload, pretty=pretty)
     handler.send_response(status)
@@ -295,7 +298,7 @@ def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bo
     if extra_headers:
         for k, v in extra_headers.items():
             handler.send_header(k, v)
-    _safe_write(handler, body)
+    _safe_write(handler, body, raise_disconnect=raise_disconnect)
 
 
 def t(
@@ -1269,8 +1272,10 @@ def redact_session_data(session_dict: dict) -> dict:
     return result
 
 
-def read_body(handler) -> dict:
-    """Read and JSON-parse a POST request body (capped at 20MB)."""
+def read_body(handler, *, max_bytes: int | None = None, strict: bool = False) -> dict:
+    """Read bounded JSON; strict callers reject malformed/non-object bodies."""
+    if max_bytes is None:
+        max_bytes = MAX_BODY_BYTES
     raw_length = handler.headers.get('Content-Length', 0)
     try:
         length = int(raw_length)
@@ -1286,17 +1291,22 @@ def read_body(handler) -> dict:
         except Exception:
             pass
         raise ValueError(f'Invalid Content-Length: {length}')
-    if length > MAX_BODY_BYTES:
+    if length > max_bytes:
         try:
             handler.close_connection = True
         except Exception:
             pass
-        raise ValueError(f'Request body too large ({length} bytes, max {MAX_BODY_BYTES})')
+        raise ValueError(f'Request body too large ({length} bytes, max {max_bytes})')
     raw = handler.rfile.read(length) if length else b'{}'
     try:
-        return _json.loads(raw)
-    except Exception:
+        payload = _json.loads(raw)
+    except Exception as exc:
+        if strict:
+            raise ValueError('Invalid JSON body') from exc
         return {}
+    if strict and (not isinstance(payload, dict) or (length and len(raw) != length)):
+        raise ValueError('Expected a complete JSON object body')
+    return payload
 
 
 # ── Profile cookie helpers (issue #798) ─────────────────────────────────────

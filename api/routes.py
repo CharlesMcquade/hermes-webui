@@ -13308,52 +13308,10 @@ def _handle_health_restart(handler) -> bool:
     )
 
 
-_WEBUI_RESTART_LOCK = threading.Lock()
-
-
 def _handle_webui_restart(handler) -> bool:
-    """Restart the WebUI server process itself (SIGINT → daemon-respawn).
+    from api.webui_restart import handle_restart
 
-    This is distinct from the Hermes gateway restart: it interrupts the WebUI
-    process, relying on the supervising daemon/launch wrapper to re-exec it —
-    the same self-interrupt pattern used by /api/shutdown. Uses a delayed kill
-    so the response flushes before the process dies. Non-blocking lock prevents
-    a queued second restart while the first is already tearing the process down.
-    """
-    if not _WEBUI_RESTART_LOCK.acquire(blocking=False):
-        return j(
-            handler,
-            {"ok": False, "error": "WebUI restart already in progress."},
-            status=429,
-        )
-    headers = getattr(handler, "headers", {})
-    ua = headers.get("User-Agent", "no-ua") if hasattr(headers, "get") else "no-ua"
-    remote = "unknown"
-    if getattr(handler, "client_address", None):
-        remote = getattr(handler, "client_address", ("unknown",))[0]
-    logger.info(
-        "[webui-restart-request] remote=%s method=%s path=%s ua=%s",
-        _shutdown_log_value(remote),
-        _shutdown_log_value(getattr(handler, "command", None)),
-        _shutdown_log_value(getattr(handler, "path", None), max_len=240),
-        _shutdown_log_value(ua, default="no-ua", max_len=240),
-    )
-    j(handler, {"ok": True, "status": "restarting", "message": "WebUI restarting; it will come back shortly."})
-    import signal
-
-    def _do_restart():
-        import time
-        time.sleep(0.3)
-        try:
-            os.kill(os.getpid(), signal.SIGINT)
-        finally:
-            try:
-                _WEBUI_RESTART_LOCK.release()
-            except RuntimeError:
-                pass
-
-    threading.Thread(target=_do_restart, daemon=True).start()
-    return True
+    return handle_restart(handler)
 
 
 def _serve_manifest(handler) -> bool:

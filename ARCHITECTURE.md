@@ -42,6 +42,43 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 
 ---
 
+## Managed WebUI restart admission
+
+`POST /api/webui/restart` consumes an optional JSON object body (maximum 4096
+bytes) before restart admission, including when a restart is already busy.
+Invalid JSON or framing returns 400 and closes the connection; concurrent
+restart admission returns 429. The process-local lock in `api/webui_restart.py`
+is released on every failure and transferred to the delayed SIGINT worker only
+after the acceptance response is written and flushed.
+
+A local service launcher may provision `service-manager.json` in the existing
+`HERMES_WEBUI_STATE_DIR` (`api.config.STATE_DIR`). This is deployment metadata,
+not a browser setting or a new environment variable:
+
+```json
+{"webui_restart_preflight": ["/absolute/venv/bin/python", "/absolute/local/preflight.py", "webui", "--check"]}
+```
+
+Only an absent file retains unmanaged behavior (SIGINT with an external
+supervisor responsible for respawn). A present file must resolve to a readable
+local regular file, contain the four-element argv above, and reference an
+absolute executable and readable absolute local script. Keep this metadata and
+its referenced code writable only by the trusted deployment operator; the WebUI
+never accepts a command from the request body. Provision it before service
+startup; it is reread on each request so repaired metadata can be retried.
+
+The check runs without a shell, with stdin/stdout/stderr disconnected and a
+30-second timeout, **before** acknowledging acceptance or sending SIGINT.
+Malformed/unreadable metadata, launch errors, timeout, or a nonzero check return
+503 and leave the current server running. Errors use fixed actionable messages;
+command arguments, exceptions, and child output are never exposed as diagnostics
+because they may contain secrets. Run the manager check locally to investigate.
+
+A 200 response with `status: "restarting"` means **accepted**, not a verified
+restart or health result. No in-process check can certify a future respawn;
+callers must separately verify the replacement service. Gateway restart and
+`/api/shutdown` remain separate operations and do not use this admission check.
+
 ## 2. File Inventory
 
     <repo>/
@@ -64,6 +101,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       profiles.py          Profile state management, hermes_cli wrapper
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
       routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
+      webui_restart.py     Self-restart admission and optional local manager preflight.
       startup.py           Startup helpers: auto_install_agent_deps()
       state_sync.py        /insights sync — message_count to the agent's state.db
       streaming.py         SSE engine, run_agent, cancel, compression, HERMES_HOME save/restore
