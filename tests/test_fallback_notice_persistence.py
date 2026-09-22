@@ -292,6 +292,53 @@ console.log('OK: all render assertions passed');
     )
 
 
+def test_empty_fallback_notice_is_renderable_and_warning_icon_is_not_duplicated():
+    """Persisted empty assistant rows remain visible and warning copy owns one glyph."""
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required for the render contract test")
+    ui_src = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+
+    def extract(name: str) -> str:
+        start = ui_src.find(f"function {name}(")
+        assert start >= 0
+        brace = ui_src.find("{", start)
+        depth = 0
+        for idx in range(brace, len(ui_src)):
+            if ui_src[idx] == "{":
+                depth += 1
+            elif ui_src[idx] == "}":
+                depth -= 1
+                if depth == 0:
+                    return ui_src[start : idx + 1]
+        raise AssertionError(f"unterminated {name}")
+
+    script = r"""
+const window = {_showFallbackNotices: true};
+function msgContent(m){ return typeof m.content === 'string' ? m.content : ''; }
+function _isContextCompactionMessage(){ return false; }
+function _isPreservedCompressionTaskListMessage(){ return false; }
+function _isRecoveryControlMessage(){ return false; }
+function _messageHasReasoningPayload(){ return false; }
+function _assistantMessageHasVisibleContent(){ return false; }
+function esc(s){ return String(s); }
+${RENDERABLE}
+${HTML}
+const empty = {role:'assistant', content:'', _fallbackNotice:{message:'⚠️ Switched models', to_model:'Qwen/Qwen2.5-72B-Instruct-Turbo'}};
+if (!_messageIsRenderable(empty)) throw new Error('empty fallback row was culled');
+const html = _fallbackNoticeHtml(empty._fallbackNotice);
+if ((html.match(/⚠️/gu)||[]).length !== 1) throw new Error('warning glyph duplicated: '+html);
+if (!html.includes('Qwen/Qwen2.5-72B-Instruct-Turbo')) throw new Error('model case changed in markup');
+window._showFallbackNotices = false;
+if (_messageIsRenderable(empty)) throw new Error('disabled empty notice left a blank row');
+""".replace("${RENDERABLE}", extract("_messageIsRenderable")).replace("${HTML}", extract("_fallbackNoticeHtml"))
+    result = subprocess.run([node, "-e", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
 # ── 6: two-source-order reconciliation regression ───────────────────────────
 
 
