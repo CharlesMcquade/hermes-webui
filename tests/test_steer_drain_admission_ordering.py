@@ -195,10 +195,14 @@ def test_no_steer_delivered_after_final_drain_begins(drain_race_scene, tmp_path)
     assert scene.steer_calls == [], (
         f"agent.steer() ran after the final drain began: {scene.steer_calls}")
 
-    # ...and the acceptance transaction must report it as rejected.
+    # ...and the acceptance transaction must report it as rejected. The owned
+    # stream is still live in phase=finalizing at this point (settlement only
+    # closed admission), so the fence_closed rejection surfaces as not_running
+    # (Greptile P1 r4060416268) — never as stream_dead, which would send the
+    # client down its dead-stream recovery path.
     assert outcome["accepted"] is False, (
         f"Steer accepted after the final drain started: {outcome}")
-    assert outcome["fallback"] == "stream_dead", outcome
+    assert outcome["fallback"] == "not_running", outcome
 
     # The journal must not record the racing guidance as delivered.
     journal = run_journal.read_run_events(
@@ -260,3 +264,104 @@ def test_steer_accepted_before_settlement_still_drains(drain_race_scene, tmp_pat
     # The in-time guidance was consumed by the final drain.
     assert scene.steer_calls == ["in-time guidance"], scene.steer_calls
     assert scene.drain_calls, "final drain never ran"
+
+
+def test_fence_closed_while_finalizing_surfaces_not_running(
+    drain_race_scene, tmp_path
+):
+    """Greptile P1 (discussion_r4060416268): once settlement has published
+    phase=finalizing and closed the acceptance fence, the owned stream is
+    still LIVE. A Steer rejected by the closed fence must therefore be
+    classified as ``not_running`` (guidance arrived after admission closed)
+    — not ``stream_dead``, which would send the client down its dead-stream
+    recovery path for an orderly lifecycle transition.
+
+    Deterministic schedule (same production-composed fixture as the
+    drain-race regression above):
+
+      1. The worker reaches its final drain (barrier) — settlement has
+         already published phase=finalizing and closed the fence.
+      2. While the drain is parked, the racing Steer's journal transaction
+         runs and is rejected fence_closed.
+      3. While the drain is STILL parked (finalizing not yet over), the
+         classification is observed: not_running, because the stream is
+         live, owned, local-backend, and in the finalizing phase.
+    """
+    scene = drain_race_scene
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        worker = pool.submit(streaming._run_agent_streaming,
+                             "original", "Do the task.", "test-model",
+                             str(tmp_path), "run")
+        try:
+            # Let the worker reach the final drain: settlement has published
+            # phase=finalizing and closed the acceptance fence before the
+            # drain blocks on the barrier.
+            assert scene.in_drain.wait(20), "worker never reached the final drain"
+
+            with config.STREAMS_LOCK:
+                live = "run" in config.STREAMS
+                with config.ACTIVE_RUNS_LOCK:
+                    run = dict(config.ACTIVE_RUNS.get("run") or {})
+            assert live, "owned stream must still be live during finalizing"
+            assert run.get("phase") == "finalizing", run
+            assert run.get("session_id") == "original", run
+            assert run.get("backend") == streaming.WEBUI_LOCAL_CHAT_BACKEND, run
+
+            # The racing Steer's journal transaction runs now — the fence is
+            # closed, so acceptance is rejected without calling agent.steer().
+            outcome = streaming._accept_and_publish_steer_event(
+                scene.live_agent[0], "original", "run", "late guidance",
+                display_text="late guidance")
+
+            # Still inside the finalizing phase: the classification must
+            # already be not_running, not stream_dead.
+            assert outcome["accepted"] is False, outcome
+            assert outcome["fallback"] == "not_running", outcome
+        finally:
+            scene.release.set()
+        worker.result(timeout=30)
+
+    # The runtime never consumed the late guidance and the journal never
+    # recorded it as delivered.
+    assert scene.steer_calls == [], scene.steer_calls
+    journal = run_journal.read_run_events(
+        "original", "run", session_dir=tmp_path / "sessions")
+    delivered = [e for e in journal["events"] if e["event"] == "steer_delivered"]
+    assert delivered == [], (
+        "steer_delivered journaled after the fence closed: "
+        f"{[e['event_id'] for e in delivered]}")
+
+
+def test_fence_closed_after_teardown_surfaces_stream_dead(
+    drain_race_scene, tmp_path
+):
+    """Fail-closed counterpart: the same fence_closed reason must still
+    classify as stream_dead once the owned stream is gone from STREAMS
+    (cancel/error teardown), so a genuinely vanished stream never gets the
+    softer not_running response."""
+    scene = drain_race_scene
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        worker = pool.submit(streaming._run_agent_streaming,
+                             "original", "Do the task.", "test-model",
+                             str(tmp_path), "run")
+        try:
+            assert scene.in_drain.wait(20), "worker never reached the final drain"
+
+            with config.STREAMS_LOCK:
+                config.STREAMS.pop("run", None)
+            with config.ACTIVE_RUNS_LOCK:
+                config.ACTIVE_RUNS.pop("run", None)
+
+            outcome = streaming._accept_and_publish_steer_event(
+                scene.live_agent[0], "original", "run", "late guidance",
+                display_text="late guidance")
+
+            assert outcome["accepted"] is False, outcome
+            assert outcome["fallback"] == "stream_dead", outcome
+        finally:
+            scene.release.set()
+        worker.result(timeout=30)
+
+    assert scene.steer_calls == [], scene.steer_calls
