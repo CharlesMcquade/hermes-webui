@@ -10119,7 +10119,8 @@ def _run_agent_streaming(
         # acquire the open journal transaction after the drain began and be
         # journaled as delivered guidance the runtime never consumes. With the
         # fence closed first, that transaction is rejected (fence_closed ->
-        # stream_dead). Lock ordering is preserved: close_acceptance_fence
+        # not_running, since the owned stream stays live in the finalizing
+        # phase). Lock ordering is preserved: close_acceptance_fence
         # takes the per-run journal lock BEFORE the fence lock, matching
         # accept_and_append_if_nonterminal, so an in-flight acceptance cannot
         # be overtaken by the fence close + drain. Journal identity is
@@ -14377,7 +14378,8 @@ def _steer_bound_stream(
     Ownership verification happens under STREAMS_LOCK; the durable acceptance
     transaction runs OUTSIDE it. The run journal's per-run lock plus the
     acceptance fence serialize delivery with terminal teardown (a fence closed
-    by cancel/completion rejects the Steer with stream_dead), so no stream
+    by cancel/completion rejects the Steer with stream_dead, or not_running
+    when the owned stream is still live in the finalizing phase), so no stream
     lock needs to be held across journal I/O. Never perform HTTP writes or
     cache/database teardown under stream locks.
     """
@@ -14616,10 +14618,31 @@ def _accept_and_publish_steer_event(
     if reason == "fence_closed":
         # #7188 rework: the acceptance fence was closed by the run's lifecycle
         # owner (completion drain, cancel, or error teardown) before the
-        # terminal row landed. The turn is effectively over — reject the Steer
-        # with the same stream_dead fallback so the frontend surfaces it as a
-        # late delivery that did not reach the runtime.
-        outcome["fallback"] = "stream_dead"
+        # terminal row landed. Greptile P1 (r4060416268): a fence closed by the
+        # completion path's settlement is an orderly transition — the owned
+        # stream is still live in phase "finalizing", so classify the rejection
+        # as not_running (guidance arrived after admission closed), not
+        # stream_dead (a vanished stream that would trigger dead-stream
+        # recovery). Teardown closers (cancel/error) already removed the stream
+        # from STREAMS, so an absent stream still fails closed to stream_dead.
+        # Re-read liveness/ownership outside the journal lock; an racing
+        # teardown between this check and the response only flips the
+        # classification at worst, never accepts the Steer.
+        with STREAMS_LOCK:
+            stream_live = str(stream_id) in STREAMS
+            if stream_live:
+                from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK
+                with ACTIVE_RUNS_LOCK:
+                    run = dict(ACTIVE_RUNS.get(str(stream_id)) or {})
+            else:
+                run = {}
+        if (stream_live
+                and run.get("session_id") == str(session_id)
+                and run.get("backend") == WEBUI_LOCAL_CHAT_BACKEND
+                and run.get("phase") == "finalizing"):
+            outcome["fallback"] = "not_running"
+        else:
+            outcome["fallback"] = "stream_dead"
         return outcome
     if reason == "journal_malformed":
         outcome["fallback"] = "steer_error"
