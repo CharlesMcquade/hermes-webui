@@ -15,7 +15,6 @@ Covers the four still-open blocker families at the review head:
 import json
 import os
 import queue
-import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 

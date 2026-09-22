@@ -22,6 +22,52 @@ logger = logging.getLogger(__name__)
 
 _GATEWAY_RESTART_LOCK = threading.Lock()
 
+# Single-ownership handoff (gate review 221beca7 #4): when a gateway restart
+# completes and an Agent update is about to schedule the WebUI replacement,
+# the gateway-side drain must NOT be released into that in-between window —
+# new work admitted there would run against the updated Agent but a
+# not-yet-replaced WebUI. The completed restart parks its drain here; the
+# scheduler's _schedule_restart claims it and retires it atomically when it
+# publishes its own drain. Only a terminal outcome with no successor restart
+# (or a rollback) releases admission.
+_GATEWAY_RESTART_DRAIN_HANDOFF = threading.Event()
+_GATEWAY_RESTART_DRAIN_HANDOFF_LOCK = threading.Lock()
+# How long a parked drain may wait for the scheduler to claim it. A
+# health-endpoint restart (no update follows) must not hold admission
+# forever; the expiry releases the marker so the surviving process resumes
+# admitting work. The scheduler claims the token long before this elapses.
+_GATEWAY_RESTART_HANDOFF_EXPIRY_SECONDS = 30.0
+
+
+def claim_parked_restart_drain() -> bool:
+    """Atomically claim a parked gateway-restart drain token.
+
+    Returns True when the caller now owns the already-published drain marker
+    (and must release it through its own rollback path). Clearing the event
+    also disarms the expiry timer, so the parked token can never release the
+    scheduler's marker out from under it.
+    """
+    with _GATEWAY_RESTART_DRAIN_HANDOFF_LOCK:
+        if not _GATEWAY_RESTART_DRAIN_HANDOFF.is_set():
+            return False
+        _GATEWAY_RESTART_DRAIN_HANDOFF.clear()
+        return True
+
+
+def _expire_parked_restart_drain() -> None:
+    """Release a parked drain that no scheduler claimed (health-only restart)."""
+    with _GATEWAY_RESTART_DRAIN_HANDOFF_LOCK:
+        if not _GATEWAY_RESTART_DRAIN_HANDOFF.is_set():
+            return
+        _GATEWAY_RESTART_DRAIN_HANDOFF.clear()
+    from api.config import exit_restart_drain
+
+    exit_restart_drain()
+    logger.info(
+        "Released parked gateway-restart drain after %.1fs with no scheduler claim",
+        _GATEWAY_RESTART_HANDOFF_EXPIRY_SECONDS,
+    )
+
 
 def _resolve_hermes_command() -> str:
     """Resolve the CLI path used for active-profile gateway restarts."""
@@ -86,8 +132,16 @@ def restart_active_profile_gateway(
     profile: str | None = None,
     quick_timeout_seconds: float = 2.0,
     background_wait_seconds: float = 240.0,
+    handoff_to_scheduler: bool = False,
 ) -> dict:
     """Run a non-blocking ``hermes gateway restart`` for the active profile.
+
+    When *handoff_to_scheduler* is true (Agent-update callers), a completed
+    restart parks its drain marker instead of releasing it: the WebUI
+    replacement scheduler claims the same token and keeps one continuous
+    admission closure across both restarts. A health-endpoint restart has no
+    successor replacement, so completed is terminal there and the drain is
+    released as before.
 
     Returns a short status dict with these values:
     - completed: command finished quickly and succeeded.
@@ -110,6 +164,26 @@ def restart_active_profile_gateway(
         if drain_owned:
             exit_restart_drain()
             drain_owned = False
+            _GATEWAY_RESTART_DRAIN_HANDOFF.clear()
+        _release_lock()
+
+    def park_for_scheduler_handoff():
+        """Park the drain instead of releasing it after a completed restart.
+
+        The Agent-update path calls _schedule_restart() right after this
+        returns 'completed'; _schedule_restart claims this parked token under
+        ACTIVE_RUNS_LOCK as it publishes its own drain, so admission never
+        opens between the two restarts. If no scheduler claims the token (a
+        non-update caller, or the update aborted before scheduling), the
+        expiry timer releases it so the surviving process resumes admitting.
+        """
+        nonlocal drain_owned
+        drain_owned = False
+        _GATEWAY_RESTART_DRAIN_HANDOFF.set()
+        threading.Timer(
+            _GATEWAY_RESTART_HANDOFF_EXPIRY_SECONDS,
+            _expire_parked_restart_drain,
+        ).start()
         _release_lock()
 
     try:
@@ -159,11 +233,19 @@ def restart_active_profile_gateway(
 
         try:
             stdout, stderr = proc.communicate(timeout=quick_timeout_seconds)
-            release()
             stdout = (stdout or "").strip()
             stderr = (stderr or "").strip()
             if proc.returncode == 0:
                 logger.info("Gateway service restarted successfully: %s", stdout)
+                if handoff_to_scheduler:
+                    # Agent-update caller: park the drain for the scheduler.
+                    # It claims the token when its own _schedule_restart drain
+                    # takes over, so admission stays closed across both
+                    # restarts. The expiry timer releases it if no scheduler
+                    # ever claims (update aborted between the two steps).
+                    park_for_scheduler_handoff()
+                else:
+                    release()
                 return {
                     "status": "completed",
                     "message": "Gateway service restarted successfully",
