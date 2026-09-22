@@ -23210,7 +23210,36 @@ def _handle_btw(handler, body):
 
     Creates a temporary hidden session, streams the answer via SSE, then
     discards the session. The parent session is not modified.
+
+    Admission (gate review 221beca7 #2): reserved before any session lookup or
+    hidden-session mutation, on the same restart-drain authority as chat
+    starts. A draining WebUI must not mint sessions or workers it will never
+    replace.
     """
+    try:
+        require(body, "session_id")
+        require(body, "question")
+    except ValueError as e:
+        return bad(handler, str(e))
+    reservation = 'admission:' + uuid.uuid4().hex
+    try:
+        api_config.register_active_run(reservation, phase='admitting')
+    except api_config.RunAdmissionDrainingError:
+        return j(
+            handler,
+            {
+                'error': 'WebUI is draining for restart',
+                'code': 'restart_draining',
+            },
+            status=503,
+        )
+    try:
+        return _handle_btw_admitted(handler, body)
+    finally:
+        api_config.unregister_active_run(reservation)
+
+
+def _handle_btw_admitted(handler, body):
     try:
         require(body, "session_id")
         require(body, "question")
@@ -23273,7 +23302,36 @@ def _handle_background(handler, body):
 
     Creates a hidden session, starts streaming in a daemon thread.
     Frontend polls /api/background/status for completed results.
+
+    Admission (gate review 221beca7 #2): reserved before any session lookup or
+    hidden-session mutation, on the same restart-drain authority as chat
+    starts. A draining WebUI must not mint sessions or background workers it
+    will never replace.
     """
+    try:
+        require(body, "session_id")
+        require(body, "prompt")
+    except ValueError as e:
+        return bad(handler, str(e))
+    reservation = 'admission:' + uuid.uuid4().hex
+    try:
+        api_config.register_active_run(reservation, phase='admitting')
+    except api_config.RunAdmissionDrainingError:
+        return j(
+            handler,
+            {
+                'error': 'WebUI is draining for restart',
+                'code': 'restart_draining',
+            },
+            status=503,
+        )
+    try:
+        return _handle_background_admitted(handler, body)
+    finally:
+        api_config.unregister_active_run(reservation)
+
+
+def _handle_background_admitted(handler, body):
     try:
         require(body, "session_id")
         require(body, "prompt")
@@ -24463,6 +24521,30 @@ def start_session_turn(
         }
     if not msg:
         return {"error": "message is required", "_status": 400}
+    # Admission (gate review 221beca7 #2): process wakeups are chat producers.
+    # Reserve before session resolution or workspace/model mutation so a
+    # draining WebUI never starts a turn its replacement will never see. The
+    # reservation is retired in the finally below; the per-session duplicate
+    # guard inside _start_chat_stream_for_session still applies on top.
+    turn_source = str(source or "process_wakeup").strip() or "process_wakeup"
+    reservation = 'admission:' + uuid.uuid4().hex
+    try:
+        api_config.register_active_run(reservation, phase='admitting')
+    except api_config.RunAdmissionDrainingError:
+        return {
+            "error": "WebUI is draining for restart",
+            "code": "restart_draining",
+            "retryable": True,
+            "_status": 503,
+        }
+    try:
+        return _start_session_turn_admitted(session_id, msg, source=turn_source)
+    finally:
+        api_config.unregister_active_run(reservation)
+
+
+def _start_session_turn_admitted(session_id: str, msg: str, *, source: str = "process_wakeup"):
+    """Body of start_session_turn after the admission reservation."""
     stale_response = _agent_runtime_barrier_response(runner_local_owned=True)
     if stale_response is not None:
         stale_response["_status"] = 409
@@ -24821,6 +24903,44 @@ def _handle_session_compression_recovery_start(handler, body):
 
 def _handle_goal_command(handler, body):
     """Handle WebUI /goal command controls and optional kickoff stream."""
+    try:
+        require(body, "session_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+    if _is_silent_control_message(body.get("args") or body.get("text")):
+        return j(
+            handler,
+            {"status": "suppressed", "reason": "silent_control_message"},
+            status=200,
+        )
+    if _session_is_subagent_view_only(str(body.get("session_id") or "")):
+        return bad(handler, "Subagent sessions are view-only and cannot run /goal from WebUI", 400)
+    # Admission (gate review 221beca7 #2): a goal kickoff is a full chat
+    # producer (it reaches _start_chat_stream_for_session). Reserve before any
+    # session lookup or goal-state mutation — control-only actions
+    # (status/pause/resume/clear/stop/done) also hold the reservation for
+    # their short body, which mutates no worker-facing state and cannot
+    # self-block. The reservation is retired in the admitted helper's finally.
+    reservation = 'admission:' + uuid.uuid4().hex
+    try:
+        api_config.register_active_run(reservation, phase='admitting')
+    except api_config.RunAdmissionDrainingError:
+        return j(
+            handler,
+            {
+                'error': 'WebUI is draining for restart',
+                'code': 'restart_draining',
+            },
+            status=503,
+        )
+    try:
+        return _handle_goal_command_admitted(handler, body)
+    finally:
+        api_config.unregister_active_run(reservation)
+
+
+def _handle_goal_command_admitted(handler, body):
+    """Goal control/kickoff body, already holding an admission reservation."""
     try:
         require(body, "session_id")
     except ValueError as e:
