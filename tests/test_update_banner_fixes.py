@@ -840,7 +840,7 @@ class TestAgentUpdateRequiresGatewayRestart:
         restart_calls = []
         sleeps = []
 
-        def fake_restart(*, profile=None):
+        def fake_restart(*, profile=None, handoff_to_scheduler=False):
             restart_calls.append(profile)
             return next(restart_results)
 
@@ -912,7 +912,7 @@ class TestAgentUpdateRequiresGatewayRestart:
         sleeps = []
         gateway_pids = iter([101, 202])
 
-        def fake_restart(*, profile=None):
+        def fake_restart(*, profile=None, handoff_to_scheduler=False):
             timeline.append('restart')
             return next(restart_results)
 
@@ -949,7 +949,7 @@ class TestAgentUpdateRequiresGatewayRestart:
         restart_calls = []
         sleeps = []
 
-        def fake_restart(*, profile=None):
+        def fake_restart(*, profile=None, handoff_to_scheduler=False):
             restart_calls.append(profile)
             return next(restart_results)
 
@@ -979,7 +979,7 @@ class TestAgentUpdateRequiresGatewayRestart:
         ])
         restart_profiles = []
 
-        def fake_restart(*, profile=None):
+        def fake_restart(*, profile=None, handoff_to_scheduler=False):
             effective_profile = profile or 'sticky-work'
             restart_profiles.append(effective_profile)
             if effective_profile == 'sticky-work':
@@ -1411,7 +1411,7 @@ class TestAgentUpdateRequiresGatewayRestart:
                 return 'Already up to date.', True
             return '', True
 
-        def fake_gateway_restart(*, profile=None):
+        def fake_gateway_restart(*, profile=None, handoff_to_scheduler=False):
             gateway_restarts.append(profile)
             return {'status': 'completed', 'message': 'Gateway service restarted successfully'}
 
@@ -1461,7 +1461,7 @@ class TestAgentUpdateRequiresGatewayRestart:
                 return 'Updating', True
             return '', True
 
-        def fake_gateway_restart(*, profile=None):
+        def fake_gateway_restart(*, profile=None, handoff_to_scheduler=False):
             gateway_restarts.append(profile)
             return {'status': 'completed', 'message': 'Gateway service restart initiated (in progress)'}
 

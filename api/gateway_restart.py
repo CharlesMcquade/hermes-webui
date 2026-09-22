@@ -253,6 +253,10 @@ def restart_active_profile_gateway(
                 }
 
             logger.error("Gateway service restart failed with code %s: %s", proc.returncode, stderr)
+            # A failed restart has no successor replacement to hand off to:
+            # release admission so the caller's retry (or another producer)
+            # is not refused with 'busy'.
+            release()
             return {
                 "status": "failed",
                 "message": f"Restart failed: {stderr or stdout}",
