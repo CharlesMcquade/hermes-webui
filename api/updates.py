@@ -1756,11 +1756,33 @@ def _schedule_restart(delay: float = 2.0) -> None:
     import os
     import sys
 
-    from api.config import enter_restart_drain, exit_restart_drain
+    from api.config import (
+        enter_restart_drain,
+        exit_restart_drain,
+        restart_drain_active as api_restart_drain_active,
+    )
 
+    # Single-ownership handoff (gate review 221beca7 #4): claim the parked
+    # gateway-restart drain BEFORE publishing our own. The gateway restart's
+    # completed status left admission closed; claiming the token here keeps
+    # one continuous drain from the gateway replacement through the WebUI
+    # replacement — the same marker, never released in between. With a parked
+    # token the marker is already ours, so publication is a no-op; without
+    # one, publication opens the drain exactly as before. On any rollback the
+    # scheduler releases the marker once — it owns the single live token at
+    # every point.
+    from api.gateway_restart import claim_parked_restart_drain
+
+    claimed_parked_drain = claim_parked_restart_drain()
+    if claimed_parked_drain:
+        if not api_restart_drain_active():
+            # Defensive: a claimed token whose marker vanished (external
+            # cleanup) is a plain publication with no continuity to preserve.
+            claimed_parked_drain = False
     # Publication is synchronous and serialized with run admission. A failed
     # publication raises before a restart worker can be launched.
-    enter_restart_drain(reason="supervised_restart")
+    if not claimed_parked_drain:
+        enter_restart_drain(reason="supervised_restart")
 
     def _do():
         try:
@@ -1865,7 +1887,14 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
     """
     target_profile = str(get_active_profile_name() or "default").strip() or "default"
     gateway_pid_before_restart = get_active_profile_gateway_running_pid(profile=target_profile)
-    restart_result = restart_active_profile_gateway(profile=target_profile)
+    # handoff_to_scheduler: keep the drain closed across the gateway→WebUI
+    # replacement handoff (gate review 221beca7 #4). Both in_progress and
+    # failed outcomes return without scheduling a replacement, so they release
+    # admission through the helper's own rollback paths.
+    restart_result = restart_active_profile_gateway(
+        profile=target_profile,
+        handoff_to_scheduler=True,
+    )
     status = str(restart_result.get("status") or "")
     if status == "completed":
         return True, restart_result
@@ -1877,7 +1906,10 @@ def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
     # bounded delay so an already-applied Agent update is not reported as a
     # complete failure because of that transient process handoff.
     time.sleep(_AGENT_GATEWAY_RESTART_RETRY_DELAY_S)
-    retry_result = restart_active_profile_gateway(profile=target_profile)
+    retry_result = restart_active_profile_gateway(
+        profile=target_profile,
+        handoff_to_scheduler=True,
+    )
     retry_status = str(retry_result.get("status") or "")
     if retry_status == "completed":
         return True, {
