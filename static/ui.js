@@ -20227,6 +20227,27 @@ async function submitEdit(msgIdx, newText) {
       // let this recovery apply session A's intent (truncate/re-arm/send) to the
       // newly-visible session.
       if(!S.session || S.session.session_id !== initialSid) return;
+      // Canonical install (gate review 221beca7 #1): edit-resubmit truncated
+      // the transcript; the pre-edit projection owned rows that no longer
+      // exist. Re-fetch the canonical session so revision ownership and the
+      // derived projection retire/rebuild together instead of trusting the
+      // local slice (which carries no truncation metadata).
+      try{
+        const canonical=await api('/api/session?session_id='+encodeURIComponent(initialSid));
+        if(!S.session || S.session.session_id !== initialSid) return;
+        if(canonical&&canonical.session&&typeof _installCanonicalSession==='function'){
+          _installCanonicalSession(canonical.session);
+        }
+      }catch(_){ /* keep the local slice; projection retirement below still applies */ }
+      if(S.session&&typeof _artifactProjectionForSnapshot==='function'){
+        // The local slice (or a failed canonical fetch) must not keep an
+        // artifact projection over truncated history: retire and rebuild
+        // from exactly the rows that remain.
+        delete S.session._artifactProjection;
+        if(!S.session._messages_truncated && !(S.session._messages_offset>0) && !S.session._state_db_rows_capped){
+          S.session._artifactProjection=_artifactProjectionForSnapshot(S.session);
+        }
+      }
       S.messages = S.messages.slice(0, absoluteKeepCount);
       renderMessages();
       $('msg').value = newText;

@@ -583,7 +583,12 @@ async function _hydrateSessionArtifactProjection(session, ownsLoad){
   const profile=S.activeProfile||'default';
   const generation=_loadSessionGeneration;
   let full=session;
-  if(session._messages_truncated || session._messages_offset>0){
+  // Truthful completeness (gate review 221beca7 #1): a server response whose
+  // state.db read hit the defensive row backstop is INCOMPLETE even when it
+  // looks like a full (no msg_limit) load — older mutation rows were silently
+  // dropped. Never install a projection that claims authority over rows the
+  // server did not send. Same for any explicitly truncated/paginated source.
+  if(session._messages_truncated || session._messages_offset>0 || session._state_db_rows_capped){
     let data;
     try{
       data=await api(`/api/session?session_id=${encodeURIComponent(session.session_id)}&messages=1&resolve_model=0`,{timeoutMs:120000});
@@ -593,7 +598,7 @@ async function _hydrateSessionArtifactProjection(session, ownsLoad){
     if(!full || full.session_id!==session.session_id ||
       (full.profile||profile)!==(session.profile||profile) ||
       full.regeneration_revision!==session.regeneration_revision ||
-      full._messages_truncated || full._messages_offset>0) return null;
+      full._messages_truncated || full._messages_offset>0 || full._state_db_rows_capped) return null;
   }
   return _artifactProjectionForSnapshot(full);
 }

@@ -198,6 +198,41 @@ function _adoptRegenerationRevision(sessionPayload){
   }
 }
 
+// Centralized canonical session install for destructive rewrites (gate review
+// 221beca7 #1). Undo, retry, edit-truncate, regeneration, clear, and delete
+// all replace the visible transcript with a shorter canonical history; any
+// artifact projection derived from the replaced revision is stale the moment
+// the rows it harvested are gone. Every caller installs the returned
+// session/revision through this helper so revision ownership and the derived
+// projection retire and rebuild together, and late cross-session responses
+// can never re-apply another session's state.
+function _installCanonicalSession(sessionPayload){
+  if(!S||!sessionPayload||typeof sessionPayload!=='object'||!sessionPayload.session_id) return false;
+  // Late-response fence: a destructive-rewrite round-trip (undo/retry/edit/
+  // clear) must only apply to the session the pane still shows. A response
+  // that arrives after the user switched sessions is dropped entirely — its
+  // caller's own activeSid guard already dropped most of these, but this is
+  // the single place the invariant holds for every present and future caller.
+  if(!S.session||S.session.session_id!==sessionPayload.session_id) return false;
+  S.session=sessionPayload;
+  // Derived evidence owned by the replaced revision is retired first: the
+  // projection carries the OLD revision and _artifactProjectionMatches will
+  // already reject it, but clearing prevents any path from re-adopting the
+  // stale object after a partial update.
+  delete sessionPayload._artifactProjection;
+  if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(sessionPayload);
+  // Rebuild from the canonical snapshot the server just returned. Only a
+  // provably complete source may own the projection; truncated or capped
+  // sources leave it unset (collectSessionArtifacts then falls back to
+  // resident-window harvesting only).
+  if(typeof _artifactProjectionForSnapshot==='function' &&
+     !sessionPayload._messages_truncated && !(sessionPayload._messages_offset>0) &&
+     !sessionPayload._state_db_rows_capped){
+    sessionPayload._artifactProjection=_artifactProjectionForSnapshot(sessionPayload);
+  }
+  return true;
+}
+
 async function _restoreRememberedNewChatDraftSession() {
   let sid = '';
   try { sid = localStorage.getItem(NEW_CHAT_DRAFT_SESSION_KEY) || ''; } catch (_) { sid = ''; }
@@ -9901,6 +9936,9 @@ async function deleteSession(sid, beforeDelete=null){
   }
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];
+    // Deletion retires every derived projection (gate review 221beca7 #1):
+    // the successor session loads through loadSession, which rebuilds its own
+    // projection — nothing here may survive into it.
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
     localStorage.removeItem('hermes-webui-session');
     // load the most recent remaining session, or show blank if none left

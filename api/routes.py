@@ -9278,6 +9278,23 @@ def _state_db_backstop_limit_for_display(session, msg_before) -> int | None:
     return None if has_boundary_prefix else _STATE_DB_DISPLAY_ROW_BACKSTOP
 
 
+def _state_db_read_capped_by_backstop(backstop, rows) -> bool:
+    """Return whether a backstop-capped display read actually clipped rows.
+
+    The display path reads one row past the backstop (limit+1 probe): a full
+    page proves older state.db rows exist that the response will never
+    contain. Callers must surface that as an incomplete source instead of
+    presenting the payload as a complete full-history read (gate review
+    221beca7 #1). Extracted for direct test coverage.
+    """
+    if backstop is None:
+        return False
+    try:
+        return len(rows or ()) > int(backstop)
+    except (TypeError, ValueError):
+        return False
+
+
 _LIMITED_TOOL_CONTENT_NOTICE = (
     "\n\n[Tool output truncated in paginated session response; "
     "load the full transcript to inspect the complete result.]"
@@ -13525,6 +13542,10 @@ def _handle_session_get(handler, parsed) -> bool:
         # branch below, including the ones that never probe the cache.
         _display_cache_hit = None
         _display_state_db_signature = None
+        # Set by the bounded-display path when the defensive row backstop
+        # clipped the state.db read (gate review 221beca7 #1); False for every
+        # other branch, including messaging sessions and metadata-only loads.
+        _state_db_rows_capped = False
         if is_messaging_session:
             cli_messages = get_cli_session_messages(sid)
         elif load_messages:
@@ -13546,8 +13567,16 @@ def _handle_session_get(handler, parsed) -> bool:
             # sessions and msg_before paging need their full prefix rows for
             # correct reconciliation, so those stay uncapped.
             _backstop = _state_db_backstop_limit_for_display(s, msg_before)
+            _state_db_rows_capped = False
             if _backstop is not None:
-                _state_db_reader_kwargs["limit"] = _backstop
+                # Truthful-completeness probe (gate review 221beca7 #1): read
+                # one row past the backstop. A full page means the backstop
+                # CLIPPED the source — older state.db rows exist that this
+                # display payload will never contain. The response must say
+                # so; the artifact projection treats an uncapped-looking
+                # truncated source as authoritative-complete only when this
+                # signal is false. The extra row is discarded.
+                _state_db_reader_kwargs["limit"] = _backstop + 1
             # perf: on the limited-display path the state.db rows are only
             # consumed by the memoized merge below. Now that the cache key
             # is a bounded SQL signature rather than a fingerprint OF these
@@ -13593,6 +13622,9 @@ def _handle_session_get(handler, parsed) -> bool:
                         sid,
                         **_state_db_reader_kwargs,
                     )
+                if _state_db_read_capped_by_backstop(_backstop, state_db_messages):
+                    _state_db_rows_capped = True
+                    state_db_messages = state_db_messages[:_backstop]
         elif not is_messaging_session:
             # Metadata-only callers still need the same append-only
             # reconciliation contract as full loads so stale/replayed
@@ -13882,8 +13914,17 @@ def _handle_session_get(handler, parsed) -> bool:
         # message window cursor already reflects visible-row pagination and
         # avoids false positives when raw hidden tool rows exceed msg_limit.
         _truncated = load_messages and msg_limit is not None and _messages_offset > 0
+        # Truthful completeness (gate review 221beca7 #1): a clipped state.db
+        # backstop silently drops OLDER rows from a response that claims a
+        # full (no msg_limit) window. Mirror the cap into _messages_truncated
+        # so every consumer — artifact projection hydration included — sees
+        # an incomplete source, and expose the specific cause for callers
+        # that must distinguish paging from backstop clipping.
+        if load_messages and _state_db_rows_capped:
+            _truncated = True
         raw["_messages_truncated"] = _truncated
         raw["_messages_offset"] = _messages_offset
+        raw["_state_db_rows_capped"] = bool(load_messages and _state_db_rows_capped)
         raw["_msg_limit_max"] = _MAX_MSG_LIMIT
         _t4 = _time.monotonic()
         if _diag: _diag.stage("t4_after_compact_and_merge")
