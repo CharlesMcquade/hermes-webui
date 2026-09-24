@@ -26,7 +26,9 @@ def test_stream_completion_syncs_rotated_session_id_to_tab_state(
         end = MESSAGES_JS.index("const _markerOnlyAssistantError=", start)
     else:
         start = MESSAGES_JS.index("S.session=session;")
-        end = MESSAGES_JS.index("if(typeof _adoptRegenerationRevision", start)
+        # Paging/revision bookkeeping now precedes the tab sync. Include the
+        # storage and URL writes, stopping before transcript staging begins.
+        end = MESSAGES_JS.index("const _stagedMessages=", start)
     block = MESSAGES_JS[start:end]
     script = """
 const assert=require('node:assert/strict');

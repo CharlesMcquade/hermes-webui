@@ -153,3 +153,24 @@ class TestTitleOptionMenuDetection(unittest.TestCase):
 
     def test_persisted_multi_candidate_menu_is_invalid(self):
         self.assertTrue(_looks_invalid_generated_title('Good title options: "One", "Two"'))
+
+    def test_commas_in_one_grammatical_title_are_not_menu_boundaries(self):
+        for title in (
+            'Title Suggestions: Compare REST, GraphQL and gRPC',
+            'Title Suggestions: Comparing REST, GraphQL, and gRPC',
+            'Session Title Options: Review APIs, then migrate clients',
+        ):
+            with self.subTest(title=title):
+                self.assertEqual(_sanitize_generated_title(title), title)
+                self.assertFalse(_looks_invalid_generated_title(title))
+
+    def test_unquoted_alternatives_still_rejected_fresh_and_persisted(self):
+        for title in (
+            'Here are some title options: Alpha, Beta, Gamma',
+            'Title suggestions: Alpha, Beta',
+            'Title suggestions: Migration Plan for Teams, Rollout Strategy',
+            'Title ideas: Migration Plan; Rollout Strategy',
+        ):
+            with self.subTest(title=title):
+                self.assertEqual(_sanitize_generated_title(title), '')
+                self.assertTrue(_looks_invalid_generated_title(title))

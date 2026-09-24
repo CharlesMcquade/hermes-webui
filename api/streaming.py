@@ -4254,6 +4254,18 @@ _TITLE_MENU_LIST_RE = re.compile(
     r'(?:[-*\u2022\u2023]|\d{1,2}[).:])\s+\S',
     flags=re.IGNORECASE,
 )
+_TITLE_MENU_COMMA_JOIN_RE = re.compile(
+    r'\b(?:and|or|vs\.?|versus|then|but|while)\b', flags=re.IGNORECASE,
+)
+_TITLE_MENU_COMMA_SPAN_RE = re.compile(
+    r'^(?:and|or|vs\.?|versus|then|but|while|with|without|from|to|for|of|between|across|after|before)\b'
+    r'|\b(?:with|without|from|to|for|of|between|across|after|before)\s*$',
+    flags=re.IGNORECASE,
+)
+_TITLE_MENU_COMMA_VERB_RE = re.compile(
+    r'^(?:compare|comparing|contrast|contrasting|review|reviewing|explore|exploring|evaluate|evaluating)\b',
+    flags=re.IGNORECASE,
+)
 
 
 def _looks_like_title_option_menu(text: str) -> bool:
@@ -4263,8 +4275,9 @@ def _looks_like_title_option_menu(text: str) -> bool:
     ``Title Suggestions: Migration Strategy`` or
     ``Here Are Some Title Options for Session Naming`` exist and must not be
     rejected. Classify as a menu only when multiple candidates follow —
-    two or more list entries, or delimiter-separated items. Matching works on
-    both raw stored text and the whitespace-collapsed sanitize form.
+    two or more list entries, or delimiter-separated standalone alternatives.
+    Matching works on both raw stored text and the whitespace-collapsed sanitize
+    form. A grammatical comma inside one title is not a candidate boundary.
     """
     s = str(text or '')
     s_m = _TITLE_OPTION_MENU_RE.match(s)
@@ -4276,6 +4289,7 @@ def _looks_like_title_option_menu(text: str) -> bool:
     # Only separators outside quoted terms delimit candidates. Two quoted
     # words in a single comparison title are not a menu.
     candidates = []
+    separators = []
     start = 0
     quote = None
     for index, char in enumerate(rest):
@@ -4286,9 +4300,29 @@ def _looks_like_title_option_menu(text: str) -> bool:
                 quote = None
         elif quote is None and char in ',;\n':
             candidates.append(rest[start:index].strip())
+            separators.append(char)
             start = index + 1
     candidates.append(rest[start:].strip())
-    return sum(bool(candidate) for candidate in candidates) >= 2
+    if sum(bool(candidate) for candidate in candidates) < 2:
+        return False
+    if any(separator in ';\n' for separator in separators):
+        return True
+    # A comma can also join clauses in ONE title ("Compare REST, GraphQL and
+    # gRPC"). Require short standalone alternatives: a leading action verb,
+    # boundary-spanning preposition, or a connective joining the final segment
+    # to its predecessor makes the split ambiguous, so preserve the title.
+    for index, candidate in enumerate(candidates):
+        if not candidate or len(candidate) > 50 or len(candidate.split()) > 6:
+            return False
+        if (candidate[0] == candidate[-1] == '"'
+                or (candidate[0] == '\u201c' and candidate[-1] == '\u201d')):
+            continue  # A fully quoted alternative may itself contain "and".
+        if (_TITLE_MENU_COMMA_SPAN_RE.search(candidate)
+                or (index == 0 and _TITLE_MENU_COMMA_VERB_RE.match(candidate))
+                or (index == len(candidates) - 1
+                    and _TITLE_MENU_COMMA_JOIN_RE.search(candidate))):
+            return False
+    return True
 
 
 def _looks_invalid_generated_title(text: str) -> bool:
