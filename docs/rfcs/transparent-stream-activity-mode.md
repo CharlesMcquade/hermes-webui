@@ -9,17 +9,28 @@
 
 ## Current projection family
 
-The shipped `chat_activity_display_mode` setting now has three explicit values:
+The activity-display contract has four explicit values (the three original
+projections plus the opt-in Turn Worklog extension):
 
 - `compact_worklog` — default, results-first presentation;
 - `transparent_stream` — opt-in chronological activity rows;
+- `turn_worklog` — opt-in flat, prose-first live worklog with per-item collapsed
+  Thinking/tools and no top-level live shell; after normal completion a closed
+  `Worked for Xm YYs` group expands to the full ordered history above the final;
 - `hide_all_activity` — opt-in **Final answer only** presentation.
 
-All three are render strategies over the same Assistant Turn Anchor and
+All four are render strategies over the same Assistant Turn Anchor and
 `activity_scene_v1`; they do not create separate activity ownership or change
 the final-answer boundary. Final answer only suppresses activity presentation
 while preserving the persisted scene so another mode, settle, or reload can
 reconstruct the same turn.
+Turn Worklog does not replace Transparent Stream's first-class tool previews or
+Compact Worklog's existing default grouping. It preserves chronological user
+Steer events, shows partial work by default on error/no-final turns, and omits
+an empty group on pure-final turns. Mode switches and replay reproject the same
+ordered scene; long worklogs may be windowed/virtualized without truncating the
+stored scene or the expanded settled history. This is a presentation contract
+change, not a new SSE/storage schema or runtime adapter.
 
 The original proposal and rollout notes below are retained as design history.
 Statements describing a missing selector, missing settled branch, or unwired
@@ -124,6 +135,10 @@ Plus two boundaries:
   transparent transcripts (#3714) is acknowledged but scoped to a later slice.
 
 ## Implemented proposal
+
+The following implementation inventory documents the original three-mode
+rollout; the Turn Worklog extension above adds `turn_worklog` to that preference
+without repurposing `simplified_tool_calling`.
 
 ### 1. A new, dedicated preference
 
