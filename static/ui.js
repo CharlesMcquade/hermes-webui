@@ -21831,6 +21831,17 @@ function _renderTreeItems(container, entries, depth){
       : isDirLike
         ? (isLk ? li('link', 14) : li('folder', 14))
         : (isLk ? li('link', 14) : fileIcon(item.name, item.type));
+    // File rows: the icon is the download affordance. Clicking it downloads the
+    // file directly instead of bubbling to the row's openFile (preview) handler.
+    // Name clicks keep preview; the row body keeps its existing behavior.
+    if(isFileLike && !isReadOnlyEscape){
+      iconEl.title = (typeof t==='function' ? t('media_download') : 'Download');
+      iconEl.onclick=(e)=>{
+        e.stopPropagation();
+        if(typeof downloadFile==='function') downloadFile(item.path);
+      };
+      iconEl.style.cursor='pointer';
+    }
     el.appendChild(iconEl);
 
     // Name
