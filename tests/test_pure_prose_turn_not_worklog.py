@@ -83,6 +83,8 @@ def test_pure_prose_scene_is_not_worklog_worthy():
     """Pure-prose scene → false; tool/thinking/compression scene → true."""
     predicate = _extract(UI_JS, "_anchorSceneSceneHasWorklogWorthyRows")
     harness = textwrap.dedent(f"""
+        let turnMode = false;
+        function isTurnWorklogMode() {{ return turnMode; }}
         {predicate}
         const out = {{}};
         // (1) The exact shape that caused the jump: long prose flood + a terminal/done row.
@@ -114,6 +116,17 @@ def test_pure_prose_scene_is_not_worklog_worthy():
         // (6) Empty / missing rows → false (no worklog for nothing).
         out.empty = _anchorSceneSceneHasWorklogWorthyRows({{ activity_rows: [] }});  // false
         out.no_scene = _anchorSceneSceneHasWorklogWorthyRows(null);                  // false
+        turnMode = true;
+        out.turn_from_compact = _anchorSceneSceneHasWorklogWorthyRows({{
+          mode: 'compact_worklog', activity_rows: [
+            {{ role: 'prose', source_event_type: 'interim_assistant', text: 'checking fixture' }}
+          ]
+        }});
+        out.turn_pure_final = _anchorSceneSceneHasWorklogWorthyRows({{
+          mode: 'compact_worklog', activity_rows: [
+            {{ role: 'prose', source_event_type: 'token', text: 'final only' }}
+          ]
+        }});
         console.log(JSON.stringify(out));
     """)
     res = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=30)
@@ -126,6 +139,8 @@ def test_pure_prose_scene_is_not_worklog_worthy():
     assert out["bare_lifecycle"] is False, "a bare terminal/done lifecycle is not worklog-worthy"
     assert out["empty"] is False
     assert out["no_scene"] is False
+    assert out["turn_from_compact"] is True
+    assert out["turn_pure_final"] is False
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node required for behavioral test")

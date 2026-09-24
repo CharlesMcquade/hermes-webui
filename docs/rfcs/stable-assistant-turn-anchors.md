@@ -17,6 +17,16 @@ Transparent Stream rendering, run-journal hydration, session re-entry,
 transcript-backed scene persistence, and explicit fallback ownership for
 historical or non-anchor transcripts.
 
+**Intentional presentation-contract extension — Turn Worklog.** The opt-in
+`turn_worklog` projection uses this same turn Anchor and persisted
+`activity_scene_v1`, not another event normalizer, SSE shape, storage schema, or
+runtime adapter. The existing `compact_worklog` default and its live shell are
+unchanged. A mode switch reprojects the current scene without rerunning or
+replaying the backend; reload, journal replay, settlement, and session re-entry
+must reconstruct the same ordered activity without duplicate rows. The render
+window/virtualization must bound long histories without losing event order or
+the ability to expand the complete settled worklog.
+
 `Implemented` does not mean every adjacent hardening item is complete. The
 remaining work is tracked under [#3400](https://github.com/nesquena/hermes-webui/issues/3400)
 and should land as separate slices:
@@ -622,6 +632,7 @@ The anchor separates event storage from display strategy:
 ```text
 AssistantTurnAnchor
   -> Compact Worklog renderer
+  -> Turn Worklog renderer
   -> Transparent Stream renderer
 ```
 
@@ -653,9 +664,27 @@ Expected behavior:
 Transparent Stream does not replace Compact Worklog. It is another projection of
 the same anchor and activity events.
 
+### Turn Worklog
+
+Turn Worklog is an opt-in, flat, prose-first chronological projection. While
+live, progress prose, individual collapsed Thinking/tool rows, and visible
+control events (including a user's Steer) stay in source order within the turn;
+there is no top-level Worklog disclosure shell. Individual details retain their
+own expansion affordance; live activity must not acquire a top-level disclosure
+shell. After **normal** completion, a closed `Worked for Xm YYs`
+group sits above a separate ordinary final answer and expands to the complete
+ordered worklog. A pure-final turn has no empty group. Error/no-final outcomes
+with partial activity show that work by default and retain an honest terminal
+outcome; explicit user disclosure choices can override the default. The elapsed
+label is presentation metadata, not a new event identity or terminal state.
+
+The same `activity_scene_v1` and Anchor own these rows through live updates,
+settlement, mode switches, replay, and re-entry. Windowing/virtualization is a
+rendering optimization only and must not discard the complete ordered scene.
+
 ### Shared requirements
 
-Both renderers must preserve:
+All activity renderers must preserve:
 
 - assistant turn ownership,
 - event order,

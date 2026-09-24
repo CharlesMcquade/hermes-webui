@@ -35,12 +35,17 @@ contributor guidance; it does not change runtime behavior or CI gates.
 - [`docs/rfcs/live-to-final-assistant-replies.md`](rfcs/live-to-final-assistant-replies.md):
   accepted product model for long-running assistant replies, live process text,
   tool activity, recovery, terminal outcomes, and final-answer boundaries. Start
-  here for UI/UX changes to running-session assistant reply rendering.
+  here for UI/UX changes to running-session assistant reply rendering. Its
+  intentional Turn Worklog contract extension adds an opt-in flat live timeline
+  and a closed elapsed-work disclosure above the final answer after normal
+  completion; Compact Worklog stays the default.
 - [`docs/rfcs/stable-assistant-turn-anchors.md`](rfcs/stable-assistant-turn-anchors.md):
   implemented presentation/reconciliation model that attaches live, settled,
   replayed, and recovered activity to one assistant-turn owner and projects one
-  `activity_scene_v1` into Compact Worklog, Transparent Stream, or Final answer
-  only. Remaining hardening stays tracked under #3400.
+  `activity_scene_v1` into Compact Worklog, opt-in Turn Worklog, Transparent
+  Stream, or Final answer only. This is a presentation change, not a new scene
+  schema, SSE protocol, or runtime adapter. Remaining hardening stays tracked
+  under #3400.
 - [`docs/architecture/stable-assistant-turn-anchor-phase0.md`](architecture/stable-assistant-turn-anchor-phase0.md):
   cumulative implementation inventory for the Stable Assistant Turn Anchors
   work under #3926. Use it to distinguish shipped wiring from historical slice

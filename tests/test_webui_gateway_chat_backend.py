@@ -323,7 +323,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     s.active_stream_id = stream_id
     s.pending_user_message = "Say hello"
     s.pending_attachments = []
-    s.pending_started_at = 123
+    s.pending_started_at = time.time() - 3
     s.save()
     channel = create_stream_channel()
     subscriber = channel.subscribe()
@@ -341,6 +341,7 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     saved = models.get_session(s.session_id)
     assert [m["role"] for m in saved.messages] == ["user", "assistant"]
     assert saved.messages[-1]["content"] == "hello"
+    assert 2 <= saved.messages[-1]["_turnDuration"] < 30
     assert isinstance(saved.messages[0]["timestamp"], float)
     assert isinstance(saved.messages[1]["timestamp"], float)
     assert saved.messages[0]["timestamp"] < saved.messages[1]["timestamp"]

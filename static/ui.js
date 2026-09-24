@@ -11587,7 +11587,8 @@ function _worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, visi
   return _stripVisibleAssistantEchoFromThinking(thinkingText, visibleContent, turnFinalVisibleContent, ...visibleTexts);
 }
 function _worklogDetailsExpandedDefault(){
-  return window._worklogDetailsExpandedByDefault===true;
+  if(typeof isTurnWorklogMode==='function'&&isTurnWorklogMode()) return false;
+  return typeof window!=='undefined'&&window._worklogDetailsExpandedByDefault===true;
 }
 function _applyWorklogDetailsExpandedDefault(root){
   const scope=root&&root.querySelectorAll?root:document;
@@ -11756,7 +11757,7 @@ function _thinkingActivityNode(text, open, disclosureKey){
 function chatActivityMode(){
   if(typeof window==='undefined') return 'compact_worklog';
   const mode=window._chatActivityDisplayMode;
-  if(mode==='compact_worklog'||mode==='transparent_stream'||mode==='hide_all_activity') return mode;
+  if(mode==='compact_worklog'||mode==='turn_worklog'||mode==='transparent_stream'||mode==='hide_all_activity') return mode;
   return window._transparentStream ? 'transparent_stream' : 'compact_worklog';
 }
 function isTransparentStream(){
@@ -11768,11 +11769,15 @@ function isFinalAnswerOnlyMode(){
 function isCompactWorklogMode(){
   return isSimplifiedToolCalling()&&chatActivityMode()==='compact_worklog';
 }
+function isTurnWorklogMode(){
+  return chatActivityMode()==='turn_worklog';
+}
 if(typeof window!=='undefined'){
   window.chatActivityMode=chatActivityMode;
   window.isTransparentStream=isTransparentStream;
   window.isFinalAnswerOnlyMode=isFinalAnswerOnlyMode;
   window.isCompactWorklogMode=isCompactWorklogMode;
+  window.isTurnWorklogMode=isTurnWorklogMode;
 }
 function _toolShortName(name){
   const raw=String(name||'').trim();
@@ -13148,7 +13153,13 @@ function _anchorSceneRowsForRendering(scene, opts){
   const keyFor=(row)=>{
     if(!row) return '';
     if(row.role==='tool') return `tool:${_anchorSceneToolRowLogicalKey(row)||row.row_id||row.event_id||row.local_id||out.length}`;
-    if(row.role==='prose') return `prose:${row.local_id||row.row_id||out.length}`;
+    if(row.role==='prose'){
+      // Interim updates are individually delivered events; unlike token
+      // revisions they may repeat the same text or share a local segment key.
+      if(row.source_event_type==='interim_assistant'&&(row.event_id||row.row_id))
+        return `prose-event:${row.event_id||row.row_id}`;
+      return `prose:${row.local_id||row.row_id||out.length}`;
+    }
     if(row.role==='thinking') return `thinking:${row.local_id||row.row_id||out.length}`;
     if(row.role==='lifecycle'){
       const source=String(row.source_event_type||'');
@@ -13180,8 +13191,10 @@ function _anchorSceneRowsForRendering(scene, opts){
     }else{
       if(live&&row.role==='prose'){
         const textKey=proseTextKey(text);
-        if(textKey&&liveProseTextKeys.has(textKey)) continue;
-        if(textKey) liveProseTextKeys.set(textKey,out.length);
+        const distinctProgress=isTurnWorklogMode()&&!!(row.local_id||row.event_id)
+          && (row.source_event_type==='interim_assistant'||String(row.local_id||'').startsWith('live-prose:'));
+        if(textKey&&!distinctProgress&&liveProseTextKeys.has(textKey)) continue;
+        if(textKey&&!distinctProgress) liveProseTextKeys.set(textKey,out.length);
       }
       byKey.set(key,out.length);
       out.push(row);
@@ -13529,6 +13542,7 @@ function _anchorSceneWorklogGroup(blocks, opts){
       // pinned followers keep the just-settled worklog open so STREAM_DONE does
       // not collapse hundreds of px of live worklog and visibly clamp the pane.
       collapsed:(opts&&opts.collapsed!==undefined)?opts.collapsed:!live,
+      turnWorklog:!!(opts&&opts.turnWorklog),
       live,
       activityKey,
       beforeAnchor:!!(opts&&opts.beforeAnchor),
@@ -13777,7 +13791,7 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   // flicker) when #5746's requestedMode-precedence landed: the good build always
   // checked isTransparentStream() FIRST and ignored the hint. Restore active-mode-wins:
   // honor requestedMode ONLY when there is no usable active mode.
-  const knownMode=(m)=>m==='compact_worklog'||m==='transparent_stream'||m==='hide_all_activity';
+  const knownMode=(m)=>m==='compact_worklog'||m==='turn_worklog'||m==='transparent_stream'||m==='hide_all_activity';
   const sceneMode=knownMode(activeMode)?activeMode:(knownMode(requestedMode)?requestedMode:activeMode);
   if(sceneMode==='hide_all_activity'){
     // Keep the renderer's historical no-DOM early-out for ordinary activity;
@@ -13796,6 +13810,9 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(existingTurn&&typeof existingTurn.removeAttribute==='function') existingTurn.removeAttribute('data-steer-only');
   if(sceneMode==='transparent_stream'){
     return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);
+  }
+  if(sceneMode==='turn_worklog'){
+    return _renderLiveAnchorActivitySceneTurnWorklog(streamId,scene,opts);
   }
   if(typeof isSimplifiedToolCalling==='function'&&!isSimplifiedToolCalling()) return false;
   if(sceneMode!=='compact_worklog') return false;
@@ -13850,7 +13867,10 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
 }
-function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
+// Transparent Stream retains its independently executable renderer; the opt-in
+// Turn Worklog switches only its row presentation, reusing its stream/session
+// ownership, stable-row reconciliation, and scroll preservation.
+function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts, turnWorklog=false){
   opts=opts||{};
   if(!S.session||!S.activeStreamId) return false;
   if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
@@ -13875,7 +13895,10 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
   const activeStreamId = String(streamId || S.activeStreamId || '');
   const activeSessionId = String(S.session && S.session.session_id || '');
   const preserveByKey = new Map();
-  blocks.querySelectorAll('.transparent-event-row[data-live-stream-owned="1"][data-anchor-row-id]').forEach(node=>{
+  const ownedRowSelector=turnWorklog
+    ? '.turn-worklog-live-row[data-live-stream-owned="1"][data-anchor-row-id]'
+    : '.transparent-event-row[data-live-stream-owned="1"][data-anchor-row-id]';
+  blocks.querySelectorAll(ownedRowSelector).forEach(node=>{
     if(!node||!node.getAttribute) return;
     const rowStream = String(node.getAttribute('data-anchor-stream-id') || '');
     if(rowStream && rowStream !== activeStreamId) return;
@@ -13902,7 +13925,11 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     '.agent-activity-thinking[data-live-thinking="1"],'+
     '.transparent-event-row[data-live-tid],'+
     '.interim-collapse-toggle'
-  ).forEach(el=>el.remove());
+  ).forEach(el=>{
+    // Anchor rows were reconciled above; do not erase an owned, stable row
+    // simply because it carries legacy live-tool metadata.
+    if(el.getAttribute('data-anchor-scene-row')!=='1') el.remove();
+  });
   // Match the compact path: keep legacy live segments as hidden anchors so
   // stream-owned metadata survives while the anchor scene owns visible activity.
   blocks.querySelectorAll('[data-live-assistant="1"]').forEach(el=>{
@@ -13911,16 +13938,27 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     el.hidden=true;
   });
   const liveFooter=blocks.querySelector('#liveRunStatus');
+  if(turnWorklog){
+    blocks.querySelectorAll(':scope > .transparent-event-controls,:scope > .transparent-turn-footer').forEach(el=>el.remove());
+  }
   const renderedRows=[];
   for(const row of rows){
     const rowEventTs=typeof _anchorSceneRowTimestampSeconds==='function'?_anchorSceneRowTimestampSeconds(row):null;
-    const node=_anchorSceneTransparentNodeForRow(row,{
-      live:true,
-      settled:false,
-      streamId:streamId||S.activeStreamId||'',
-      sessionId:S.session&&S.session.session_id,
-    });
+    const node=turnWorklog
+      ? _anchorSceneNodeForRow(row,{live:true,settled:false})
+      : _anchorSceneTransparentNodeForRow(row,{
+        live:true,
+        settled:false,
+        streamId:streamId||S.activeStreamId||'',
+        sessionId:S.session&&S.session.session_id,
+      });
     if(!node) continue;
+    if(turnWorklog){
+      node.classList.add('turn-worklog-live-row');
+      node.setAttribute('data-live-stream-owned','1');
+      node.setAttribute('data-anchor-stream-id',activeStreamId);
+      node.setAttribute('data-session-id',activeSessionId);
+    }
     const key = _transparentLiveRowKey(node, activeStreamId);
     const existing = key ? preserveByKey.get(key) : null;
     const renderedNode = existing && _transparentLiveRowsCompatible(existing, node)
@@ -13949,12 +13987,15 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts){
     expectedNextSibling=renderedNode;
   }
   preserveByKey.forEach(stale=>stale.remove());
-  if(renderedRows.length) _syncTransparentEventControls(turn);
+  if(renderedRows.length&&!turnWorklog) _syncTransparentEventControls(turn);
   if(typeof _moveLiveRunStatusToTurnEnd==='function') _moveLiveRunStatusToTurnEnd();
   _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
   _restoreLiveAnchorScrollSnapshotAfterRebuild(scrollSnapshot,scrollRebuildGuard);
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return !!renderedRows.length;
+}
+function _renderLiveAnchorActivitySceneTurnWorklog(streamId, scene, opts){
+  return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts,true);
 }
 
 function _transparentLiveRowKey(node, streamId){
@@ -14276,9 +14317,8 @@ function _renderLiveAnchorActivitySceneForStream(streamId, sessionId, opts){
   const activeMode=chatActivityMode();
   const mode=activeMode==='hide_all_activity'
     ? 'hide_all_activity'
-    : (requestedMode==='compact_worklog'||requestedMode==='transparent_stream'||requestedMode==='hide_all_activity'
-    ? requestedMode
-    : activeMode);
+    : (requestedMode==='compact_worklog'||requestedMode==='transparent_stream'||requestedMode==='turn_worklog'||requestedMode==='hide_all_activity'
+      ? requestedMode : activeMode);
   const scene=_projectLiveAnchorActivitySceneForStream(streamId,mode);
   if(!scene) return false;
   return renderLiveAnchorActivityScene(streamId,scene,{...(opts||{}),sessionId});
@@ -14300,17 +14340,17 @@ if(typeof window!=='undefined'){
   window.isLiveAnchorActivitySceneOwner=isLiveAnchorActivitySceneOwner;
 }
 function _anchorSceneSceneHasWorklogWorthyRows(scene){
-  // Mirror of messages.js _anchorSceneHasWorklogWorthyRows for the RENDER side:
-  // a settled scene that was persisted (or hydrated from the backend) before the
-  // generation-side guard existed can still be all-prose. Such a scene must NOT be
-  // promoted to a collapsed worklog at render time (it would hide the whole answer
-  // and shrink the transcript at settle → bottom-pinned jump-back). Require at least
-  // one tool/thinking/compression row. (defense-in-depth for already-persisted scenes)
+  // A saved scene records events, not a permanent choice of presentation.
+  // Compact must not fold a prose-only turn; Turn Worklog may fold a separately
+  // identified interim update even when this scene was saved under Compact.
+  // Never fold a pure-final turn merely because it has a saved scene.
   const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
   for(const row of rows){
     if(!row||typeof row!=='object') continue;
     const role=String(row.role||'');
     if(String(row.source_event_type||'')==='steer_delivered') return true;
+    if(isTurnWorklogMode()&&role==='prose'
+      && (row.source_event_type==='interim_assistant'||row.source_event_type==='settled_message')) return true;
     if(role==='tool'||role==='thinking') return true;
     if(role==='lifecycle'){
       const source=String(row.source_event_type||'');
@@ -14674,7 +14714,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(typeof isTransparentStream==='function'&&isTransparentStream()){
     return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);
   }
-  if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()) return false;
+  if(typeof isCompactWorklogMode==='function'&&!isCompactWorklogMode()&&!isTurnWorklogMode()) return false;
   const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
   if(!blocks) return false;
   const scene=message._anchor_activity_scene;
@@ -14692,7 +14732,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   const streamId=String(message._anchor_stream_id||scene.stream_id||scene.identity&&scene.identity.stream_id||'');
   const keepSettledWorklogOpen=_shouldKeepSettledWorklogOpenForStreamSettle(streamId);
   const activityKey=`anchor-scene:${rawIdx}`;
-  if(streamId&&!_readActivityDisclosureState(activityKey)){
+  if(streamId&&!isTurnWorklogMode()&&!_readActivityDisclosureState(activityKey)){
     _copyActivityDisclosureState(`live:${streamId}`, activityKey);
   }
   // #5941: an errored turn that produced assistant content (tool calls /
@@ -14719,6 +14759,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   // (_isKeepSettledWorklogOpenArmed), so it never persists across restores.
   const group=_anchorSceneWorklogGroup(blocks,{
     live:false,
+    turnWorklog:isTurnWorklogMode(),
     collapsed:!(keepSettledWorklogOpen||erroredWorklogKeepOpen),
     beforeAnchor:true,
     anchor:segment,
@@ -14834,7 +14875,7 @@ function ensureActivityGroup(inner, opts){
   if(!group){
     group=document.createElement('div');
     let collapsed=opts.collapsed!==false;
-    if(window._worklogDetailsExpandedByDefault===true) collapsed=false;
+    if(window._worklogDetailsExpandedByDefault===true&&!opts.turnWorklog) collapsed=false;
     const savedState=_readActivityDisclosureState(activityKey);
     // Restore the user's explicit expand intent when recreating the live
     // activity group within the same turn (#1298), then let persisted chat/turn
@@ -14845,6 +14886,7 @@ function ensureActivityGroup(inner, opts){
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
     if(live && savedState==='open') collapsed=false;
     else if(live && savedState==='closed') collapsed=true;
+    if(!live && opts.turnWorklog && savedState) collapsed=savedState!=='open';
     group.className='agent-activity-group tool-worklog-group activity'+(collapsed?' tool-call-group-collapsed':'');
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
@@ -14869,6 +14911,8 @@ function ensureActivityGroup(inner, opts){
   }else if(activityKey&&!group.getAttribute('data-activity-disclosure-key')){
     group.setAttribute('data-activity-disclosure-key',activityKey);
   }
+  if(opts.turnWorklog) group.setAttribute('data-turn-worklog-group','1');
+  else group.removeAttribute('data-turn-worklog-group');
   if(burstId&&!group.getAttribute('data-activity-burst-id')) group.setAttribute('data-activity-burst-id',burstId);
   if(segmentSeq&&!group.getAttribute('data-live-segment-seq')) group.setAttribute('data-live-segment-seq',segmentSeq);
   if(!group.getAttribute('data-tool-worklog-key')&&activityKey) group.setAttribute('data-tool-worklog-key',activityKey);
@@ -15262,9 +15306,10 @@ function appendLiveCompressionCard(state){
   if(!inner) return false;
   closeCurrentLiveActivityGroup();
   if(state.automatic){
-    const group=ensureLiveWorklogContainer(inner,{activityKey:_activityKeyForLiveTurn()});
-    const list=_toolWorklogListEl(group);
-    if(!group||!list) return false;
+    const turnWorklog=isTurnWorklogMode();
+    const group=turnWorklog?null:ensureLiveWorklogContainer(inner,{activityKey:_activityKeyForLiveTurn()});
+    const list=turnWorklog?inner:_toolWorklogListEl(group);
+    if(!list) return false;
     const node=_autoCompressionWorklogNode(state);
     node.setAttribute('data-live-compression-card','1');
     node.setAttribute('data-compression-phase',String(state.phase||''));
@@ -15281,12 +15326,16 @@ function appendLiveCompressionCard(state){
         _clearCompressionElapsedTimer();
       }
     }
-    const existingRunning=group.querySelector('[data-live-compression-card="1"][data-compression-started-at]');
-    const existingDone=Array.from(group.querySelectorAll('[data-live-compression-card="1"][data-compression-phase="done"]')).pop();
+    const existingRunning=list.querySelector('[data-live-compression-card="1"][data-compression-started-at]');
+    const existingDone=Array.from(list.querySelectorAll('[data-live-compression-card="1"][data-compression-phase="done"]')).pop();
     const existing=state.phase==='running'?existingRunning:(existingRunning||existingDone);
     if(existing) existing.replaceWith(node);
-    else list.appendChild(node);
-    _syncToolCallGroupSummary(group);
+    else if(turnWorklog){
+      const footer=inner.querySelector('#liveRunStatus');
+      if(footer&&footer.parentElement===inner) inner.insertBefore(node,footer);
+      else inner.appendChild(node);
+    }else list.appendChild(node);
+    if(group) _syncToolCallGroupSummary(group);
     _moveLiveRunStatusToTurnEnd();
     _restoreMessageScrollSnapshotSameFrame(scrollSnapshot);
     if(typeof scrollIfPinned==='function') scrollIfPinned();
@@ -17513,7 +17562,7 @@ function renderMessages(options){
     if(!isUser&&_isAssistantEmptyPlaceholderContent(m, displayContent)){
       content='';
     }
-    if(!isUser&&(isCompactWorklogMode()||isTransparentStream())&&!thinkingText){
+    if(!isUser&&(isCompactWorklogMode()||isTurnWorklogMode()||isTransparentStream())&&!thinkingText){
       const turnFinalVisibleContent=assistantTurnFinalVisibleContentByRawIdx.get(rawIdx)||'';
       const turnVisibleContents=assistantTurnVisibleContentByRawIdx.get(rawIdx)||[];
       thinkingText=_worklogReasoningTextFromMessage(m, rawIdx, toolCallAssistantIdxs, displayContent, turnFinalVisibleContent, turnVisibleContents);
@@ -17729,7 +17778,7 @@ function renderMessages(options){
       })();
       let firstSeg=null;
       if(thinkingText&&window._showThinking!==false){
-        if((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
+        if((isCompactWorklogMode()||isTurnWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
       }
       orderedTransparentParts.forEach((part, partIdx)=>{
         if(!part) return;
@@ -17758,7 +17807,7 @@ function renderMessages(options){
         if(m._activityBurstId!==undefined&&m._activityBurstId!==null) orderedSeg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
         if(Number.isFinite(Number(m._liveSegmentSeq))) orderedSeg.setAttribute('data-live-segment-seq',String(Number(m._liveSegmentSeq)));
         if(_ERR_MSG_RE.test(String(partDisplayText||'').trim())) orderedSeg.dataset.error='1';
-        if(!firstSeg&&thinkingText&&window._showThinking!==false&&!((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs))) orderedSeg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
+        if(!firstSeg&&thinkingText&&window._showThinking!==false&&!((isCompactWorklogMode()||isTurnWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs))) orderedSeg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
         const isLastTextPart=partIdx===lastTextPartIdx;
         const partBodyHtml=_getCachedRender(partDisplayText,false);
         // Message-level media snapshots: transparent ordered segments carry the
@@ -17823,7 +17872,7 @@ function renderMessages(options){
       if(_reasoningPayload) thinkingText=_reasoningPayload;
     }
     if(thinkingText&&window._showThinking!==false){
-      if((isCompactWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
+      if((isCompactWorklogMode()||isTurnWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
     const hasVisibleBody=!!(String(content||'').trim()||filesHtml||recoveryHtml);
@@ -18262,6 +18311,7 @@ function renderMessages(options){
           const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
           const group=ensureActivityGroup(anchorParent,{
             collapsed:true,
+            turnWorklog:typeof isTurnWorklogMode==='function'&&isTurnWorklogMode(),
             anchor:anchorRow,
             beforeAnchor:!!thinkingText&&!anchorIsWorklogSource,
             syncAnchorReason:anchorIsWorklogSource,
@@ -19393,10 +19443,12 @@ function _syncToolCallGroupSummary(group){
     if(group.getAttribute('data-run-activity-group')==='1'){
       label.textContent=toolCount?_toolWorklogSummary(cards,{live:isLiveWorklog, toolCount}):'Running';
     }else if(isWorklogGroup){
-      const processedLabel=isLiveWorklog
-        ? _activityProcessedElapsedLabel(group)
-        : _activitySettledProcessedLabel(group);
-      label.textContent=processedLabel||t('processed_elapsed','');
+      const durationText=group.getAttribute('data-turn-worklog-group')==='1'
+        ? _formatTurnDuration(group.dataset.turnDuration) : '';
+      const processedLabel=group.getAttribute('data-turn-worklog-group')==='1'
+        ? (durationText?t('worked_for_elapsed',durationText):(t('worklog_label')||'Worklog'))
+        : (isLiveWorklog?_activityProcessedElapsedLabel(group):_activitySettledProcessedLabel(group));
+      label.textContent=processedLabel||(group.getAttribute('data-turn-worklog-group')==='1'?'Worklog':t('processed_elapsed',''));
     }else{
       const rows=Array.from(group.querySelectorAll('.tool-card-row'));
       // Prefer the live _tcData classification; fall back to the durable data-*
@@ -19526,6 +19578,29 @@ function appendLiveToolCard(tc){
   }
   const inner=_assistantTurnBlocks(turn);
   if(!inner) return;
+  if(isTurnWorklogMode()){
+    // A tool can arrive before its Anchor projection. Render the fallback flat,
+    // then let the first owned scene replace it; never open a legacy live group.
+    if(_renderLiveAnchorActivitySceneForStream(S.activeStreamId,S.session.session_id)) return;
+    const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
+    const old=tid?inner.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]:not([data-anchor-scene-row="1"])`):null;
+    const row=buildToolCard(tc);
+    row.classList.add('turn-worklog-live-row');
+    if(tid) row.dataset.liveTid=tid;
+    if(old){
+      const oldCard=old.querySelector('.tool-card');
+      const newCard=row.querySelector('.tool-card');
+      if(oldCard&&newCard&&oldCard.classList.contains('open')) newCard.classList.add('open');
+      old.replaceWith(row);
+    }else{
+      const footer=inner.querySelector('#liveRunStatus');
+      if(footer&&footer.parentElement===inner) inner.insertBefore(row,footer);
+      else inner.appendChild(row);
+    }
+    _moveLiveRunStatusToTurnEnd();
+    if(typeof scrollIfPinned==='function') scrollIfPinned();
+    return;
+  }
   const tid=tc.tid||tc.id||tc.tool_call_id||tc.tool_use_id||tc.call_id||'';
   const children=Array.from(inner.children);
   const burstId=tc.activityBurstId!==undefined&&tc.activityBurstId!==null&&String(tc.activityBurstId)!=='0'?String(tc.activityBurstId):'';
@@ -19751,6 +19826,20 @@ function ensureLiveWorklogShell(){
     return $('liveAssistantTurn');
   }
   $('emptyState').style.display='none';
+  // Before the first Anchor row arrives, leave a plain turn shell for status
+  // and pending activity. Never create a live disclosure in Turn Worklog.
+  if(isTurnWorklogMode()){
+    let turn=$('liveAssistantTurn');
+    if(!turn){
+      turn=_createAssistantTurn();
+      turn.id='liveAssistantTurn';
+      $('msgInner').appendChild(turn);
+    }
+    if(S.session) turn.dataset.sessionId=S.session.session_id;
+    _moveLiveRunStatusToTurnEnd();
+    scrollIfPinned();
+    return _assistantTurnBlocks(turn);
+  }
   const compactWorklog=typeof isCompactWorklogMode==='function'&&isCompactWorklogMode();
   if(!compactWorklog&&!isSimplifiedToolCalling()){
     appendThinking();
@@ -20689,7 +20778,7 @@ function finalizeThinkingCard(){
   // stream that started it, not the session currently displayed.
   const _guardTurn = $('liveAssistantTurn');
   if(_guardTurn && S.session && _guardTurn.dataset.sessionId !== S.session.session_id) return;
-  if(isTransparentStream()){
+  if(isTransparentStream()||isTurnWorklogMode()){
     const row=$('thinkingRow');
     if(row){
       row.removeAttribute('id');
@@ -20754,9 +20843,11 @@ function appendThinking(text='', options){
     _renderLiveAnchorActivitySceneForStream(S.activeStreamId, S.session.session_id);
     return;
   }
+  if(isTurnWorklogMode()&&!anchorRenderFallback&&S.activeStreamId&&
+    _renderLiveAnchorActivitySceneForStream(S.activeStreamId,S.session.session_id)) return;
   const empty=$('emptyState');
   if(empty) empty.style.display='none';
-  if(!isSimplifiedToolCalling()){
+  if(!isSimplifiedToolCalling()&&!isTurnWorklogMode()){
     let row=$('thinkingRow');
     if(!row){
       row=document.createElement('div');
@@ -20789,7 +20880,7 @@ function appendThinking(text='', options){
       burstId?`burst:${burstId}`:
       'turn'
     ));
-    if(isTransparentStream()){
+    if(isTransparentStream()||isTurnWorklogMode()){
       let row=blocks.querySelector(`.agent-activity-thinking[data-live-thinking="1"][data-live-thinking-key="${CSS.escape(thinkingKey)}"]`);
       if(!row){
         row=_thinkingActivityNode(clean, false);
@@ -20814,23 +20905,27 @@ function appendThinking(text='', options){
       }
       row.id='thinkingRow';
       row.setAttribute('data-thinking-active','1');
-      const existingEventAt=row.getAttribute('data-event-at');
-      const nextTs=_firstValidTimestampSeconds(
-        options.ts,
-        options.timestamp,
-        options.created_at,
-        existingEventAt
-      );
-      _decorateTransparentEventRow(row,{
-        type:'thinking',
-        text:clean,
-        preview:clean,
-        ts:nextTs||undefined,
-        live:true,
-        segmentSeq,
-        burstId,
-      });
-      _syncTransparentEventControls(turn);
+      if(isTurnWorklogMode()){
+        row.classList.add('turn-worklog-live-row');
+      }else{
+        const existingEventAt=row.getAttribute('data-event-at');
+        const nextTs=_firstValidTimestampSeconds(
+          options.ts,
+          options.timestamp,
+          options.created_at,
+          existingEventAt
+        );
+        _decorateTransparentEventRow(row,{
+          type:'thinking',
+          text:clean,
+          preview:clean,
+          ts:nextTs||undefined,
+          live:true,
+          segmentSeq,
+          burstId,
+        });
+        _syncTransparentEventControls(turn);
+      }
       if(typeof scrollIfPinned==='function') scrollIfPinned();
       return;
     }
@@ -20865,7 +20960,7 @@ function appendThinking(text='', options){
 }
 function updateThinking(text='', options){appendThinking(text, options);}
 function removeThinking(){
-  if(isTransparentStream()){
+  if(isTransparentStream()||isTurnWorklogMode()){
     const liveTurn=$('liveAssistantTurn');
     const blocks=_assistantTurnBlocks(liveTurn);
     if(blocks) blocks.querySelectorAll('.agent-activity-thinking[data-thinking-active="1"]').forEach(row=>{

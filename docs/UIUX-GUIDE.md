@@ -61,6 +61,17 @@ Do not render every internal event as a first-class chat card. A turn that used
 many tools should summarize the work as inspectable activity, not make the user
 read a stack of unrelated-looking cards.
 
+The existing Compact Worklog remains the default. Opt-in Turn Worklog is a
+deliberate exception to aggregate grouping, not a change to the default: during
+the run it shows a flat, prose-first chronological timeline with individually
+collapsed Thinking/tool items and chronological user Steer events, without a
+top-level live Worklog shell. On normal completion its closed `Worked for Xm YYs`
+group sits above the separate final answer and expands to the full ordered
+worklog. Pure-final turns omit the empty group; error/no-final turns with partial
+work show it by default. Preserve per-item disclosure, responsive readability,
+and mode-switch/replay continuity even when long histories are virtualized.
+Transparent Stream and Final answer only remain separate opt-in choices.
+
 ## Tool, thinking, and activity traces
 
 Tool cards are debug event rows, not chat messages. Show the icon, name, short

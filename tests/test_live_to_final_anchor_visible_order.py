@@ -563,7 +563,7 @@ def test_scene_renderer_coalesces_row_updates_and_renders_in_scene_order():
 
     assert "const live=!settled" in rows
     assert "const liveProseTextKeys=new Map()" in rows
-    assert "if(textKey&&liveProseTextKeys.has(textKey)) continue;" in rows
+    assert "if(textKey&&!distinctProgress&&liveProseTextKeys.has(textKey)) continue;" in rows
     assert "byKey.set(key,out.length)" in rows
     assert "out[index]=row.role==='tool'?_anchorSceneMergeToolRows(out[index],row):row" in rows
     assert "for(const row of rows)" in render
@@ -582,6 +582,8 @@ const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "ui.js"))}, 'utf8'
 function _anchorSceneToolRowLogicalKey(){{ return ''; }}
 function _anchorSceneMergeToolRows(a,b){{ return b; }}
 function _anchorSceneIsSettledSuccessfulCompression(){{ return false; }}
+let turnMode = false;
+function isTurnWorklogMode(){{ return turnMode; }}
 eval(extractFunc('_anchorSceneRowsForRendering'));
 const scene = {{
   activity_rows: [
@@ -593,9 +595,16 @@ const scene = {{
 }};
 const liveRows = _anchorSceneRowsForRendering(scene, {{settled:false}});
 const settledRows = _anchorSceneRowsForRendering(scene, {{settled:true}});
+turnMode = true;
+const identified = _anchorSceneRowsForRendering({{activity_rows: [
+  {{role:'prose', source_event_type:'interim_assistant', local_id:'same-segment', event_id:'event-1', text:'progress'}},
+  {{role:'prose', source_event_type:'interim_assistant', local_id:'same-segment', event_id:'event-2', text:'progress'}},
+  {{role:'prose', source_event_type:'interim_assistant', local_id:'same-segment', event_id:'event-3', text:'progress more'}},
+]}}, {{settled:false}});
 console.log(JSON.stringify({{
   live: liveRows.map(row => row.role + ':' + row.text.replace(/\\s+/g, ' ').trim()),
-  settled: settledRows.map(row => row.role + ':' + row.text.replace(/\\s+/g, ' ').trim())
+  settled: settledRows.map(row => row.role + ':' + row.text.replace(/\\s+/g, ' ').trim()),
+  identified: identified.map(row => row.event_id)
 }}));
 """
     result = _run_node_script(script)
@@ -611,6 +620,7 @@ console.log(JSON.stringify({{
         "thinking:same process prose",
         "prose:new process prose",
     ]
+    assert result["identified"] == ["event-1", "event-2", "event-3"]
 
 
 def test_live_anchor_scene_removes_legacy_interim_collapse_toggle():
@@ -1110,7 +1120,8 @@ def test_settled_anchor_scene_does_not_persist_running_live_activity_rows():
     settle_live = _function_body(MESSAGES_JS, "_anchorSceneSettleLiveRunningRow")
 
     assert "const hasSettledThinking=_anchorSceneMessageRowsHaveThinking(messageRows);" in complete
-    assert "row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);" in complete
+    assert "const keepMirroredThinking=row.role==='thinking'&&projectedRows.includes(row)" in complete
+    assert "row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking&&!keepMirroredThinking);" in complete
     assert "String(value||'').startsWith('live-')" in live_identity
     assert "const hasStreamOwner=!!(row.stream_id||row.run_id||identity.stream_id||identity.run_id);" in live_identity
     assert "const hasAssistantMessageIndex=group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null;" in live_identity
@@ -1612,7 +1623,7 @@ def test_anchor_scene_worklog_summary_is_processed_time_anchor():
 
     assert "_activityProcessedElapsedLabel(group)" in summary
     assert "_activitySettledProcessedLabel(group)" in summary
-    assert "label.textContent=processedLabel||t('processed_elapsed','')" in summary
+    assert "label.textContent=processedLabel||(group.getAttribute('data-turn-worklog-group')==='1'?'Worklog':t('processed_elapsed',''))" in summary
     assert "durationEl.textContent='';" in summary
     assert "else if(isWorklogGroup)" in summary
     assert "collapsed:false" in live
@@ -1639,8 +1650,7 @@ def test_processed_time_anchor_uses_lightweight_summary_style():
 def test_legacy_settled_worklog_summary_uses_processed_anchor_too():
     summary = _function_body(UI_JS, "_syncToolCallGroupSummary")
 
-    assert "const processedLabel=isLiveWorklog" in summary
-    assert ": _activitySettledProcessedLabel(group)" in summary
+    assert ": (isLiveWorklog?_activityProcessedElapsedLabel(group):_activitySettledProcessedLabel(group))" in summary
     assert "_toolWorklogSummary(cards,{live:isLiveWorklog, toolCount, labelOnly:!toolCount&&isLiveWorklog})" not in summary
     assert ".tool-worklog-group[data-tool-worklog-group=\"1\"]:not([data-run-activity-group=\"1\"]) .tool-worklog-summary" in STYLE_CSS
 

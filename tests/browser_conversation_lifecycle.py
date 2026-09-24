@@ -292,6 +292,7 @@ class DeterministicGateway:
     def __init__(self, scenario: str) -> None:
         self.scenario = scenario
         self.activity_ready = threading.Event()
+        self.release_tool = threading.Event()
         self.release_settle = threading.Event()
         self.final_prefix_ready = threading.Event()
         self.release_terminal = threading.Event()
@@ -359,6 +360,13 @@ class DeterministicGateway:
                             "event": "message.delta",
                             "delta": TERMINAL_PROCESS_TEXT,
                         })
+                    if owner.scenario == "turn-worklog":
+                        # Let the browser test deliver a real interim_assistant
+                        # client event before the next tool. Gateway message.delta
+                        # is final-answer text, not an interim update.
+                        owner.activity_ready.set()
+                        if not owner.release_tool.wait(timeout=30):
+                            return
                     self._event("tool.started", {
                         "event": "tool.started",
                         "tool": TOOL_NAME,
@@ -419,6 +427,7 @@ class DeterministicGateway:
         self._thread.start()
 
     def close(self) -> None:
+        self.release_tool.set()
         self.release_settle.set()
         self.release_terminal.set()
         self._server.shutdown()
