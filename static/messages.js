@@ -2900,7 +2900,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return Number.isFinite(seq)&&seq>0?seq:1;
   }
   function _anchorSceneActiveMode(){
-    const normalize=value=>value==='transparent_stream'||value==='compact_worklog'||value==='hide_all_activity'?value:'';
+    const normalize=value=>value==='transparent_stream'||value==='compact_worklog'||value==='turn_worklog'||value==='hide_all_activity'?value:'';
     if(typeof window!=='undefined'){
       if(typeof window.chatActivityMode==='function'){
         try{
@@ -3088,6 +3088,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       display_hint:role==='prose'?'main_prose':role==='thinking'?'collapsed_thinking':role==='tool'?'tool_row':role==='terminal'?'terminal_status_row':'activity_row',
       display_hints:{
         compact_worklog:role==='prose'?'main_prose':role==='thinking'?'collapsed_thinking':role==='tool'?'tool_row':role==='terminal'?'terminal_status_row':'activity_row',
+        turn_worklog:role==='prose'?'main_prose':role==='thinking'?'collapsed_thinking':role==='tool'?'tool_row':role==='terminal'?'terminal_status_row':'activity_row',
         transparent_stream:'chronological_activity',
       },
       source_event_type:sourceEventType,
@@ -3689,7 +3690,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     const base=(projectedScene&&typeof projectedScene==='object')?projectedScene:{};
-    const sceneMode=base.mode==='transparent_stream'||base.mode==='hide_all_activity' ? base.mode : _anchorSceneActiveMode();
+    const sceneMode=base.mode==='transparent_stream'||base.mode==='turn_worklog'||base.mode==='hide_all_activity' ? base.mode : _anchorSceneActiveMode();
     const messageFinalAnswer=_anchorSceneFinalAnswerText(lastAsst);
     const finalAnswer=_anchorSceneCleanText(messageFinalAnswer)
       ? messageFinalAnswer
@@ -3697,6 +3698,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const finalKey=_anchorSceneTextKey(finalAnswer);
     const messageRows=_anchorSceneRowsByMessageIndex(messages,turnStart,lastAsstIndex,{includeFinal:true});
     const hasSettledThinking=_anchorSceneMessageRowsHaveThinking(messageRows);
+    // When transcript repair supplies the *same* reasoning text as the live
+    // projection, preserve the live row's chronological position and identity.
+    // A different/richer settled reasoning row still replaces an unfinished
+    // live row, as before.
+    const mirroredThinkingKeys=new Set();
+    for(const bucket of messageRows.values()){
+      for(const item of bucket){
+        if(item&&item.role==='thinking') mirroredThinkingKeys.add(_anchorSceneTextKey(item.text));
+      }
+    }
     const rows=[];
     const seen=new Set();
     const seenTextKeys=[];
@@ -3731,14 +3742,27 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const pushRow=(row)=>{
       if(!row||typeof row!=='object') return;
       const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
-      row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
+      const keepMirroredThinking=row.role==='thinking'&&projectedRows.includes(row)
+        && mirroredThinkingKeys.has(_anchorSceneTextKey(row.text));
+      row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking&&!keepMirroredThinking);
       if(!row||typeof row!=='object') return;
       const textKey=_anchorSceneTextKey(row.text);
       if(rowIsLiveTokenFinalPrefix(row,textKey,finalSegmentEligible)) return;
       const isTextual=row.role==='prose'||row.role==='thinking';
-      if(isTextual&&_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) return;
-      if(isTextual&&_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
-      const key=_anchorSceneExistingRowKey(row);
+      // A named interim update is a separate step even if the final answer
+      // starts with nearly the same words; a live token snapshot of the final
+      // segment was already removed by rowIsLiveTokenFinalPrefix above.
+      const distinctProgress=row.role==='prose'
+        && (row.source_event_type==='interim_assistant'
+          || (row.source_event_type==='token'&&String(row.local_id||'').startsWith('live-prose:')))
+        && !!(row.local_id||row.event_id);
+      if(isTextual&&_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)
+        && (!distinctProgress||textKey===finalKey)) return;
+      // Distinct live progress events may share text or a prefix. Preserve their
+      // identities in the canonical scene regardless of the current renderer;
+      // settled_message mirrors and the final-answer row still de-echo by text.
+      if(isTextual&&!distinctProgress&&_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
+      const key=distinctProgress?`prose-event:${row.event_id||row.local_id}`:_anchorSceneExistingRowKey(row);
       if(key&&seen.has(key)) return;
       if(key) seen.add(key);
       if(isTextual&&textKey) seenTextKeys.push(textKey);
@@ -3830,6 +3854,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Steer is user-authored, but it still needs a persisted Anchor scene even
       // when the rest of the turn is prose-only.
       if(String(row.source_event_type||'')==='steer_delivered') return true;
+      if(scene.mode==='turn_worklog'&&role==='prose'
+        && (row.source_event_type==='interim_assistant'||row.source_event_type==='settled_message')) return true;
       if(role==='tool'||role==='thinking') return true;
       if(role==='lifecycle'){
         const source=String(row.source_event_type||'');
@@ -3867,8 +3893,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const hasOwnedOutcomes=_anchorSceneHasOwnedOutcomes(scene);
     if(scene&&Array.isArray(scene.activity_rows)&&(scene.activity_rows.length||hasOwnedOutcomes)){
       const hasWorklogRows=_anchorSceneHasWorklogWorthyRows(scene);
+      // Persistence is about observed turn facts, not the active display mode.
+      // Compact still declines to promote prose-only turns to its worklog, but
+      // their interim events must survive a later switch (or reload) to Turn Worklog.
+      const hasInterimProse=scene.activity_rows.some(row=>row&&row.role==='prose'
+        && (row.source_event_type==='interim_assistant'||row.source_event_type==='settled_message'));
       const shouldPersistScene=hasWorklogRows||scene.mode==='hide_all_activity'||hasOwnedOutcomes;
-      if(!shouldPersistScene) return false;
+      if(!shouldPersistScene&&!hasInterimProse) return false;
       let sceneKey='';
       try{ sceneKey=JSON.stringify(scene); }catch(_){ sceneKey=''; }
       if(

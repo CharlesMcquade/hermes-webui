@@ -8484,7 +8484,7 @@ function _appearancePayloadFromUi(){
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
     content_width: localStorage.getItem('hermes-content-width') || 'default',
-    chat_activity_display_mode: chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='hide_all_activity')
+    chat_activity_display_mode: chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='turn_worklog'||chatActivityModeSel.value==='hide_all_activity')
       ? chatActivityModeSel.value
       : 'compact_worklog',
     transparent_stream_event_timestamps: transparentEventTimestamps ? transparentEventTimestamps.checked : true,
@@ -8506,7 +8506,7 @@ function _appearancePayloadFromUi(){
 }
 
 function _syncChatActivityDisplayModeControl(mode){
-  const next=mode==='transparent_stream'||mode==='hide_all_activity' ? mode : 'compact_worklog';
+  const next=mode==='transparent_stream'||mode==='turn_worklog'||mode==='hide_all_activity' ? mode : 'compact_worklog';
   const select=$('settingsChatActivityDisplayMode');
   if(select) select.value=next;
   document.querySelectorAll('[data-chat-activity-mode]').forEach(btn=>{
@@ -8522,7 +8522,7 @@ function _syncChatActivityDisplayModeControl(mode){
 
 function _syncTransparentEventTimestampsControl(enabled, mode){
   const next=enabled!==false;
-  const activeMode=mode==='transparent_stream'||mode==='hide_all_activity' ? mode : (window._chatActivityDisplayMode||'compact_worklog');
+  const activeMode=mode==='transparent_stream'||mode==='hide_all_activity'||mode==='turn_worklog' ? mode : (window._chatActivityDisplayMode||'compact_worklog');
   const checkbox=$('settingsTransparentEventTimestamps');
   if(checkbox){
     checkbox.checked=next;
@@ -12771,7 +12771,8 @@ async function saveSettings(andClose){
   body.session_jump_buttons=!!($('settingsSessionJumpButtons')||{}).checked;
   body.session_endless_scroll=!!($('settingsSessionEndlessScroll')||{}).checked;
   body.chat_activity_display_mode=((($('settingsChatActivityDisplayMode')||{}).value==='transparent_stream')
-    ||(($('settingsChatActivityDisplayMode')||{}).value==='hide_all_activity'))
+    ||(($('settingsChatActivityDisplayMode')||{}).value==='hide_all_activity')
+    ||(($('settingsChatActivityDisplayMode')||{}).value==='turn_worklog'))
     ? ($('settingsChatActivityDisplayMode')||{}).value
     : 'compact_worklog';
   body.transparent_stream_event_timestamps=(($('settingsTransparentEventTimestamps')||{}).checked)!==false;

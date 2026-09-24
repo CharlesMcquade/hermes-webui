@@ -207,7 +207,7 @@ Requirements:
 
 ### Activity display and disclosure addenda
 
-The accepted lifecycle now has three presentation strategies over the same
+The accepted lifecycle has four presentation strategies over the same
 assistant-turn activity data:
 
 - **Compact Worklog** remains the default. Its top-level Worklog is expanded
@@ -215,13 +215,21 @@ assistant-turn activity data:
   Nested tool/reasoning detail remains progressively disclosed.
 - **Transparent Stream** is opt-in and renders the same ordered activity as
   chronological rows. It does not create a second live or settled owner.
+- **Turn Worklog** (`turn_worklog`) is opt-in: a flat, prose-first chronological
+  live timeline within the assistant turn, with individual Thinking and tool
+  items collapsed by default. It has no top-level live Worklog shell. A user's
+  Steer event remains in chronological order. On normal completion, a closed
+  `Worked for Xm YYs` disclosure appears above the separate
+  final answer; opening it reveals the full ordered worklog. A pure-final turn
+  creates no empty activity group. Error/no-final turns with partial work default
+  to showing that work instead of hiding it behind a closed disclosure.
 - **Final answer only** is opt-in (`hide_all_activity` in persisted settings).
   It suppresses activity rows without deleting the persisted Anchor scene or
   changing the final-answer owner.
 
-For normal completed turns, the settled Compact Worklog remains collapsed by
-default. When a terminal error-family turn has actual Worklog content, the
-Worklog defaults open so readable partial work is not hidden behind the error
+For normal completed turns, the settled Compact Worklog and Turn Worklog remain
+collapsed by default. When a terminal error-family turn has actual Worklog content,
+the Worklog defaults open so readable partial work is not hidden behind the error
 outcome. The current disclosure error family is `error`, `no_response`,
 `degraded`, `connection_lost`, `tool_limit_reached`, and
 `compression_exhausted`; cancelled turns and the parent `interrupted` terminal
@@ -239,7 +247,7 @@ leave readable partial Worklog content without a normal final answer.
 
 These are presentation and disclosure rules only. They do not change reply
 ownership, terminal classification, durable transcript truth, or the requirement
-that all three strategies converge across live, settle, reload, session switch,
+that all four strategies converge across live, settle, reload, session switch,
 and reconnect.
 
 ### Recovery and replay

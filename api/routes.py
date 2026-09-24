@@ -5067,6 +5067,16 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
     final_key = _anchor_scene_text_key(final_answer)
     rows = []
     seen = {}
+    # Turn Worklog preserves distinct interim events, including repeated text.
+    # Transcript repair may mirror their prose; prefer the saved scene's ordered
+    # event rows rather than replacing them with a single text-keyed mirror.
+    scene_prose_text_keys = {
+        _anchor_scene_text_key(row.get("text"))
+        for row in scene.get("activity_rows") or []
+        if isinstance(row, dict) and row.get("role") == "prose"
+        and row.get("source_event_type") == "interim_assistant"
+        and (row.get("row_id") or row.get("local_id") or row.get("event_id"))
+    }
 
     def merge_duplicate_tool_row(existing, incoming, *, prefer_incoming_body=False):
         if not isinstance(existing, dict) or not isinstance(incoming, dict):
@@ -5130,7 +5140,7 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         merged["payload"] = merged_payload
         return merged
 
-    def push(row, *, prefer_incoming_tool_body=False):
+    def push(row, *, prefer_incoming_tool_body=False, from_scene=False):
         if not isinstance(row, dict):
             return
         row = _anchor_scene_settle_live_running_row(
@@ -5140,11 +5150,17 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         if row is None or not isinstance(row, dict):
             return
         text_key = _anchor_scene_text_key(row.get("text"))
+        if scene_prose_text_keys and row.get("role") == "prose" and not from_scene and text_key in scene_prose_text_keys:
+            return
         if row.get("role") in ("prose", "thinking") and _anchor_scene_row_looks_like_final_answer(text_key, final_key):
             return
         if _anchor_scene_row_is_stale_token_answer(row, text_key, final_key):
             return
         key = _anchor_scene_row_key(row)
+        if row.get("role") == "prose" and row.get("source_event_type") == "interim_assistant":
+            event_id = row.get("row_id") or row.get("local_id") or row.get("event_id")
+            if event_id:
+                key = f"prose-event:{event_id}"
         if key and key in seen:
             if key.startswith("tool:"):
                 index = seen[key]
@@ -5285,10 +5301,34 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         order += 1
     for row in scene.get("activity_rows") or []:
         if isinstance(row, dict) and row.get("role") != "terminal":
-            push(row)
+            push(row, from_scene=True)
     for row in scene.get("activity_rows") or []:
         if isinstance(row, dict) and row.get("role") == "terminal":
-            push(row)
+            push(row, from_scene=True)
+    if scene_prose_text_keys or scene.get("mode") == "turn_worklog":
+        # The saved scene owns the chronology for identifiable interim updates,
+        # even if it was originally presented in Compact or Transparent mode.
+        # Transcript repair was scanned first to recover richer tool bodies,
+        # not to reorder visible work.
+        def order_key(row):
+            if row.get("role") == "prose":
+                identity = row.get("row_id") or row.get("local_id") or row.get("event_id")
+                if identity:
+                    return ("prose", str(identity))
+            return (str(row.get("role") or ""), _anchor_scene_row_key(row))
+
+        source_order = {
+            order_key(row): index
+            for index, row in enumerate(scene.get("activity_rows") or [])
+            if isinstance(row, dict) and row.get("role") != "terminal"
+        }
+        nonterminal = [row for row in rows if row.get("role") != "terminal"]
+        terminal = [row for row in rows if row.get("role") == "terminal"]
+        nonterminal.sort(key=lambda row: source_order.get(order_key(row), len(source_order)))
+        rows = nonterminal + terminal
+        for index, row in enumerate(rows):
+            row["order_index"] = index
+            row["seq"] = index
     repaired = copy.deepcopy(scene)
     repaired["version"] = "activity_scene_v1"
     repaired["mode"] = repaired.get("mode") or "compact_worklog"
