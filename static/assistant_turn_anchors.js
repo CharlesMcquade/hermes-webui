@@ -183,7 +183,7 @@
   }
 
   function _activityDisplayMode(value){
-    return value==='transparent_stream'||value==='compact_worklog'||value==='hide_all_activity'
+    return value==='transparent_stream'||value==='compact_worklog'||value==='turn_worklog'||value==='hide_all_activity'
       ? value
       : 'compact_worklog';
   }
@@ -984,6 +984,7 @@
   function _activityRowDisplayHints(kind, sourceType){
     return Object.freeze({
       compact_worklog:_activityRowDisplayHint(kind,'compact_worklog',sourceType),
+      turn_worklog:_activityRowDisplayHint(kind,'turn_worklog',sourceType),
       transparent_stream:_activityRowDisplayHint(kind,'transparent_stream',sourceType),
     });
   }

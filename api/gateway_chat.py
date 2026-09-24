@@ -1597,8 +1597,10 @@ def _run_gateway_chat_streaming(
                 _active_turn_authority,
                 _active_turn_token_matches,
                 _materialize_active_turn_user,
+                _terminal_turn_duration,
             )
 
+            turn_duration = _terminal_turn_duration(s)
             active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
             user_msg = _materialize_active_turn_user(
                 active_turn_identity,
@@ -1609,6 +1611,8 @@ def _run_gateway_chat_streaming(
                 active_turn_identity.get("timestamp") or now
             )
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
+            if turn_duration is not None:
+                assistant_msg["_turnDuration"] = turn_duration
             saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning

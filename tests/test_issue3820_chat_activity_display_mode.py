@@ -101,8 +101,9 @@ def test_transparent_stream_event_timestamps_default_true_and_persist_boolean(mo
     assert json.loads(settings_path.read_text(encoding="utf-8"))["transparent_stream_event_timestamps"] is False
 
 
-def test_chat_activity_display_mode_supports_three_values():
+def test_chat_activity_display_mode_supports_four_values():
     assert "function chatActivityMode()" in UI_JS
+    assert "function isTurnWorklogMode()" in UI_JS
     assert "function isTransparentStream()" in UI_JS
     assert "function isFinalAnswerOnlyMode()" in UI_JS
     assert "function isCompactWorklogMode()" in UI_JS
@@ -114,9 +115,9 @@ def test_chat_activity_display_mode_supports_three_values():
     assert "window._simplifiedToolCalling=true" in PANELS_JS
 
 
-def test_chat_activity_display_mode_picker_uses_three_desktop_columns():
-    assert INDEX_HTML.count('class="chat-activity-mode-btn') == 3
-    assert "#mainSettings .chat-activity-mode-toggle{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));" in STYLE_CSS
+def test_chat_activity_display_mode_picker_fits_four_desktop_options():
+    assert INDEX_HTML.count('class="chat-activity-mode-btn') == 4
+    assert "#mainSettings .chat-activity-mode-toggle{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));" in STYLE_CSS
     assert "#mainSettings .chat-activity-mode-toggle{grid-template-columns:1fr;}" in STYLE_CSS
 
 
@@ -418,7 +419,7 @@ def test_transparent_stream_live_branch_uses_direct_rows():
     append_thinking_start = UI_JS.index("function appendThinking(text='', options){")
     append_thinking_end = UI_JS.index("function updateThinking", append_thinking_start)
     append_thinking_block = UI_JS[append_thinking_start:append_thinking_end]
-    assert "if(isTransparentStream())" in append_thinking_block
+    assert "if(isTransparentStream()||isTurnWorklogMode())" in append_thinking_block
     assert "turn=_createAssistantTurn()" in append_thinking_block
     assert "row.id='thinkingRow'" in append_thinking_block
     assert "_decorateTransparentEventRow(row,{" in append_thinking_block
@@ -466,11 +467,11 @@ def test_settings_ui_exposes_chat_activity_display_mode_selector():
 
 
 def test_chat_activity_display_mode_plumbing_preserves_hide_all_activity():
-    assert "s.chat_activity_display_mode==='transparent_stream'||s.chat_activity_display_mode==='hide_all_activity'" in BOOT_JS
+    assert "s.chat_activity_display_mode==='transparent_stream'||s.chat_activity_display_mode==='hide_all_activity'||s.chat_activity_display_mode==='turn_worklog'" in BOOT_JS
     assert "window._transparentEventTimestamps=s.transparent_stream_event_timestamps!==false;" in BOOT_JS
     assert "window._transparentEventTimestamps=true;" in BOOT_JS
-    assert "chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='hide_all_activity')" in PANELS_JS
-    assert "const next=mode==='transparent_stream'||mode==='hide_all_activity' ? mode : 'compact_worklog';" in PANELS_JS
+    assert "chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='turn_worklog'||chatActivityModeSel.value==='hide_all_activity')" in PANELS_JS
+    assert "const next=mode==='transparent_stream'||mode==='turn_worklog'||mode==='hide_all_activity' ? mode : 'compact_worklog';" in PANELS_JS
     assert "if(typeof _syncTransparentEventTimestampsControl==='function') _syncTransparentEventTimestampsControl(window._transparentEventTimestamps,next);" in PANELS_JS
     assert "window._transparentEventTimestamps=next;" in PANELS_JS
     assert "hide_all_activity" in PANELS_JS
@@ -720,7 +721,7 @@ def test_transparent_event_row_quiet_metadata_visual_rhythm():
     remove_start = UI_JS.index("function removeThinking()")
     remove_end = UI_JS.index("\nfunction ", remove_start + 1)
     remove_block = UI_JS[remove_start:remove_end]
-    transparent_remove_block = remove_block[remove_block.index("if(isTransparentStream())"):remove_block.index("const turn=$('liveAssistantTurn');")]
+    transparent_remove_block = remove_block[remove_block.index("if(isTransparentStream()||isTurnWorklogMode())"):remove_block.index("const turn=$('liveAssistantTurn');")]
     assert "row.removeAttribute('id')" in transparent_remove_block
     assert "row.removeAttribute('data-thinking-active')" in transparent_remove_block
     assert "row.removeAttribute('data-live-thinking')" in transparent_remove_block
@@ -729,7 +730,7 @@ def test_transparent_event_row_quiet_metadata_visual_rhythm():
     finalize_start = UI_JS.index("function finalizeThinkingCard(){")
     finalize_end = UI_JS.index("function appendThinking", finalize_start)
     finalize_block = UI_JS[finalize_start:finalize_end]
-    transparent_finalize_block = finalize_block[finalize_block.index("if(isTransparentStream())"):finalize_block.index("if(!isSimplifiedToolCalling())")]
+    transparent_finalize_block = finalize_block[finalize_block.index("if(isTransparentStream()||isTurnWorklogMode())"):finalize_block.index("if(!isSimplifiedToolCalling())")]
     assert "row.removeAttribute('id')" in transparent_finalize_block
     assert "row.removeAttribute('data-thinking-active')" in transparent_finalize_block
     assert "row.removeAttribute('data-live-thinking')" in transparent_finalize_block
