@@ -7119,6 +7119,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_bailOutOfTerminalEventsFromStaleStream(source)) return returnStatus?'stale':false;
       let session=data&&data.session;
       if(!session) return returnStatus?'missing':false;
+      if(session.session_id!==activeSid) return returnStatus?'stale':false;
       if(session.active_stream_id||session.pending_user_message) return returnStatus?'active':false;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _cancelThrottledSnapshotTimer();
@@ -7237,6 +7238,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         syncTopbar();renderMessages({preserveScroll:true});
         if(typeof _restoreMessageRenderWindowAfterSettledRender==='function') _restoreMessageRenderWindowAfterSettledRender();
+        // The bounded settle tail cannot authorize a complete artifact list.
+        // Enrich from full history and install only while this exact pane and
+        // snapshot still own the result (a session switch may win the await).
+        if(typeof _hydrateSessionArtifactProjection==='function' &&
+           typeof _artifactProjectionMatches==='function' &&
+           !_artifactProjectionMatches(session,session._artifactProjection)){
+          const settledSnapshot=S.session;
+          const projection=await _hydrateSessionArtifactProjection(settledSnapshot,
+            ()=>S.session===settledSnapshot && _isSessionCurrentPane(completedSid));
+          if(projection && S.session===settledSnapshot && _isSessionCurrentPane(completedSid)){
+            settledSnapshot._artifactProjection=projection;
+          }
+        }
         if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;

@@ -20229,12 +20229,12 @@ async function submitEdit(msgIdx, newText) {
       if(!S.session || S.session.session_id !== initialSid) return;
       // Canonical install (gate review 221beca7 #1): edit-resubmit truncated
       // the transcript; the pre-edit projection owned rows that no longer
-      // exist. Re-fetch the canonical session so revision ownership and the
-      // derived projection retire/rebuild together instead of trusting the
-      // local slice (which carries no truncation metadata).
+      // Re-fetch the explicit full canonical session so revision ownership and
+      // the complete derived artifact projection retire/rebuild together. An
+      // edit addresses absolute transcript indices, not just the tail.
       let canonicalInstalled=false;
       try{
-        const canonical=await api('/api/session?session_id='+encodeURIComponent(initialSid));
+        const canonical=await api('/api/session?session_id='+encodeURIComponent(initialSid)+'&messages=1&resolve_model=0&msg_limit=all');
         if(!S.session || S.session.session_id !== initialSid) return;
         if(canonical&&canonical.session&&typeof _installCanonicalSession==='function'){
           if(!_installCanonicalSession(canonical.session)) return;
