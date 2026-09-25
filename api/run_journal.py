@@ -740,10 +740,13 @@ class RunJournalWriter:
                         self.run_id,
                         exc_info=True,
                     )
-                # Evict the fence on the already-terminal / malformed path too:
-                # the run is effectively over (SILENT #4).
-                with _ACCEPTANCE_FENCE_LOCK:
-                    _ACCEPTANCE_FENCE.pop(fence_key, None)
+                # A malformed journal has no trustworthy durable terminal;
+                # retain the closed fence until session journal deletion. When
+                # an earlier terminal row is durable, that row rejects waiting
+                # Steers on its own, so the fence may be evicted normally.
+                if not malformed:
+                    with _ACCEPTANCE_FENCE_LOCK:
+                        _ACCEPTANCE_FENCE.pop(fence_key, None)
                 return synthetic
             try:
                 event = _append_run_event_locked(
@@ -772,11 +775,10 @@ class RunJournalWriter:
                         self.run_id,
                         exc_info=True,
                     )
-                # Evict the fence even on persistence failure: the fence's job
-                # (rejecting late Steer) is done; keeping it leaks one entry per
-                # run forever (SILENT #4).
-                with _ACCEPTANCE_FENCE_LOCK:
-                    _ACCEPTANCE_FENCE.pop(fence_key, None)
+                # No durable terminal exists. A verified Steer may already be
+                # waiting on this per-run lock; keep the fence closed so it
+                # cannot accept guidance after the final drain. The run's
+                # session-journal deletion retires this failure tombstone.
                 return synthetic
             try:
                 publish(event)

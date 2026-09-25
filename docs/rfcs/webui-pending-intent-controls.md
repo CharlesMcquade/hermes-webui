@@ -392,9 +392,13 @@ The endpoint resolves the agent from the exact active `stream_id` ownership map,
 not the longer-lived session cache, so a retired cached agent cannot receive a
 Steer journaled under its successor run. The terminal check, runtime acceptance
 call, and delivery append occur under the run journal's same per-path lock. If a
-terminal event wins that lock, WebUI does not call `agent.steer()` and returns
-the existing `stream_dead` recovery signal, so the browser restores the user's
-draft instead of claiming delivery. If Steer
+terminal event wins that lock, WebUI does not call `agent.steer()`. An owned
+stream that is still live in the `finalizing` phase returns `not_running` (the
+browser keeps orderly settlement); a detached or mismatched stream returns
+`stream_dead` (the browser restores the draft). A failed terminal append still
+publishes a synthetic close event, but that event is not a durable terminal
+row: the closed acceptance fence remains authoritative for waiting Steers until
+session-journal deletion retires the failure tombstone. If Steer
 wins the lock, acceptance and `steer_delivered` persistence finish before a
 terminal writer can append. The Steer row is fsynced before durable success is
 returned. Every local and gateway SSE producer appends and queue-publishes through
