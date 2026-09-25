@@ -565,19 +565,22 @@ class RunJournalWriter:
             session_dir=self.session_dir,
         )
 
-    def append_and_publish_sse_event(self, event_name: str, payload, publish) -> dict:
-        """Append and publish one SSE event in the per-run ordering domain.
+    def append_and_publish_sse_event(self, event_name: str, payload, publish) -> dict | None:
+        """Publish in per-run order, journaling only replay-worthy SSE events.
 
-        The callback receives the canonical journal envelope while ``self._lock``
-        is still held. Every producer that exposes live SSE alongside replay must
-        use this transaction so queue order cannot disagree with journal ``seq``.
+        Live-only telemetry retains queue order but has no durable identity or
+        sequence reservation. The callback receives None for those events.
         """
         with self._lock:
+            name = str(event_name or "").strip()
+            if name in REPLAY_SKIPPED_SSE_EVENTS:
+                publish(None)
+                return None
             event = _append_run_event_locked(
                 self._path,
                 self.session_id,
                 self.run_id,
-                str(event_name or "").strip(),
+                name,
                 payload or {},
             )
             publish(event)
