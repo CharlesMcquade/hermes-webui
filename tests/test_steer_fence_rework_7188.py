@@ -717,6 +717,136 @@ def test_synthetic_terminal_always_published_on_error_paths(
     assert published[0].get("_synthetic") is True
 
 
+def test_failed_terminal_append_keeps_fence_closed_for_waiting_steer(
+    isolated_steer_state, tmp_path, monkeypatch
+):
+    """A synthetic terminal does not make an unjournaled run terminal.
+
+    Park terminal publication under the per-run lock while a worker-owned
+    Steer passes its running-phase check and waits for the journal transaction.
+    It must never call agent.steer after the failed append releases that lock.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from api import streaming
+    from api.config import AGENT_INSTANCES, STREAMS, STREAMS_LOCK, create_stream_channel
+
+    sid, stream_id = "terminal_failure_sid", "terminal_failure_run"
+    writer = run_journal.RunJournalWriter(sid, stream_id, session_dir=tmp_path)
+    writer.append_sse_event("token", {"text": "in progress"})
+    publishing = threading.Event()
+    release_terminal = threading.Event()
+    steer_waiting = threading.Event()
+    published = []
+    agent = MagicMock()
+    agent.steer.return_value = True
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = create_stream_channel()
+        AGENT_INSTANCES[stream_id] = agent
+    _steer_owner(stream_id, sid)
+    monkeypatch.setattr(streaming, "RunJournalWriter", _make_writer_factory(tmp_path))
+    real_accept = streaming._accept_and_publish_steer_event
+
+    def after_verification(*args, **kwargs):
+        steer_waiting.set()
+        return real_accept(*args, **kwargs)
+
+    def publish_terminal(event):
+        published.append(event)
+        publishing.set()
+        assert release_terminal.wait(5)
+
+    def append_or_fail(path, session_id, run_id, event_name, payload, **kwargs):
+        if event_name == "done":
+            raise OSError("disk full")
+        raise AssertionError("unexpected append")
+
+    with patch.object(run_journal, "_append_run_event_locked", side_effect=append_or_fail), \
+         patch.object(streaming, "_accept_and_publish_steer_event", side_effect=after_verification):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            terminal = pool.submit(
+                writer.close_acceptance_fence_and_publish_terminal,
+                "done", {"session": {}}, publish_terminal,
+            )
+            try:
+                assert publishing.wait(5)
+                steer = pool.submit(
+                    streaming._steer_bound_stream, sid, stream_id, "too late",
+                    display_text="too late",
+                )
+                assert steer_waiting.wait(5), "Steer did not pass worker ownership"
+            finally:
+                release_terminal.set()
+            terminal.result(timeout=5)
+            outcome = steer.result(timeout=5)
+
+    assert published[0]["_synthetic"] is True
+    assert run_journal.is_acceptance_fence_closed(sid, stream_id, session_dir=tmp_path)
+    assert outcome is not None
+    assert outcome["accepted"] is False
+    assert outcome["fallback"] == "stream_dead"
+    agent.steer.assert_not_called()
+    events = run_journal.read_run_events(sid, stream_id, session_dir=tmp_path)["events"]
+    assert [event["event"] for event in events] == ["token"]
+    # Session deletion owns the remaining tombstone for an unjournaled terminal.
+    assert run_journal.delete_run_journal(sid, session_dir=tmp_path)
+    assert not run_journal.is_acceptance_fence_closed(sid, stream_id, session_dir=tmp_path)
+
+
+def test_done_journaled_after_verified_steer_reports_not_running(
+    isolated_steer_state, tmp_path, monkeypatch
+):
+    """The stream is still owned and live when a verified Steer loses to done."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from api import streaming
+    from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK, AGENT_INSTANCES, STREAMS, STREAMS_LOCK, create_stream_channel
+
+    sid, stream_id = "terminal_live_sid", "terminal_live_run"
+    agent = MagicMock()
+    agent.steer.return_value = True
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = create_stream_channel()
+        AGENT_INSTANCES[stream_id] = agent
+    _steer_owner(stream_id, sid)
+    monkeypatch.setattr(streaming, "RunJournalWriter", _make_writer_factory(tmp_path))
+    verified = threading.Event()
+    resume = threading.Event()
+    real_accept = streaming._accept_and_publish_steer_event
+
+    def after_verification(*args, **kwargs):
+        verified.set()
+        assert resume.wait(5)
+        return real_accept(*args, **kwargs)
+
+    with patch.object(streaming, "_accept_and_publish_steer_event", side_effect=after_verification):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            steer = pool.submit(
+                streaming._steer_bound_stream, sid, stream_id, "late guidance",
+                display_text="late guidance",
+            )
+            try:
+                assert verified.wait(5), "Steer did not pass running-phase ownership"
+                with ACTIVE_RUNS_LOCK:
+                    ACTIVE_RUNS[stream_id]["phase"] = "finalizing"
+                writer = run_journal.RunJournalWriter(sid, stream_id, session_dir=tmp_path)
+                done = writer.close_acceptance_fence_and_publish_terminal(
+                    "done", {"session": {}}, lambda event: None,
+                )
+                assert done["terminal"] is True and not done.get("_synthetic")
+            finally:
+                resume.set()
+            outcome = steer.result(timeout=5)
+
+    assert outcome["accepted"] is False
+    assert outcome["fallback"] == "not_running"
+    agent.steer.assert_not_called()
+    assert not any(
+        event["event"] == "steer_delivered"
+        for event in run_journal.read_run_events(sid, stream_id, session_dir=tmp_path)["events"]
+    )
+
+
 def test_symlink_in_archive_rejected(
     isolated_steer_state,
     tmp_path,
