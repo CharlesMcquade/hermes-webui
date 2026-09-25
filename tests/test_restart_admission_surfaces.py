@@ -21,8 +21,10 @@ def test_admission_handoff_keeps_concrete_run_registered():
     stream_id = "handoff-stream"
 
     @_run_guard_for_test
-    def start():
-        config.register_active_run(stream_id, session_id="session-1", phase="starting")
+    def start(*, reservation=None):
+        assert isinstance(reservation, str)
+        with config.STREAMS_LOCK:
+            config.transfer_run_admission(reservation, stream_id, session_id="session-1")
         return {"stream_id": stream_id}
 
     try:
