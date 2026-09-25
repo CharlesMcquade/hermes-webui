@@ -3551,6 +3551,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     last_ts = None
     reasoning_segments: list[dict] = []
     reasoning_segment_break = False
+    reasoning_first_tool_count: int | None = None
 
     def _materialize_reasoning_text() -> str:
         nonlocal reasoning_text, reasoning_dirty
