@@ -98,10 +98,13 @@ automatic generation when the auxiliary flag is off.
 A title model occasionally replies with an options menu instead of one title
 (for example `Good title options: "A", "B"`). WebUI rejects structurally
 multi-candidate replies — a menu preamble followed by two or more list
-entries, semicolon/newline-separated candidates, or short standalone
-comma-separated alternatives — instead of persisting the raw menu as the
-title. A comma joining grammatical clauses or a comparison within one title
-(for example `Title Suggestions: Compare REST, GraphQL and gRPC`) does not
+entries, semicolon/newline-separated candidates, explicitly quoted or
+bulleted alternatives, or at least three short standalone comma-separated
+alternatives — instead of persisting the raw menu as the title. A plain
+two-part comma phrase such as `Title Suggestions: OAuth Tokens, Explained`
+is ambiguous, so it stays valid. A comma joining grammatical clauses or a
+comparison within one title (for example
+`Title Suggestions: Compare REST, GraphQL and gRPC`) does not
 prove a menu; neither do delimiters inside quoted terms.
 `Title Suggestions: Comparing "REST" and "GraphQL"` stays valid.
 A preamble with a single remaining phrase (for example

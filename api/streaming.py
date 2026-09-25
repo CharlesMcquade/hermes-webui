@@ -4307,6 +4307,22 @@ def _looks_like_title_option_menu(text: str) -> bool:
         return False
     if any(separator in ';\n' for separator in separators):
         return True
+    # Two unquoted comma fragments are ambiguous even when both are short:
+    # "OAuth Tokens, Explained" is one title, not two choices. Explicit
+    # quotation or a leading list marker supplies the missing menu structure;
+    # otherwise require at least three alternatives. An explicit "or" between
+    # two fragments also marks a choice after an options preamble.
+    alternative = False
+    if len(candidates) == 2:
+        quoted = all(
+            (item.startswith('"') and item.endswith('"'))
+            or (item.startswith('\u201c') and item.endswith('\u201d'))
+            for item in candidates
+        )
+        marked = bool(re.match(r'^\s*(?:[-*\u2022\u2023]|\d{1,2}[).:])\s+', s))
+        alternative = bool(re.match(r'^or\b', candidates[-1], re.IGNORECASE))
+        if not (quoted or marked or alternative):
+            return False
     # A comma can also join clauses in ONE title ("Compare REST, GraphQL and
     # gRPC"). Require short standalone alternatives: a leading action verb,
     # boundary-spanning preposition, or a connective joining the final segment
@@ -4317,10 +4333,14 @@ def _looks_like_title_option_menu(text: str) -> bool:
         if (candidate[0] == candidate[-1] == '"'
                 or (candidate[0] == '\u201c' and candidate[-1] == '\u201d')):
             continue  # A fully quoted alternative may itself contain "and".
-        if (_TITLE_MENU_COMMA_SPAN_RE.search(candidate)
+        # An explicit "or" is the option separator, not a grammatical span
+        # within the second candidate; still inspect its remaining words.
+        span_candidate = candidate[3:].strip() if alternative and index == 1 else candidate
+        if (_TITLE_MENU_COMMA_SPAN_RE.search(span_candidate)
                 or (index == 0 and _TITLE_MENU_COMMA_VERB_RE.match(candidate))
                 or (index == len(candidates) - 1
-                    and _TITLE_MENU_COMMA_JOIN_RE.search(candidate))):
+                    and _TITLE_MENU_COMMA_JOIN_RE.search(candidate)
+                    and not alternative)):
             return False
     return True
 

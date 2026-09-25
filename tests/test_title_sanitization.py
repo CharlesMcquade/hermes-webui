@@ -164,11 +164,22 @@ class TestTitleOptionMenuDetection(unittest.TestCase):
                 self.assertEqual(_sanitize_generated_title(title), title)
                 self.assertFalse(_looks_invalid_generated_title(title))
 
+    def test_two_part_grammatical_titles_survive_fresh_and_persisted_checks(self):
+        for title in (
+            'Title Suggestions: OAuth Tokens, Explained',
+            'Title Suggestions: Login Fails, Logout Succeeds',
+            'Title Suggestions: Rust, Revisited',
+        ):
+            with self.subTest(title=title):
+                self.assertEqual(_sanitize_generated_title(title), title)
+                self.assertFalse(_looks_invalid_generated_title(title))
+
     def test_unquoted_alternatives_still_rejected_fresh_and_persisted(self):
         for title in (
             'Here are some title options: Alpha, Beta, Gamma',
-            'Title suggestions: Alpha, Beta',
-            'Title suggestions: Migration Plan for Teams, Rollout Strategy',
+            'Title suggestions: Alpha, Beta, Gamma',
+            'Title suggestions: Migration Plan for Teams, Rollout Strategy, Team Migration',
+            'Title options: Alpha, or Beta',
             'Title ideas: Migration Plan; Rollout Strategy',
         ):
             with self.subTest(title=title):
