@@ -257,26 +257,26 @@ def persist_session_title_authority(
             candidate = None
         if source == "user":
             db.set_session_title(session_id, candidate)
-        elif hasattr(db, "_execute_write"):
+        elif hasattr(db, "get_session_title_source") and hasattr(db, "_execute_write"):
             db._execute_write(
                 lambda conn: conn.execute(
                     "UPDATE sessions SET title = ?, title_source = ? WHERE id = ?",
                     (candidate, source, session_id),
                 )
             )
+        elif resetting and hasattr(db, "_execute_write"):
+            # Pre-provenance Agent stores have _execute_write but no title_source.
+            db._execute_write(lambda conn: conn.execute(
+                "UPDATE sessions SET title = NULL WHERE id = ?", (session_id,)))
         elif hasattr(db, "set_auto_title"):
             db.set_auto_title(session_id, candidate, source=source)
         elif resetting:
-            # Legacy stores only expose fill-if-empty and cannot clear an
-            # existing title. Keep the clear route usable in standalone mode
-            # rather than reporting a failed reset after the conversation was
-            # already cleared from the WebUI sidecar.
-            return title, source
+            raise RuntimeError("Agent DB cannot reset the session title")
         else:
             db.set_auto_title_if_empty(session_id, candidate)
         persisted = _read_title_state(db, session_id)
         if resetting:
-            if persisted != (None, source):
+            if persisted[0] is not None or (hasattr(db, "get_session_title_source") and persisted[1] != source):
                 raise RuntimeError("Agent DB did not reset the session title")
             return title, source
         if not persisted[0]:
