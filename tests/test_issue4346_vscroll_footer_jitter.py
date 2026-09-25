@@ -1103,7 +1103,7 @@ _scheduleMessageVirtualizedRender();
 assert.equal(queued.length,1);
 queued.shift()();
 assert.equal(_messageVirtualScrollRaf,0);
-assert.deepEqual(calls,[{preserveScroll:true,_windowOnly:true}]);
+assert.deepEqual(calls,[{preserveScroll:true,_windowOnly:true,_internalMeasurement:false}]);
 _scheduleMessageVirtualizedRender();
 assert.equal(queued.length,0);
 _scrollbarDragActive=false;

@@ -714,6 +714,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         eval({json.dumps(_function_source(_ui_js(), '_reconcilePreservedLiveTurn'))});
         const _sourceWindowHistoricalScenes=new WeakSet();
         eval({json.dumps(_function_source(_ui_js(), '_sourceWindowOwnsHistoricalScene'))});
+        eval({json.dumps(_function_source(_ui_js(), '_insertSegmentBlock'))});
         let _messageWindowRevision=0;
         eval({json.dumps(_function_source(_ui_js(), '_rememberMessageWindowReader'))});
         eval({json.dumps(_function_source(_ui_js(), '_initializeMessageWindowOwnership'))});

@@ -1871,7 +1871,7 @@ function _commitMessageWindow(target, staged, anchor, reuse){
     for(let i=0;i<desired.length;i++){
       if(target.children[i]!==desired[i]) target.insertBefore(desired[i],target.children[i]||null);
     }
-    _restoreMessageWindowReader(target,anchor,reuse?container.clientHeight*2:Infinity);
+    _restoreMessageWindowReader(target,anchor);
     for(const node of target.querySelectorAll('[data-session-msg-idx]')){
       node.dataset.msgIdx=String(_messageRawIdxForSessionIndex(Number(node.dataset.sessionMsgIdx)));
     }
