@@ -11426,9 +11426,35 @@ def register_active_run(stream_id: str, **metadata) -> None:
     entry.setdefault("started_at", now)
     entry.setdefault("phase", "running")
     with ACTIVE_RUNS_LOCK:
+        existing = ACTIVE_RUNS.get(stream_id)
+        if (existing and existing.get("phase") == "starting"
+                and existing.get("session_id") != entry.get("session_id")):
+            raise RunAdmissionDrainingError("Run admission belongs to another session")
         if restart_drain_active():
-            raise RunAdmissionDrainingError("WebUI is draining for a supervised restart")
+            if not (existing and existing.get("phase") == "starting"
+                    and existing.get("session_id") and existing.get("session_id") == entry.get("session_id")):
+                raise RunAdmissionDrainingError("WebUI is draining for a supervised restart")
         ACTIVE_RUNS[stream_id] = entry
+
+
+def transfer_run_admission(reservation: str, stream_id: str, **metadata) -> None:
+    """Move an admitted request to its concrete run, even after drain closes.
+
+    The reservation is the capability: no fresh admission is granted here.
+    Call while holding STREAMS_LOCK when publishing a worker-owned stream.
+    """
+    if not reservation or not stream_id or reservation == stream_id:
+        raise RunAdmissionDrainingError("Invalid run admission transfer")
+    with ACTIVE_RUNS_LOCK:
+        row = ACTIVE_RUNS.get(reservation)
+        if (row is None or row.get("phase") != "admitting"
+                or row.get("stream_id") != reservation or stream_id in ACTIVE_RUNS):
+            raise RunAdmissionDrainingError("Run admission reservation is not owned")
+        entry = dict(metadata)
+        entry.update(stream_id=stream_id, phase="starting")
+        entry.setdefault("started_at", time.time())
+        ACTIVE_RUNS[stream_id] = entry
+        del ACTIVE_RUNS[reservation]
 
 
 def update_active_run(stream_id: str, **metadata) -> None:
