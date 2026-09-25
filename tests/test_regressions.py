@@ -795,6 +795,7 @@ def test_renderMessages_preserves_loading_placeholder_for_session_switch(cleanup
 
     fn_body = _function_body(ui_src, "renderMessages")
 
+
     compact = re.sub(r"\s+", "", fn_body)
     assert (
         "if(_loadingSessionId===sid&&msgCount===0&&inner)return;" in compact

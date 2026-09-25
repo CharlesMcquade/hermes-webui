@@ -98,6 +98,7 @@ def test_js_recycle_stash_exists():
 # Window scheduling is covered by test_owned_scheduler_during_drag_and_release below.
 
 
+
 def test_js_stash_populated_before_wipe():
     """recycleStash population appears before innerHTML='' in renderMessages."""
     fn_match = re.search(
@@ -1114,6 +1115,7 @@ assert.equal(_messageVirtualScrollRaf,0);
 _scheduleMessageVirtualizedRender();
 assert.equal(queued.length,0);
 console.log('ok');
+
 """
     assert _run_node(source) == 'ok'
 
