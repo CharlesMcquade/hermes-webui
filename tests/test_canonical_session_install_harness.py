@@ -215,7 +215,7 @@ def test_undo_installs_canonical_session_and_rebuilds_projection():
 (async()=>{
 routes = {
   '/api/session/undo': () => ({ ok: true, removed_count: 2 }),
-  '/api/session?session_id=sess-u': () => ({
+  '/api/session?session_id=sess-u&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1': () => ({
     session: {
       session_id: 'sess-u', regeneration_revision: 3,
       _messages_truncated: false, _messages_offset: 0,

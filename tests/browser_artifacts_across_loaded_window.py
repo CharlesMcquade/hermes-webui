@@ -14,7 +14,7 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 from browser_conversation_lifecycle import _start_webui_server, _terminate_process
-from browser_reconnect_scene_redraw import INIT, fixture, session_route
+from browser_loaded_window_transport import INIT, fixture, session_route
 
 ROOT = Path(__file__).resolve().parent.parent
 
