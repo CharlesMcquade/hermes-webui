@@ -11554,7 +11554,7 @@ async function checkInflightOnBoot(sid) {
 
 function _topbarLoadedMessageCount(){
   const messages=Array.isArray(S.messages)?S.messages:[];
-  return messages.filter(m=>m&&m.role&&m.role!=='tool').length;
+  return messages.filter(m=>m&&m.role&&m.role!=='tool'&&m._source!=='delegation_wakeup').length;
 }
 function _topbarMessageMetaText(){
   const loadedCount=_topbarLoadedMessageCount();
