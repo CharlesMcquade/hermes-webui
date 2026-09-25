@@ -2963,10 +2963,12 @@ function _setContentWidthPickerOpen(open){
 }
 
 function _pickContentWidth(width){
+  const keyboardSelection=$('composerContentWidthPopup')?.contains(document.activeElement);
   const next=_applyContentWidth(width);
   localStorage.setItem('hermes-content-width',next);
   _syncContentWidthPicker(next);
   _setContentWidthPickerOpen(false);
+  if(keyboardSelection) $('composerContentWidthBtn')?.focus();
   if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }
 
@@ -2975,7 +2977,8 @@ function _syncContentWidthPicker(active){
   const btn=$('composerContentWidthBtn');
   if(btn){
     btn.dataset.contentWidthMode=next;
-    const label=`Message width: ${next[0].toUpperCase()+next.slice(1)}`;
+    const mode=typeof t==='function'?t(`content_width_${next}`):next[0].toUpperCase()+next.slice(1);
+    const label=typeof t==='function'?t('content_width_current',mode):`Message width: ${mode}`;
     btn.setAttribute('aria-label',label);
     _setButtonTooltip(btn,label);
   }

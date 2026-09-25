@@ -124,6 +124,12 @@ radius values, or spacing values when an existing token works.
 
 ## Message width
 
+The width picker labels and accessible names follow the active locale, including
+changes made while the menu is open. Keyboard selection returns focus to the
+trigger; Escape closes without changing the selection. Long unbroken prose and
+headings wrap within the message column, while tables and code retain their
+dedicated horizontal overflow behavior.
+
 The composer message-width button offers Default, Wide, and Full columns and
 reflows the conversation immediately. The browser retains explicit selections,
 including Default, when appearance autosave fails or returns a partial response;

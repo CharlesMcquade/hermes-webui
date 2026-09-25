@@ -5994,7 +5994,7 @@ main.main > #mainPlugin{display:none;}
      WebKit and on Android it re-opens the #4856 / #5338 mobile jump-to-top
      regression the scroll-anchor work fought hard to close. */
 }
-.msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); overflow-wrap:normal; }
+.msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); overflow-wrap:anywhere; }
 .msg-body p,.msg-body li,.msg-body td{overflow-wrap:anywhere;}
 .msg-body code,
 .msg-body pre,
