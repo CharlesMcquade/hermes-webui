@@ -6983,8 +6983,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(typeof _preserveLoadedMessageWindow==='function'){
           sessionPayload=_preserveLoadedMessageWindow(sessionPayload,_captureLoadedMessageWindow(activeSid));
         }
-        if(typeof _oldestIdx!=='undefined') _oldestIdx=sessionPayload._messages_offset||0;
-        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!sessionPayload._messages_truncated;
         S.session=sessionPayload;
         const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
         if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(sessionPayload);
