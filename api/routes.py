@@ -23275,12 +23275,12 @@ def _handle_btw(handler, body):
             status=503,
         )
     try:
-        return _handle_btw_admitted(handler, body)
+        return _handle_btw_admitted(handler, body, reservation=reservation)
     finally:
         api_config.unregister_active_run(reservation)
 
 
-def _handle_btw_admitted(handler, body):
+def _handle_btw_admitted(handler, body, *, reservation=None):
     try:
         require(body, "session_id")
         require(body, "question")
@@ -23334,7 +23334,16 @@ def _handle_btw_admitted(handler, body):
         kwargs={"ephemeral": True, "model_provider": model_provider},
         daemon=True,
     )
-    thr.start()
+    try:
+        with STREAMS_LOCK:
+            api_config.transfer_run_admission(reservation, stream_id, session_id=ephemeral.session_id)
+        thr.start()
+        if not callable(getattr(thr, 'is_alive', None)) or not thr.is_alive():
+            api_config.unregister_active_run(stream_id)
+    except Exception:
+        api_config.unregister_active_run(stream_id)
+        _cleanup_chat_start_launch_failure(ephemeral, stream_id)
+        raise
     return j(handler, {"stream_id": stream_id, "session_id": ephemeral.session_id, "parent_session_id": body["session_id"]})
 
 
@@ -23367,12 +23376,12 @@ def _handle_background(handler, body):
             status=503,
         )
     try:
-        return _handle_background_admitted(handler, body)
+        return _handle_background_admitted(handler, body, reservation=reservation)
     finally:
         api_config.unregister_active_run(reservation)
 
 
-def _handle_background_admitted(handler, body):
+def _handle_background_admitted(handler, body, *, reservation=None):
     try:
         require(body, "session_id")
         require(body, "prompt")
@@ -23459,7 +23468,16 @@ def _handle_background_admitted(handler, body):
                 pass
 
     thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
-    thr.start()
+    try:
+        with STREAMS_LOCK:
+            api_config.transfer_run_admission(reservation, stream_id, session_id=bg.session_id)
+        thr.start()
+        if not callable(getattr(thr, 'is_alive', None)) or not thr.is_alive():
+            api_config.unregister_active_run(stream_id)
+    except Exception:
+        api_config.unregister_active_run(stream_id)
+        _cleanup_chat_start_launch_failure(bg, stream_id)
+        raise
     return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
 
 
@@ -23725,6 +23743,7 @@ def _start_regeneration_stream_locked(
     source: str,
     moa_config,
     backend_is_gateway: bool,
+    reservation=None,
 ):
     """Commit a retained-row regeneration before releasing its real worker."""
     from api.session_ops import (
@@ -23787,6 +23806,7 @@ def _start_regeneration_stream_locked(
         )
 
     def _cleanup_owned_start():
+        api_config.unregister_active_run(stream_id)
         if goal_related:
             STREAM_GOAL_RELATED.pop(stream_id, None)
         with STREAMS_LOCK:
@@ -23872,6 +23892,8 @@ def _start_regeneration_stream_locked(
 
         diag.stage("worker_thread_start") if diag else None
         worker_thread = threading.Thread(target=_gated_worker, daemon=True)
+        with STREAMS_LOCK:
+            api_config.transfer_run_admission(reservation, stream_id, session_id=s.session_id)
         worker_thread.start()
         thread_started = True
         save_attempted = True
@@ -24081,16 +24103,21 @@ def _run_admission_guard(*, http=False):
     def decorate(fn):
         @wraps(fn)
         def guarded(*args, **kwargs):
+            if kwargs.get("reservation") is not None:
+                return fn(*args, **kwargs)
             reservation = 'admission:' + uuid.uuid4().hex
             try:
                 api_config.register_active_run(reservation, phase='admitting')
             except api_config.RunAdmissionDrainingError:
                 payload = {'error': 'WebUI is draining for restart', 'code': 'restart_draining'}
                 if http:
+                    if fn.__name__ == '_handle_chat_start':
+                        payload = {'status': 'restart_draining', 'retryable': True,
+                                   'error': 'Hermes WebUI is completing a supervised restart; retry shortly.'}
                     return j(args[0], payload, status=503)
                 return dict(payload, _status=503)
             try:
-                return fn(*args, **kwargs)
+                return fn(*args, reservation=reservation, **kwargs)
             finally:
                 api_config.unregister_active_run(reservation)
         return guarded
@@ -24113,6 +24140,7 @@ def _start_chat_stream_for_session(
     moa_config=None,
     external_runtime_owned: bool | None = None,
     regeneration=None,
+    reservation=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     if external_runtime_owned is None:
@@ -24194,6 +24222,7 @@ def _start_chat_stream_for_session(
                         source=source,
                         moa_config=moa_config,
                         backend_is_gateway=backend_is_gateway,
+                        reservation=reservation,
                     )
                 stream_id = uuid.uuid4().hex
                 diag.stage("save_pending_state") if diag else None
@@ -24273,10 +24302,9 @@ def _start_chat_stream_for_session(
     # before starting the asynchronous worker. The worker upgrades this
     # starting row when it registers, so restart safety always sees either
     # the request reservation or the worker itself.
-    api_config.register_active_run(
-        stream_id, session_id=s.session_id, phase="starting"
-    )
     try:
+        with STREAMS_LOCK:
+            api_config.transfer_run_admission(reservation, stream_id, session_id=s.session_id)
         thr.start()
         is_alive = getattr(thr, "is_alive", None)
         if not callable(is_alive) or not is_alive():
@@ -24377,6 +24405,7 @@ def _start_run(
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
     regeneration=None,
+    reservation=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -24421,6 +24450,7 @@ def _start_run(
                 moa_config=moa_config,
                 external_runtime_owned=gateway_chat_enabled,
                 regeneration=regeneration,
+                reservation=reservation,
             )
 
         def _legacy_adapter_factory():
@@ -24463,6 +24493,7 @@ def _start_run(
         moa_config=moa_config,
         external_runtime_owned=gateway_chat_enabled,
         regeneration=regeneration,
+        reservation=reservation,
     )
 
 
@@ -24579,12 +24610,12 @@ def start_session_turn(
             "_status": 503,
         }
     try:
-        return _start_session_turn_admitted(session_id, msg, source=turn_source)
+        return _start_session_turn_admitted(session_id, msg, source=turn_source, reservation=reservation)
     finally:
         api_config.unregister_active_run(reservation)
 
 
-def _start_session_turn_admitted(session_id: str, msg: str, *, source: str = "process_wakeup"):
+def _start_session_turn_admitted(session_id: str, msg: str, *, source: str = "process_wakeup", reservation=None):
     """Body of start_session_turn after the admission reservation."""
     stale_response = _agent_runtime_barrier_response(runner_local_owned=True)
     if stale_response is not None:
@@ -24743,6 +24774,7 @@ def _start_session_turn_admitted(session_id: str, msg: str, *, source: str = "pr
         normalized_model=normalized_model,
         source=turn_source,
         route="start_session_turn",
+        reservation=reservation,
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
@@ -24975,12 +25007,12 @@ def _handle_goal_command(handler, body):
             status=503,
         )
     try:
-        return _handle_goal_command_admitted(handler, body)
+        return _handle_goal_command_admitted(handler, body, reservation=reservation)
     finally:
         api_config.unregister_active_run(reservation)
 
 
-def _handle_goal_command_admitted(handler, body):
+def _handle_goal_command_admitted(handler, body, *, reservation=None):
     """Goal control/kickoff body, already holding an admission reservation."""
     try:
         require(body, "session_id")
@@ -25151,6 +25183,7 @@ def _handle_goal_command_admitted(handler, body):
             model_provider=model_provider,
             normalized_model=normalized_model,
             goal_related=True,
+            reservation=reservation,
             external_runtime_owned=webui_gateway_chat_enabled(get_config()),
         )
         status = int(stream_response.pop("_status", 200) or 200)
@@ -25175,7 +25208,8 @@ def _is_silent_control_message(message) -> bool:
     return str(message or "").strip() == "[SILENT]"
 
 
-def _handle_chat_start(handler, body, diag=None):
+@_run_admission_guard(http=True)
+def _handle_chat_start(handler, body, diag=None, *, reservation=None):
     try:
         diag.stage("validate_session_id") if diag else None
         try:
@@ -25476,6 +25510,7 @@ def _handle_chat_start(handler, body, diag=None):
             "diag": diag,
             "gateway_chat_enabled": gateway_chat_enabled,
             "regeneration": regeneration,
+            "reservation": reservation,
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
@@ -25609,7 +25644,7 @@ def _normalize_chat_attachments(raw_attachments):
 
 
 @_run_admission_guard(http=True)
-def _handle_chat_sync(handler, body):
+def _handle_chat_sync(handler, body, *, reservation=None):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
     stale_response = _agent_runtime_barrier_response(runner_local_owned=False)
     if stale_response is not None:

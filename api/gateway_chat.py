@@ -1188,16 +1188,21 @@ def _run_gateway_chat_streaming(
         _unregister_active_run(stream_id)
         return
     try:
-        register_active_run(
-            stream_id,
-            session_id=session_id,
-            started_at=time.time(),
-            phase="gateway-starting",
-            workspace=str(workspace),
-            model=model,
-            provider=model_provider,
-            backend="gateway",
-        )
+        with STREAMS_LOCK:
+            if stream_id not in STREAMS or (CANCEL_FLAGS.get(stream_id) and CANCEL_FLAGS[stream_id].is_set()):
+                unregister_active_run(stream_id)
+                return
+            register_active_run(
+                stream_id,
+                session_id=session_id,
+                started_at=time.time(),
+                phase="gateway-starting",
+                workspace=str(workspace),
+                model=model,
+                provider=model_provider,
+                backend="gateway",
+            )
+            cancel_event = CANCEL_FLAGS.setdefault(stream_id, threading.Event())
     except RunAdmissionDrainingError:
         q.put_nowait((
             "apperror",
@@ -1219,9 +1224,7 @@ def _run_gateway_chat_streaming(
     except Exception:
         run_journal = None
         logger.debug("Failed to initialize gateway run journal for stream %s", stream_id, exc_info=True)
-    cancel_event = threading.Event()
     with STREAMS_LOCK:
-        CANCEL_FLAGS[stream_id] = cancel_event
         STREAM_PARTIAL_TEXT[stream_id] = ""
         STREAM_REASONING_TEXT[stream_id] = ""
         STREAM_LIVE_TOOL_CALLS[stream_id] = []
