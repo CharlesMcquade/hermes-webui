@@ -236,30 +236,37 @@ class TestInitialAuxTitleSucceeds(unittest.TestCase):
         """A grammatical list within one generated title is already titled."""
         from api.streaming import _run_background_title_update
 
-        s, provisional = _make_provisional_session('Compare API styles', 'REST and GraphQL differ.')
-        s.title = 'Title Suggestions: Compare REST, GraphQL and gRPC'
-        s.llm_title_generated = True
-        mock_get_session.return_value = s
-        mock_aux_title.return_value = ('Wrong Replacement', 'llm_aux', 'Wrong Replacement')
-        events = []
+        for title in (
+            'Title Suggestions: Compare REST, GraphQL and gRPC',
+            'Title Suggestions: OAuth Tokens, Explained',
+            'Title Suggestions: Login Fails, Logout Succeeds',
+        ):
+            with self.subTest(title=title):
+                s, provisional = _make_provisional_session('Compare API styles', 'REST and GraphQL differ.')
+                s.title = title
+                s.llm_title_generated = True
+                mock_get_session.return_value = s
+                mock_aux_title.return_value = ('Wrong Replacement', 'llm_aux', 'Wrong Replacement')
+                events = []
 
-        _run_background_title_update(
-            session_id=s.session_id,
-            user_text='Compare API styles',
-            assistant_text='REST and GraphQL differ.',
-            placeholder_title=provisional,
-            put_event=lambda event_type, data: events.append((event_type, data)),
-            agent=None,
-        )
+                _run_background_title_update(
+                    session_id=s.session_id,
+                    user_text='Compare API styles',
+                    assistant_text='REST and GraphQL differ.',
+                    placeholder_title=provisional,
+                    put_event=lambda event_type, data, events=events: events.append((event_type, data)),
+                    agent=None,
+                )
 
-        self.assertEqual(s.title, 'Title Suggestions: Compare REST, GraphQL and gRPC')
-        mock_aux_title.assert_not_called()
-        s.save.assert_not_called()
-        self.assertIn(
-            ('title_status', {'session_id': s.session_id, 'status': 'skipped',
-                              'reason': 'already_generated', 'title': s.title}),
-            events,
-        )
+                self.assertEqual(s.title, title)
+                mock_aux_title.assert_not_called()
+                s.save.assert_not_called()
+                self.assertIn(
+                    ('title_status', {'session_id': s.session_id, 'status': 'skipped',
+                                      'reason': 'already_generated', 'title': s.title}),
+                    events,
+                )
+                mock_aux_title.reset_mock()
 
     @patch('api.streaming._aux_title_configured', return_value=True)
     @patch('api.streaming._generate_llm_session_title_via_aux')
