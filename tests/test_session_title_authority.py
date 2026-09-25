@@ -280,31 +280,60 @@ def test_legacy_store_returns_winning_title_and_closes(monkeypatch):
     assert state_sync.sync_session_title("legacy", "Generated title") == ("Generated title", None)
 
 
-def test_legacy_store_without_clear_api_preserves_standalone_reset(monkeypatch):
+def test_legacy_store_clear_route_resets_canonical_and_sidecar(title_state, monkeypatch, tmp_path):
+    import sqlite3
+    from urllib.parse import urlparse
+
+    _db, make, path = title_state
+    s = make("legacy-clear", "Legacy title", "user")
+    legacy_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(legacy_path)
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT)")
+    conn.execute("INSERT INTO sessions VALUES (?, ?)", (s.session_id, "Legacy title"))
+    conn.commit()
+    conn.close()
+    opened = []
+
     class LegacyDB:
-        title = "Legacy title"
-        closed = False
+        def __init__(self):
+            self.conn = sqlite3.connect(legacy_path)
+            self.closed = False
+            opened.append(self)
 
         def ensure_session(self, **kwargs):
             pass
 
         def get_session_title(self, sid):
-            return self.title
+            row = self.conn.execute("SELECT title FROM sessions WHERE id = ?", (sid,)).fetchone()
+            return row[0] if row else None
 
         def set_auto_title_if_empty(self, sid, title):
-            if self.title is None:
-                self.title = title
+            self._execute_write(lambda conn: conn.execute(
+                "UPDATE sessions SET title = ? WHERE id = ? AND title IS NULL", (title, sid)))
+
+        def _execute_write(self, callback):
+            result = callback(self.conn)
+            self.conn.commit()
+            return result
 
         def close(self):
+            self.conn.close()
             self.closed = True
 
-    db = LegacyDB()
-    monkeypatch.setattr(state_sync, "_get_state_db", lambda **kwargs: db)
-    assert state_sync.persist_session_title_authority(
-        "legacy", "Untitled", source="derived"
-    ) == ("Untitled", "derived")
-    assert db.title == "Legacy title"
-    assert db.closed
+    monkeypatch.setattr(state_sync, "_get_state_db", lambda **kwargs: LegacyDB())
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: {"session_id": s.session_id})
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kw: (status, payload))
+    monkeypatch.setattr(routes, "bad", lambda handler, message, status=400: (status, {"error": message}))
+    status, payload = routes.handle_post(
+        types.SimpleNamespace(headers={}, command="POST"), urlparse("/api/session/clear"))
+    assert status == 200, payload
+    assert payload["session"]["title"] == "Untitled"
+    assert s.messages == []
+    _assert_projected(s, path, "Untitled")
+    with sqlite3.connect(legacy_path) as check:
+        assert check.execute("SELECT title FROM sessions WHERE id = ?", (s.session_id,)).fetchone()[0] is None
+    assert opened and all(db.closed for db in opened)
 
 
 def _regenerate_request(monkeypatch, s):
