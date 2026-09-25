@@ -5487,6 +5487,10 @@ let _touchRenderState=null;
 /// cache replacement, filter changes, and touch-mode exit — one path for
 /// all teardown. Every piece of state is released here.
 function _invalidateTouchRender(){
+  if(_pendingTouchDeferredRenderTimer){
+    clearTimeout(_pendingTouchDeferredRenderTimer);
+    _pendingTouchDeferredRenderTimer=0;
+  }
   if(_touchSentinelObserver){_touchSentinelObserver.disconnect();_touchSentinelObserver=null;}
   // Owner-qualified teardown: only remove the listener and cancel the RAF
   // if the current _touchScrollOwner is the one we captured. A stale owner
