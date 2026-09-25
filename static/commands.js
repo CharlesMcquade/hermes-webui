@@ -1839,7 +1839,7 @@ async function cmdRetry(){
     // #5924 SILENT-race guard: a session switch during the GET await must not let
     // this recovery apply session A's intent to whatever session is now visible.
     if(!S.session||S.session.session_id!==activeSid)return;
-if(data&&data.session){
+    if(data&&data.session){
       if(typeof _installCanonicalSession==='function' && !_installCanonicalSession(data.session)) return;
       S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!data.session._messages_truncated;if(typeof _oldestIdx!=='undefined')_oldestIdx=data.session._messages_offset||0;renderMessages();
     }
@@ -1860,7 +1860,7 @@ async function cmdUndo(){
     const r=await api('/api/session/undo',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
-// Keep upstream bounded redraw, with canonical revision ownership retired.
+    // Keep upstream bounded redraw, with canonical revision ownership retired.
     const data=await api('/api/session?session_id='+encodeURIComponent(activeSid)+'&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1');
     if(!S.session||S.session.session_id!==activeSid)return;
     if(data&&data.session){

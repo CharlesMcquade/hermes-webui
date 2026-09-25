@@ -250,6 +250,29 @@ console.log(JSON.stringify(undoState));
     assert out["projectionPaths"] == ["/workspace/KEPT.md"]
 
 
+def test_artifact_projection_never_falls_back_to_partial_resident_rows():
+    collect = _extract_from([_WORKSPACE_SOURCE], "collectSessionArtifacts")
+    match = _extract_from([_WORKSPACE_SOURCE], "_artifactProjectionMatches")
+    out = _run_node("\n".join([
+        _HARNESS, "let _loadSessionGeneration=4;", _NORMALIZE, match, collect,
+        """
+S.session={session_id:'a',profile:'default',regeneration_revision:2};
+S.messages=[{tool_calls:[{function:{name:'write_file',arguments:'{"path":"/partial"}'}}]}];
+S.toolCalls=[{name:'write_file',args:{path:'/partial'}}];
+const unavailable=collectSessionArtifacts();
+S.session._artifactProjection={session_id:'a',profile:'default',revision:2,
+  generation:4,items:[{path:'/old'},{path:'/new'},{path:'/old'}]};
+const complete=collectSessionArtifacts();
+_loadSessionGeneration=5;
+const stale=collectSessionArtifacts();
+console.log(JSON.stringify({unavailable,complete,stale}));
+""",
+    ]))
+    assert out == {"unavailable": None, "complete": [
+        {"path": "/old", "source": "tool"}, {"path": "/new", "source": "tool"},
+    ], "stale": None}
+
+
 def test_late_undo_response_for_other_session_is_ignored():
     undo = _extract_from([_COMMANDS_SOURCE], "cmdUndo")
     install = _extract_from([_SESSIONS_SOURCE], "_installCanonicalSession")

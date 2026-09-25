@@ -20232,23 +20232,19 @@ async function submitEdit(msgIdx, newText) {
       // exist. Re-fetch the canonical session so revision ownership and the
       // derived projection retire/rebuild together instead of trusting the
       // local slice (which carries no truncation metadata).
+      let canonicalInstalled=false;
       try{
         const canonical=await api('/api/session?session_id='+encodeURIComponent(initialSid));
         if(!S.session || S.session.session_id !== initialSid) return;
         if(canonical&&canonical.session&&typeof _installCanonicalSession==='function'){
-          _installCanonicalSession(canonical.session);
+          if(!_installCanonicalSession(canonical.session)) return;
+          canonicalInstalled=true;
         }
-      }catch(_){ /* keep the local slice; projection retirement below still applies */ }
-      if(S.session&&typeof _artifactProjectionForSnapshot==='function'){
-        // The local slice (or a failed canonical fetch) must not keep an
-        // artifact projection over truncated history: retire and rebuild
-        // from exactly the rows that remain.
+      }catch(_){ /* canonical history unavailable; never claim a partial projection */ }
+      if(!canonicalInstalled){
         delete S.session._artifactProjection;
-        if(!S.session._messages_truncated && !(S.session._messages_offset>0) && !S.session._state_db_rows_capped){
-          S.session._artifactProjection=_artifactProjectionForSnapshot(S.session);
-        }
       }
-      S.messages = S.messages.slice(0, absoluteKeepCount);
+      S.messages = canonicalInstalled ? (S.session.messages||[]) : S.messages.slice(0, absoluteKeepCount);
       renderMessages();
       $('msg').value = newText;
       // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
