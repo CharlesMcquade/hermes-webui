@@ -239,3 +239,144 @@ def test_gateway_stop_between_lookup_and_registration_releases_prestart_owners(m
         with config.STREAMS_LOCK:
             config.STREAMS.pop(stream_id, None)
         config.unregister_active_run(stream_id)
+
+
+@pytest.mark.parametrize('producer', ['chat', 'btw', 'background'])
+def test_launch_failure_retires_transferred_admission(monkeypatch, tmp_path, producer):
+    from api import config, routes, turn_journal, background
+
+    monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(tmp_path))
+    session = SimpleNamespace(session_id='7496-launch-' + producer, title='Existing',
+                              active_stream_id=None, pending_user_message=None,
+                              pending_started_at=None, profile=None, workspace='/tmp',
+                              model='test', model_provider=None, messages=[],
+                              save=lambda **kw: None)
+    monkeypatch.setattr(routes, 'get_session', lambda sid: session)
+    monkeypatch.setattr(routes, '_agent_runtime_barrier_response', lambda **kw: None)
+    monkeypatch.setattr(routes, '_cleanup_chat_start_launch_failure', lambda *a: None)
+    monkeypatch.setattr(routes, 'set_last_workspace', lambda *a, **k: None)
+    monkeypatch.setattr(routes, '_is_hidden_empty_session', lambda s: False)
+    monkeypatch.setattr(turn_journal, 'append_turn_journal_event', lambda *a, **k: {})
+    monkeypatch.setattr(routes, 'j', lambda handler, payload, status=200: payload)
+    if producer != 'chat':
+        from api import models
+        child = SimpleNamespace(**vars(session))
+        child.session_id += '-child'
+        monkeypatch.setattr(models, 'new_session', lambda **kw: child)
+        # Retain the real tracking state to prove a failed launch leaves no phantom task.
+        background.cleanup_btw(session.session_id)
+        for task in background.get_background_tasks(session.session_id):
+            background.discard_background(session.session_id, task['task_id'])
+    else:
+        def prepare(s, *, stream_id, **kwargs):
+            s.active_stream_id = stream_id
+            s.pending_user_message = kwargs['msg']
+            s.pending_started_at = 1.0
+            config.register_session_writeback_owner(s.session_id, stream_id)
+        monkeypatch.setattr(routes, '_prepare_chat_start_session_for_stream', prepare)
+
+    class FailedThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            config.enter_restart_drain('test')
+            assert any(row.get('phase') == 'starting' for row in config.ACTIVE_RUNS.values())
+            raise RuntimeError('thread start failed')
+
+    monkeypatch.setattr(routes.threading, 'Thread', FailedThread)
+    try:
+        with pytest.raises(RuntimeError, match='thread start failed'):
+            if producer == 'chat':
+                routes._start_chat_stream_for_session(
+                    session, msg='hello', workspace='/tmp', model='test',
+                    external_runtime_owned=False)
+            elif producer == 'btw':
+                routes._handle_btw(object(), {'session_id': session.session_id, 'question': 'hello'})
+            else:
+                routes._handle_background(object(), {'session_id': session.session_id, 'prompt': 'hello'})
+        assert not any(key.startswith('admission:') or row.get('session_id') in
+                       {session.session_id, session.session_id + '-child'}
+                       for key, row in config.ACTIVE_RUNS.items())
+        if producer == 'btw':
+            assert background.cleanup_btw(session.session_id) is None
+        elif producer == 'background':
+            assert background.get_background_tasks(session.session_id) == []
+    finally:
+        config.exit_restart_drain()
+        for key in list(config.ACTIVE_RUNS):
+            if key.startswith('admission:') or key.startswith('7496-launch-'):
+                config.unregister_active_run(key)
+
+
+def test_real_worker_stop_route_between_transfer_and_registration(monkeypatch, tmp_path):
+    """Stop owns the lock edge even if the actual local worker has only peeked."""
+    from urllib.parse import urlsplit
+    from api import config, routes, streaming, turn_journal, gateway_chat
+
+    monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(tmp_path))
+    session = SimpleNamespace(session_id='7496-real-worker', title='Existing',
+                              active_stream_id=None, pending_user_message=None,
+                              pending_started_at=None, profile=None, save=lambda: None)
+    peeked = threading.Event()
+    release = threading.Event()
+    original_peek = streaming.peek_stream
+
+    def gated_peek(key):
+        result = original_peek(key)
+        peeked.set()
+        assert release.wait(5)
+        return result
+
+    def prepare(s, *, stream_id, **kwargs):
+        s.active_stream_id = stream_id
+        s.pending_user_message = kwargs['msg']
+        s.pending_started_at = 1.0
+        config.register_session_writeback_owner(s.session_id, stream_id)
+
+    monkeypatch.setattr(streaming, 'peek_stream', gated_peek)
+    monkeypatch.setattr(routes, '_prepare_chat_start_session_for_stream', prepare)
+    monkeypatch.setattr(routes, 'set_last_workspace', lambda *a, **k: None)
+    monkeypatch.setattr(routes, '_is_hidden_empty_session', lambda s: False)
+    monkeypatch.setattr(turn_journal, 'append_turn_journal_event', lambda *a, **k: {})
+    monkeypatch.setattr(routes, '_stream_id_visible_to_request_profile', lambda *a: True)
+    monkeypatch.setattr(gateway_chat, 'wait_for_gateway_run_id', lambda *a: (False, None))
+    monkeypatch.setattr(routes, 'get_session', lambda sid: session)
+    threads = []
+    original_thread = threading.Thread
+
+    def thread_factory(*args, **kwargs):
+        thread = original_thread(*args, **kwargs)
+        threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(routes.threading, 'Thread', thread_factory)
+    stream_id = None
+    try:
+        result = routes._start_chat_stream_for_session(
+            session, msg='hello', workspace='/tmp', model='test', external_runtime_owned=False)
+        stream_id = result['stream_id']
+        assert peeked.wait(5)
+        assert config.ACTIVE_RUNS[stream_id]['phase'] == 'starting'
+        config.enter_restart_drain('test')
+        responses = []
+        monkeypatch.setattr(routes, 'j', lambda handler, payload, status=200: responses.append((status, payload)))
+        routes.handle_get(object(), urlsplit('/api/chat/cancel?stream_id=' + stream_id))
+        assert responses[-1] == (200, {'ok': True, 'cancelled': True, 'stream_id': stream_id})
+        assert config.ACTIVE_RUNS[stream_id]['phase'] == 'cancelling'
+        release.set()
+        threads[0].join(5)
+        assert not threads[0].is_alive()
+        assert stream_id not in config.ACTIVE_RUNS
+        assert stream_id not in config.STREAMS
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(5)
+        config.exit_restart_drain()
+        if stream_id:
+            config.unregister_active_run(stream_id)
+            with config.STREAMS_LOCK:
+                config.STREAMS.pop(stream_id, None)
+            config.unregister_stream_owner(stream_id)
+            config.clear_session_writeback_owner_if_owned(session.session_id, stream_id)

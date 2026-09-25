@@ -23343,6 +23343,8 @@ def _handle_btw_admitted(handler, body, *, reservation=None):
     except Exception:
         api_config.unregister_active_run(stream_id)
         _cleanup_chat_start_launch_failure(ephemeral, stream_id)
+        from api.background import cleanup_btw
+        cleanup_btw(body["session_id"], stream_id=stream_id)
         raise
     return j(handler, {"stream_id": stream_id, "session_id": ephemeral.session_id, "parent_session_id": body["session_id"]})
 
@@ -23477,6 +23479,8 @@ def _handle_background_admitted(handler, body, *, reservation=None):
     except Exception:
         api_config.unregister_active_run(stream_id)
         _cleanup_chat_start_launch_failure(bg, stream_id)
+        from api.background import discard_background
+        discard_background(parent_sid, task_id)
         raise
     return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
 
