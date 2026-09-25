@@ -641,6 +641,9 @@ function _cancelMessageVirtualizedRender(){
 }
 function _messageIsRenderable(m){
   if(!m||!m.role||m.role==='tool') return false;
+  // Internal delegation handoffs remain in S.messages for model/recovery state,
+  // but never acquire a transcript row (including attachment-only rows).
+  if(m._source==='delegation_wakeup') return false;
   if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;

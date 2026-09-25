@@ -3886,6 +3886,7 @@ async function _loadOlderMessages() {
     const addedRenderable = olderMsgs.filter(m=>{
       if(typeof _messageIsRenderable==='function') return _messageIsRenderable(m);
       if(!m||!m.role||m.role==='tool') return false;
+      if(m._source==='delegation_wakeup') return false;
       if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(m)) return false;
       if(typeof _isPreservedCompressionTaskListMessage==='function'&&_isPreservedCompressionTaskListMessage(m)) return false;
       if(typeof _isRecoveryControlMessage==='function'&&_isRecoveryControlMessage(m)) return false;
