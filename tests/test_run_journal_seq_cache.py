@@ -314,6 +314,75 @@ def test_normal_sse_publish_cannot_be_overtaken_by_steer(tmp_path, monkeypatch):
     ]
 
 
+def test_metering_is_live_only_and_does_not_advance_replay_cursor(tmp_path):
+    writer = run_journal.RunJournalWriter("meter_session", "meter_run", session_dir=tmp_path)
+    published = []
+    first = writer.append_and_publish_sse_event(
+        "token", {"text": "first"}, published.append
+    )
+    metering = writer.append_and_publish_sse_event(
+        "metering", {"tps": 12}, published.append
+    )
+    second = writer.append_and_publish_sse_event(
+        "token", {"text": "second"}, published.append
+    )
+    journal = run_journal.read_run_events("meter_session", "meter_run", session_dir=tmp_path)
+    assert metering is None
+    assert published == [first, None, second]
+    assert [row["event"] for row in journal["events"]] == ["token", "token"]
+    assert [row["event_id"] for row in journal["events"]] == ["meter_run:1", "meter_run:2"]
+
+
+def test_live_metering_publish_keeps_ordering_lock_against_steer(tmp_path):
+    writer = run_journal.RunJournalWriter("meter_race", "meter_run", session_dir=tmp_path)
+    in_publish = threading.Event()
+    release_publish = threading.Event()
+    steer_finished = threading.Event()
+    published = []
+    errors = []
+
+    def publish_metering(event):
+        published.append(event)
+        in_publish.set()
+        assert release_publish.wait(10)
+
+    def meter_worker():
+        try:
+            writer.append_and_publish_sse_event("metering", {"tps": 12}, publish_metering)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def steer_worker():
+        try:
+            accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+                "steer_delivered", {"text": "guidance"}, lambda: True,
+                publish=lambda item: published.append(item),
+            )
+            assert accepted and event is not None and reason is None and error is None
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            steer_finished.set()
+
+    meter_thread = threading.Thread(target=meter_worker)
+    meter_thread.start()
+    try:
+        assert in_publish.wait(10)
+        steer_thread = threading.Thread(target=steer_worker)
+        steer_thread.start()
+        assert not steer_finished.wait(0.1), "Steer overtook live metering publication"
+    finally:
+        release_publish.set()
+    meter_thread.join(10)
+    steer_thread.join(10)
+    assert not meter_thread.is_alive() and not steer_thread.is_alive()
+    assert errors == []
+    assert published[0] is None
+    assert published[1]["event_id"] == "meter_run:1"
+    journal = run_journal.read_run_events("meter_race", "meter_run", session_dir=tmp_path)
+    assert [row["event"] for row in journal["events"]] == ["steer_delivered"]
+
+
 def test_steer_delivery_fsyncs_before_durable_success(tmp_path, monkeypatch):
     writer = run_journal.RunJournalWriter(
         "sess_fsync", "run_fsync", session_dir=tmp_path
