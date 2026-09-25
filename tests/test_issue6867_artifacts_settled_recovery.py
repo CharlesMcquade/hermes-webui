@@ -64,6 +64,7 @@ def _page(browser):
     page.add_script_tag(
         content="""
         window.S = {session: null, messages: [], toolCalls: []};
+        window._loadSessionGeneration = 0;
         window.$ = id => document.getElementById(id);
         window.esc = value => String(value).replace(/[&<>\"']/g, c =>
           ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));
@@ -88,12 +89,16 @@ def test_recovery_replaces_stale_artifact_without_session_switch(browser):
                 (!window._loadingSessionId || window._loadingSessionId === sid);
               S.session = {session_id:'session-a', workspace:'/workspace'};
               S.toolCalls = [{name:'write_file', args:{path:'/workspace/old/path.md'}, done:true}];
+              S.session.tool_calls = S.toolCalls;
+              S.session._artifactProjection = _artifactProjectionForSnapshot(S.session);
               renderSessionArtifacts();
               const before = {old:!!document.querySelector('[data-artifact-path="/workspace/old/path.md"]')};
               const recovery = (async () => {
                 await Promise.resolve();
                 S.messages = [{role:'assistant', content:'settled'}];
                 S.toolCalls = [{name:'write_file', args:{path:'/workspace/new/path.md'}, done:true}];
+                S.session.tool_calls = S.toolCalls;
+                S.session._artifactProjection = _artifactProjectionForSnapshot(S.session);
                 return projectSessionArtifactsForOwner('session-a');
               })();
               const projected = await recovery;
@@ -228,23 +233,36 @@ def test_restore_settled_session_projects_through_production_path(browser):
             async () => {
               S.session = {session_id:'session-a', workspace:'/workspace'};
               S.toolCalls = [{name:'write_file', args:{path:'/workspace/old.md'}, done:true}];
+              S.session.tool_calls = S.toolCalls;
+              S.session._artifactProjection = _artifactProjectionForSnapshot(S.session);
               renderSessionArtifacts();
-              window.api = async () => ({session:{
-                session_id:'session-b', workspace:'/workspace', active_stream_id:null,
-                pending_user_message:null, messages:[], tool_calls:[
+              window.artifactFetches = [];
+              window.api = async url => {
+                artifactFetches.push(url);
+                return {session:{
+                session_id:'session-a', workspace:'/workspace', active_stream_id:null,
+                pending_user_message:null, messages:[],
+                _messages_truncated: artifactFetches.length === 1,
+                _messages_offset: artifactFetches.length === 1 ? 3 : 0,
+                tool_calls:[
                   {name:'write_file', args:{path:'/workspace/new.md'}, done:true}
                 ]
-              }});
+              }};
+              };
               const status = await _restoreSettledSession({close:()=>{}}, {status:true});
               return {
                 status,
                 error: window.restoreError || null,
                 old: !!document.querySelector('[data-artifact-path="/workspace/old.md"]'),
-                fresh: !!document.querySelector('[data-artifact-path="/workspace/new.md"]')
+                fresh: !!document.querySelector('[data-artifact-path="/workspace/new.md"]'),
+                fetchedFull: artifactFetches.length === 2 &&
+                  artifactFetches[1].includes('messages=1&resolve_model=0') &&
+                  !artifactFetches[1].includes('msg_limit=30')
               };
             }
             """
         )
-        assert result == {"status": "restored", "error": None, "old": False, "fresh": True}
+        assert result == {"status": "restored", "error": None, "old": False,
+                          "fresh": True, "fetchedFull": True}
     finally:
         page.close()
