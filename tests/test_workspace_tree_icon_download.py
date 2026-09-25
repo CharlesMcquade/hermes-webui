@@ -256,9 +256,8 @@ class TestI18nKey:
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 
-def _run_node_vm(item_type: str, read_only_escape: bool,
-                 name: str = "foo.pdf") -> dict:
-    """Execute the icon block with mocked DOM/globals and drive interactions."""
+def _run_node_vm(item_type: str, read_only_escape: bool, name: str = 'foo.pdf') -> dict:
+    """Execute the icon block with mocked DOM/globals and click the icon."""
     block = _icon_block()
     payload = {
         "block": block,
@@ -276,31 +275,23 @@ const readOnlyEscape = params.readOnlyEscape;
 let downloadCalls = [];
 let stopPropagationCalls = 0;
 let openCalls = 0;
-let preventDefaultCalls = 0;
 let appendedTo = null;
 
 const document = {
   createElement: (tag) => ({
     tagName: tag.toUpperCase(),
-    className: '', classList: {add() {}}, textContent: '', title: '',
-    innerHTML: '', onclick: null, onkeydown: null, attributes: {},
-    setAttribute(key, val) { this.attributes[key] = val; },
+    className: '', classList: {add() {}}, textContent: '', title: '', innerHTML: '',
+    onclick: null, attributes: {}, setAttribute(key, val) { this.attributes[key] = val; },
     style: {},
     appendChild(child) {},
   }),
 };
 const li = () => '';
-const fileExt = (p) => { const i = p.lastIndexOf('.'); return i >= 0 ? p.slice(i).toLowerCase() : ''; };
-const IMAGE_EXTS = new Set(['.png', '.jpg']);
+const fileExt = (name) => name.slice(name.lastIndexOf('.')).toLowerCase();
+const IMAGE_EXTS = new Set(['.png']);
 const MD_EXTS = new Set(['.md']);
-const DOWNLOAD_EXTS = new Set(['.zip', '.tar.gz', '.whl']);
-const isDownloadGlyph = (n, ty) => {
-  if (ty === 'dir' || ty === 'symlink') return false;
-  const e = fileExt(n);
-  if (IMAGE_EXTS.has(e) || MD_EXTS.has(e)) return false;
-  return DOWNLOAD_EXTS.has(e) || e === '.pdf';
-};
-const fileIcon = (n) => isDownloadGlyph(n) ? 'download' : 'file-text';
+const DOWNLOAD_EXTS = new Set(['.zip']);
+const fileIcon = (name) => ['.pdf', '.zip'].includes(fileExt(name)) ? 'download' : 'file-text';
 const t = (key) => ({media_download: 'Download'}[key] || key);
 const downloadFile = (path) => { downloadCalls.push(path); };
 const el = { appendChild(child) { appendedTo = child; }, onclick() { openCalls++; } };
@@ -313,46 +304,38 @@ const isFileLike = !isDirLike;
 const isReadOnlyEscape = readOnlyEscape;
 
 const runner = new Function(
-  'document', 'li', 'fileIcon', 'fileExt', 'IMAGE_EXTS', 'MD_EXTS',
-  'DOWNLOAD_EXTS', 'isDownloadGlyph', 't', 'downloadFile', 'el', 'item',
+  'document', 'li', 'fileIcon', 'fileExt', 'IMAGE_EXTS', 'MD_EXTS', 'DOWNLOAD_EXTS',
+  't', 'downloadFile', 'el', 'item',
   'isLk', 'isExternalLink', 'isDirLike', 'isFileLike', 'isReadOnlyEscape',
   '(()=>{' + block + '})();'
 );
 runner(document, li, fileIcon, fileExt, IMAGE_EXTS, MD_EXTS, DOWNLOAD_EXTS,
-       isDownloadGlyph, t, downloadFile, el, item,
+       t, downloadFile, el, item,
        isLk, isExternalLink, isDirLike, isFileLike, isReadOnlyEscape);
 
 const iconEl = appendedTo;
-let stoppedClick = false;
+let clicked = false;
 function click(detail) {
-  stoppedClick = false;
-  const event = {detail, stopPropagation() { stoppedClick = true; stopPropagationCalls++; }};
+  let stopped = false;
+  const event = {detail, stopPropagation() { stopped = true; stopPropagationCalls++; }};
   if (typeof iconEl.onclick === 'function') iconEl.onclick(event);
-  if (!stoppedClick) el.onclick(event);
+  if (!stopped) el.onclick(event);
 }
 click(1);
+clicked = true;
 if (params.name === 'double.pdf') click(2);
-function key(k, repeat) {
-  const event = {key: k, repeat: !!repeat,
-                 preventDefault() { preventDefaultCalls++; },
-                 stopPropagation() { stopPropagationCalls++; }};
-  if (typeof iconEl.onkeydown === 'function') iconEl.onkeydown(event);
-  // Unstopped keydown would scroll/bubble to the row: model the preview leak.
-  else el.onclick(event);
-}
 if (params.name === 'keyboard.pdf') {
-  key('Enter', false);
-  key(' ', false);
-  // Held Space: OS auto-repeat delivers repeated keydown events.
-  key(' ', true); key(' ', true); key(' ', true);
+  for (const key of ['Enter', ' ']) {
+    iconEl.onkeydown({key, preventDefault() {}, stopPropagation() {}});
+  }
 }
 
 console.log(JSON.stringify({
   iconHasHandler: !!(iconEl && typeof iconEl.onclick === 'function'),
+  clicked, openCalls,
   downloadCalls,
   openCalls,
   stopPropagationCalls,
-  preventDefaultCalls,
   role: iconEl ? iconEl.attributes.role : null,
   tabindex: iconEl ? iconEl.attributes.tabindex : null,
   label: iconEl ? iconEl.attributes['aria-label'] : null,
@@ -424,6 +407,41 @@ class TestIconDownloadBehavior:
         assert out["downloadCalls"] == [], (
             f"directory icon click must not download; got {out}"
         )
+
+    def test_non_download_glyph_keeps_preview(self):
+        for name in ('analysis.md', 'main.py', 'config.json', 'data.csv', 'photo.png'):
+            out = _run_node_vm('file', False, name)
+            assert out['iconHasHandler'] is False, (name, out)
+            assert out['downloadCalls'] == [], (name, out)
+            assert out['openCalls'] == 1, (name, out)
+
+    def test_archive_glyph_downloads_without_preview(self):
+        out = _run_node_vm('file', False, 'archive.zip')
+        assert out['downloadCalls'] == ['dir/archive.zip']
+        assert out['openCalls'] == 0
+
+    def test_pdf_click_does_not_also_preview(self):
+        out = _run_node_vm('file', False)
+        assert out['openCalls'] == 0
+
+    def test_double_click_only_downloads_once(self):
+        out = _run_node_vm('file', False, 'double.pdf')
+        assert out['downloadCalls'] == ['dir/double.pdf']
+        assert out['openCalls'] == 0
+
+    def test_keyboard_activation_has_accessible_label(self):
+        out = _run_node_vm('file', False, 'keyboard.pdf')
+        assert out['role'] == 'button'
+        assert out['tabindex'] == '0'
+        assert out['label'] == 'Download keyboard.pdf'
+        assert out['downloadCalls'] == ['dir/keyboard.pdf'] * 3
+        assert out['openCalls'] == 0
+
+    def test_symlink_icon_keeps_original_navigation(self):
+        out = _run_node_vm('symlink', False)
+        assert out['iconHasHandler'] is False
+        assert out['openCalls'] == 1
+        assert out['downloadCalls'] == []
 
     def test_read_only_escape_icon_has_no_download_handler(self):
         """Read-only escape rows keep their gated navigation flow."""

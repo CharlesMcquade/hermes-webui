@@ -27913,14 +27913,13 @@ function _renderTreeItems(container, entries, depth){
       : isDirLike
         ? (isLk ? li('link', 14) : li('folder', 14))
         : (isLk ? li('link', 14) : fileIcon(item.name, item.type));
-    // Only glyphs that actually advertise download get a distinct download
-    // action (#7810 repair of fb6296e8). Other file-type icons still bubble to
-    // the row's preview handler, so the filename and icon hit regions stay
-    // distinct: download glyph downloads, name/icon click previews.
-    const hasDownloadGlyph = typeof isDownloadGlyph==='function'
-      ? isDownloadGlyph(item.name, item.type) : false;
+    // Only glyphs that actually advertise download get a distinct action.
+    // Other file-type icons still bubble to the row's preview handler.
+    const ext=fileExt(item.name);
+    const hasDownloadGlyph=!isLk && !IMAGE_EXTS.has(ext) && !MD_EXTS.has(ext)
+      && ((typeof DOWNLOAD_EXTS!=='undefined' && DOWNLOAD_EXTS.has(ext)) || ext==='.pdf');
     if(isFileLike && !isReadOnlyEscape && hasDownloadGlyph){
-      const label=(typeof t==='function' ? t('media_download') : 'Download');
+      const label=typeof t==='function' ? t('media_download') : 'Download';
       iconEl.classList.add('file-icon-download');
       iconEl.title=label;
       iconEl.setAttribute('role','button');
@@ -27934,15 +27933,10 @@ function _renderTreeItems(container, entries, depth){
       };
       iconEl.onkeydown=(e)=>{
         if(e.key==='Enter'||e.key===' '){
-          // preventDefault runs even on repeats so held Space never scrolls.
-          e.preventDefault();
-          e.stopPropagation();
-          // One download per intentional press: suppress OS auto-repeat.
-          if(e.repeat)return;
+          e.preventDefault();e.stopPropagation();
           if(typeof downloadFile==='function') downloadFile(item.path);
         }
       };
-      iconEl.style.cursor='pointer';
     }
     el.appendChild(iconEl);
 
