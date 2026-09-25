@@ -218,7 +218,7 @@ def test_locale_switch_updates_width_control_text_and_accessible_names(page):
         assert page.locator('#composerContentWidthBtn').get_attribute('aria-label') == expected['button']
         assert page.locator('#composerContentWidthBtn').get_attribute('data-tooltip') == expected['button']
         assert page.locator('#composerContentWidthPopup').get_attribute('aria-label') == expected['list']
-        for mode, (text, label) in zip(('default', 'wide', 'full'), expected['modes']):
+        for mode, (text, label) in zip(('default', 'wide', 'full'), expected['modes'], strict=True):
             option = page.locator(f'[data-content-width-value="{mode}"]')
             assert option.locator('span').inner_text() == text
             assert option.get_attribute('aria-label') == label
