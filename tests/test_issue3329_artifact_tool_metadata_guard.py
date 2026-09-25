@@ -64,9 +64,11 @@ def _collect_via_node(messages):
     )
     driver = (
         "const S = { toolCalls: [], messages: JSON.parse(process.argv[1]), "
-        "session: { workspace: '/ws' } };\n"
+        "session: { workspace: '/ws', session_id: 'guard', "
+        "_artifactProjection: {session_id:'guard',profile:'default',revision:undefined,generation:0, "
+        "items: []}} };\nlet _loadSessionGeneration=0;\n"
         + fns + "\n"
-        + "const out = collectSessionArtifacts();\n"
+        + "const out = _harvestArtifactCandidatesFromMessages(S.messages);\n"
         + "process.stdout.write(JSON.stringify(out.map(x => x.path)));\n"
     )
     r = subprocess.run(

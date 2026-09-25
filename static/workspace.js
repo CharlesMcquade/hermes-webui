@@ -611,19 +611,13 @@ function collectSessionArtifacts(){
     if(!path || seen.has(path)) return;
     seen.add(path); items.push({path, source});
   };
-  // Source 1: session-level tool call summaries (may be empty when messages
-  // carry their own tool metadata — see _syncToolCallsForLoadedMessages).
-  for(const tc of (S.toolCalls || [])){
-    for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool');
-  }
-  // Source 2 & 3: message-level data — both text-mined diffs and structured
-  // tool_calls / tool_use content blocks that survive the S.toolCalls clear.
-  for(const a of _harvestArtifactCandidatesFromMessages(S.messages || [])){
-    push(a.path, a.kind || 'tool');
-  }
   const projection=S.session&&S.session._artifactProjection;
   if(_artifactProjectionMatches(S.session,projection)){
     for(const a of projection.items) push(a.path,a.kind||'tool');
+  }else if(S.session){
+    // Resident rows are not authoritative for settled history; never silently
+    // show a partial artifact list after a clipped or failed canonical load.
+    return null;
   }
   return items.slice(0, 50);
 }
@@ -634,9 +628,13 @@ function renderSessionArtifacts(){
   const count = $('workspaceArtifactsCount');
   if(!root) return;
   const items = collectSessionArtifacts();
-  if(count) count.textContent = String(items.length);
+  if(count) count.textContent = items ? String(items.length) : '—';
   if(!S.session){
     root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
+    return;
+  }
+  if(!items){
+    root.innerHTML = '<div class="workspace-artifact-empty">Artifacts unavailable: complete session history could not be loaded.</div>';
     return;
   }
   if(!items.length){

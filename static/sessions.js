@@ -213,7 +213,8 @@ function _installCanonicalSession(sessionPayload){
   // that arrives after the user switched sessions is dropped entirely — its
   // caller's own activeSid guard already dropped most of these, but this is
   // the single place the invariant holds for every present and future caller.
-  if(!S.session||S.session.session_id!==sessionPayload.session_id) return false;
+  if(!S.session||S.session.session_id!==sessionPayload.session_id ||
+     (sessionPayload.profile||S.activeProfile||'default')!==(S.activeProfile||'default')) return false;
   S.session=sessionPayload;
   // Derived evidence owned by the replaced revision is retired first: the
   // projection carries the OLD revision and _artifactProjectionMatches will
