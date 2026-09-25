@@ -170,12 +170,67 @@ def test_picker_pointer_keyboard_and_actual_geometry(page, width):
     page.keyboard.press('ArrowRight')
     page.keyboard.press('Enter')
     assert page.locator('html').get_attribute('data-content-width') == 'wide'
+    assert not page.locator('#composerContentWidthPopup').is_visible()
+    assert button.evaluate('(el) => el===document.activeElement')
     button.click()
     page.keyboard.press('Escape')
     assert button.evaluate('(el) => el===document.activeElement')
     button.click()
     page.mouse.click(width / 2, 100)
     assert not page.locator('#composerContentWidthPopup').is_visible()
+
+
+@pytest.mark.parametrize('width', [1600, 900, 390])
+def test_unbroken_prose_wraps_without_changing_table_or_code_scroll(page, width):
+    page.set_viewport_size({'width': width, 'height': 1000})
+    page.evaluate("""() => {
+      const body=document.createElement('div');
+      body.className='msg-body'; body.id='wrapFixture';
+      body.innerHTML=['h1','h2','h3','h4','h5','h6','p','blockquote','li'].map(tag =>
+        `<${tag}><a>${'abcdef'.repeat(65)}</a></${tag}>`).join('') +
+        `<pre><code>${'abcdef'.repeat(65)}</code></pre>` +
+        `<div class="md-table-scroll"><table><tr><th>${'abcdef'.repeat(65)}</th></tr></table></div>`;
+      document.getElementById('msgInner').appendChild(body);
+    }""")
+    result = page.evaluate("""() => {
+      const body=document.querySelector('#wrapFixture');
+      return {
+        prose:[...body.querySelectorAll('h1,h2,h3,h4,h5,h6,p,blockquote,li,a')].map(el => ({
+          tag:el.tagName, width:el.scrollWidth, client:el.clientWidth})),
+        table:body.querySelector('.md-table-scroll').scrollWidth > body.querySelector('.md-table-scroll').clientWidth,
+        code:getComputedStyle(body.querySelector('pre')).overflowX
+      };
+    }""")
+    assert all(el['width'] <= el['client'] + 2 for el in result['prose']), result
+    assert result['table'] and result['code'] in ('auto', 'scroll', 'hidden'), result
+
+
+def test_locale_switch_updates_width_control_text_and_accessible_names(page):
+    page.add_script_tag(content=(ROOT / 'static/i18n.js').read_text())
+    page.evaluate("_pickContentWidth('wide')")
+    for locale in ('en', 'fr', 'ja', 'en'):
+        page.evaluate("lang => { setLocale(lang); applyLocaleToDOM(); }", locale)
+        expected = page.evaluate("""() => ({
+          button:t('content_width_current',t('content_width_wide')),
+          list:t('content_width_label'), modes:['default','wide','full'].map(mode =>
+            [t('content_width_'+mode),t('content_width_'+mode+'_aria')])
+        })""")
+        assert page.locator('#composerContentWidthBtn').get_attribute('aria-label') == expected['button']
+        assert page.locator('#composerContentWidthBtn').get_attribute('data-tooltip') == expected['button']
+        assert page.locator('#composerContentWidthPopup').get_attribute('aria-label') == expected['list']
+        for mode, (text, label) in zip(('default', 'wide', 'full'), expected['modes']):
+            option = page.locator(f'[data-content-width-value="{mode}"]')
+            assert option.locator('span').inner_text() == text
+            assert option.get_attribute('aria-label') == label
+    assert page.evaluate("LOCALES.en.content_width_default !== LOCALES.fr.content_width_default")
+
+
+def test_width_locales_have_complete_independent_labels(page):
+    page.add_script_tag(content=(ROOT / 'static/i18n.js').read_text())
+    assert page.evaluate("""() => Object.values(LOCALES).every(locale =>
+      ['content_width_label','content_width_current',...['default','wide','full'].flatMap(mode =>
+        ['content_width_'+mode,'content_width_'+mode+'_aria'])].every(key =>
+          typeof locale[key]==='string' && locale[key].length>0))""")
 
 
 def test_tables_enhance_idempotently_sort_filter_and_scroll(page):
