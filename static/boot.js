@@ -64,6 +64,7 @@ async function cancelStream(reason){
     setBusy(false);
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
+    if(typeof _clearPendingPromptsForSession==='function') _clearPendingPromptsForSession(sid);
     // Surface persistence failure honestly: when the backend reports
     // persistence_failed, the terminal fallback notice could not be saved —
     // show a truthful warning instead of the generic "stream no longer
@@ -78,6 +79,7 @@ async function cancelStream(reason){
     // persistence-failure warning against the originating cancellation
     // transaction without mutating successor B's state.
     showToast(t('cancel_persistence_warning'),4000,'warning');
+
   }
   // Return a structured cancellation result matching cancelSessionStream()'s
   // contract so callers can distinguish success from persistence failure
@@ -124,6 +126,9 @@ async function cancelSessionStream(session){
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
   }
+  if(typeof _clearPendingPromptsForSession==='function') _clearPendingPromptsForSession(sid);
+  if(typeof stopApprovalPollingForSession==='function') stopApprovalPollingForSession(sid);
+  if(typeof stopClarifyPollingForSession==='function') stopClarifyPollingForSession(sid);
   if(typeof _approvalSessionId!=='undefined' && _approvalSessionId===sid){
     stopApprovalPolling();
     hideApprovalCard(true);
@@ -2421,9 +2426,29 @@ window._isImeEnter=_isImeEnter;
 function _hasFinePointerCoexisting(){
   try{ return matchMedia('(any-pointer:fine)').matches; }catch(_){ return false; }
 }
+// Detect phone software keyboards without undoing #3076's hardware-input
+// guard for tablets. Some iOS Safari versions report (any-pointer:fine) on a
+// plain iPhone, so phone UAs bypass that unreliable signal. Tablets and
+// touch-capable desktop UAs still require a coarse pointer with no fine pointer.
+function _isTouchOnlyDevice(){
+  const ua=navigator.userAgent||'';
+  if(/iPhone|iPod/i.test(ua)) return true;
+  if(/Android.*Mobile/i.test(ua)) return true;
+  try{
+    return matchMedia('(pointer:coarse)').matches&&!_hasFinePointerCoexisting();
+  }catch(_){}
+  return false;
+}
 function _isNumpadEnter(e){
   return e.key==='Enter'&&(e.code==='NumpadEnter'||e.location===KeyboardEvent.DOM_KEY_LOCATION_NUMPAD);
 }
+// Initialise _sendKey synchronously from the localStorage cache so the keydown
+// handler below has the correct value before the async /api/settings call
+// (line ~3231) resolves. Without this, on slow mobile networks the race window
+// leaves _sendKey=undefined, _mobileDefault evaluates false, and plain Enter
+// falls through to the `else { send() }` branch — sending the message instead
+// of inserting a newline (issue: mobile Enter sends on fresh page load).
+try{ window._sendKey=localStorage.getItem('hermes-pref-send_key')||'enter'; }catch(_){ window._sendKey='enter'; }
 $('msg').addEventListener('keydown',e=>{
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
@@ -2457,9 +2482,8 @@ $('msg').addEventListener('keydown',e=>{
   if(e.key==='Enter'){
     if(_isImeEnter(e)){return;}
     const isNumpadEnter=_isNumpadEnter(e);
-    const _mobileDefault=matchMedia('(pointer:coarse)').matches
-      &&!_hasFinePointerCoexisting()
-      &&window._sendKey==='enter';
+    const _mobileDefault=_isTouchOnlyDevice()
+      &&(window._sendKey==='enter'||typeof window._sendKey==='undefined');
     if(window._sendKey==='shift+enter'){
       if(e.shiftKey){e.preventDefault();send();}
     } else if(window._sendKey==='ctrl+enter'||_mobileDefault){
@@ -3465,8 +3489,17 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     localStorage.setItem('hermes-font-size',fontSize);
     _applyFontSize(fontSize);
     if(typeof setLocale==='function'){
+      // #7622 (round 3): the settings payload's `s.language` is
+      // absent (None) for a fresh install, so an explicit non-empty
+      // value is the user's genuine saved choice.  The browser
+      // navigator hint is now read via the guarded
+      // `_detectBrowserLanguageHint()` helper (round-3 finding 2) so
+      // a throwing `navigator` accessor in some embedded webviews
+      // can no longer abort this branch and reset loaded preferences.
+      // The fallback ternary preserves the pre-#7622 boot behaviour
+      // when neither helper is in scope (defence in depth).
       const _lang=typeof resolvePreferredLocale==='function'
-        ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'))
+        ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'), _detectBrowserLanguageHint())
         : (s.language || localStorage.getItem('hermes-lang') || 'en');
       setLocale(_lang);
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
