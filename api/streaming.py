@@ -1364,11 +1364,15 @@ def _abandon_stale_stream_settlement(stream_id: str, owner_session_id: str | Non
             live_notice = _clean_fallback_notice(
                 _STREAM_FALLBACK_NOTICES.get(stream_id)
             )
-            if live_notice is not None:
+            live_generation = _current_notice_generation(stream_id)
+            existing = _STREAM_FALLBACK_DEAD_LETTER.get(stream_id)
+            if live_notice is not None and (
+                existing is None or live_generation >= int(existing.get('generation') or 0)
+            ):
                 _store_fallback_dead_letter_locked(
                     stream_id,
                     live_notice,
-                    generation=_current_notice_generation(stream_id),
+                    generation=live_generation,
                     owner_session_id=owner_session_id,
                     terminal_status='failed',
                 )
