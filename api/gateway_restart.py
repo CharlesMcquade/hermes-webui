@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from api.profiles import (
@@ -37,6 +38,38 @@ _GATEWAY_RESTART_DRAIN_HANDOFF_LOCK = threading.Lock()
 # forever; the expiry releases the marker so the surviving process resumes
 # admitting work. The scheduler claims the token long before this elapses.
 _GATEWAY_RESTART_HANDOFF_EXPIRY_SECONDS = 30.0
+_RESTART_TRANSACTION = threading.local()
+
+
+@contextmanager
+def gateway_update_drain():
+    """Own admission throughout CLI retries and PID adjudication."""
+    from api.config import enter_restart_drain, exit_restart_drain
+
+    enter_restart_drain(reason='gateway_restart')
+    _RESTART_TRANSACTION.active = True
+    try:
+        yield
+    finally:
+        _RESTART_TRANSACTION.active = False
+        if not _GATEWAY_RESTART_DRAIN_HANDOFF.is_set():
+            exit_restart_drain()
+
+
+def park_gateway_update_drain() -> None:
+    """Transfer the update's lifetime marker to WebUI replacement."""
+    if not getattr(_RESTART_TRANSACTION, 'active', False):
+        raise RuntimeError('No gateway update drain to transfer')
+    with _GATEWAY_RESTART_DRAIN_HANDOFF_LOCK:
+        _GATEWAY_RESTART_DRAIN_HANDOFF.set()
+    timer = threading.Timer(_GATEWAY_RESTART_HANDOFF_EXPIRY_SECONDS, _expire_parked_restart_drain)
+    timer.daemon = True
+    try:
+        timer.start()
+    except BaseException:
+        with _GATEWAY_RESTART_DRAIN_HANDOFF_LOCK:
+            _GATEWAY_RESTART_DRAIN_HANDOFF.clear()
+        raise
 
 
 def claim_parked_restart_drain() -> bool:
@@ -56,13 +89,13 @@ def claim_parked_restart_drain() -> bool:
 
 def _expire_parked_restart_drain() -> None:
     """Release a parked drain that no scheduler claimed (health-only restart)."""
+    from api.config import exit_restart_drain
     with _GATEWAY_RESTART_DRAIN_HANDOFF_LOCK:
         if not _GATEWAY_RESTART_DRAIN_HANDOFF.is_set():
             return
+        # Retire the marker before allowing a scheduler to publish its own.
+        exit_restart_drain()
         _GATEWAY_RESTART_DRAIN_HANDOFF.clear()
-    from api.config import exit_restart_drain
-
-    exit_restart_drain()
     logger.info(
         "Released parked gateway-restart drain after %.1fs with no scheduler claim",
         _GATEWAY_RESTART_HANDOFF_EXPIRY_SECONDS,
@@ -158,6 +191,7 @@ def restart_active_profile_gateway(
     from api.config import enter_restart_drain, exit_restart_drain
 
     drain_owned = False
+    transaction_owned = bool(getattr(_RESTART_TRANSACTION, 'active', False))
 
     def release():
         nonlocal drain_owned
@@ -187,8 +221,9 @@ def restart_active_profile_gateway(
         _release_lock()
 
     try:
-        enter_restart_drain(reason='gateway_restart')
-        drain_owned = True
+        if not transaction_owned:
+            enter_restart_drain(reason='gateway_restart')
+            drain_owned = True
         try:
             blockers = _wait_until_restart_safe()
         except BaseException as exc:
@@ -237,8 +272,8 @@ def restart_active_profile_gateway(
             stderr = (stderr or "").strip()
             if proc.returncode == 0:
                 logger.info("Gateway service restarted successfully: %s", stdout)
-                if handoff_to_scheduler:
-                    # Agent-update caller: park the drain for the scheduler.
+                if handoff_to_scheduler and not transaction_owned:
+                    # Standalone callers retain the existing short-lived handoff.
                     # It claims the token when its own _schedule_restart drain
                     # takes over, so admission stays closed across both
                     # restarts. The expiry timer releases it if no scheduler

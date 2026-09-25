@@ -1878,6 +1878,17 @@ def _schedule_restart(delay: float = 2.0) -> None:
 
 
 def _ensure_gateway_restart_for_agent_update() -> tuple[bool, dict]:
+    """Keep one admission owner across CLI attempts, PID proof and handoff."""
+    from api.gateway_restart import gateway_update_drain, park_gateway_update_drain
+
+    with gateway_update_drain():
+        ok, result = _adjudicate_gateway_restart_for_agent_update()
+        if ok:
+            park_gateway_update_drain()
+        return ok, result
+
+
+def _adjudicate_gateway_restart_for_agent_update() -> tuple[bool, dict]:
     """Run the active-profile gateway restart when agent checkout changed.
 
     Returns:
