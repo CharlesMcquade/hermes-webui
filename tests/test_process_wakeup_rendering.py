@@ -77,6 +77,7 @@ eval(extractFunc('_stripWorkspaceDisplayPrefix'));
 eval(extractFunc('_stripAttachedFilesMarkerForDisplay'));
 eval(extractFunc('_messageIsRenderable'));
 eval(extractFunc('_getVisibleMessagesWithIdx'));
+eval(extractFunc('_topbarLoadedMessageCount'));
 eval(extractFunc('_messageVirtualRoleForEntry'));
 
 const wakeup = {
@@ -149,6 +150,7 @@ process.stdout.write(JSON.stringify({
   delegatedRenderable: _messageIsRenderable(delegated),
   attachmentDelegatedRenderable: _messageIsRenderable(attachmentDelegated),
   retainedInState: S.messages.some(m=>m._source==='delegation_wakeup'),
+  visibleTopbarCount: _topbarLoadedMessageCount(),
   pagedVisible: pagedVisible.map(e=>e.rawIdx), virtualHead, virtualTail, reloadedVisible,
 }));
 """
@@ -202,6 +204,7 @@ def test_delegation_wakeup_is_only_hidden_from_visible_projection():
     assert result["delegatedRenderable"] is False
     assert result["attachmentDelegatedRenderable"] is False
     assert result["retainedInState"] is True
+    assert result["visibleTopbarCount"] == 4
     assert result["delegatedVisible"] == [
         [0, "", "previous assistant report"],
         [2, "process_wakeup", "[IMPORTANT: Background process proc_123 completed (exit_code=0).\nCommand: sleep 1\nOutput:\ndone]"],
