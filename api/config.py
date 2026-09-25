@@ -11427,6 +11427,8 @@ def register_active_run(stream_id: str, **metadata) -> None:
     entry.setdefault("phase", "running")
     with ACTIVE_RUNS_LOCK:
         existing = ACTIVE_RUNS.get(stream_id)
+        if existing and existing.get("phase") in ("cancelling", "finalizing"):
+            raise RunAdmissionDrainingError("Run admission is already closing")
         if (existing and existing.get("phase") == "starting"
                 and existing.get("session_id") != entry.get("session_id")):
             raise RunAdmissionDrainingError("Run admission belongs to another session")
