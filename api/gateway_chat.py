@@ -1187,22 +1187,23 @@ def _run_gateway_chat_streaming(
         from api.config import unregister_active_run as _unregister_active_run
         _unregister_active_run(stream_id)
         return
+    cancelled_before_registration = False
     try:
         with STREAMS_LOCK:
             if stream_id not in STREAMS or (CANCEL_FLAGS.get(stream_id) and CANCEL_FLAGS[stream_id].is_set()):
-                unregister_active_run(stream_id)
-                return
-            register_active_run(
-                stream_id,
-                session_id=session_id,
-                started_at=time.time(),
-                phase="gateway-starting",
-                workspace=str(workspace),
-                model=model,
-                provider=model_provider,
-                backend="gateway",
-            )
-            cancel_event = CANCEL_FLAGS.setdefault(stream_id, threading.Event())
+                cancelled_before_registration = True
+            else:
+                register_active_run(
+                    stream_id,
+                    session_id=session_id,
+                    started_at=time.time(),
+                    phase="gateway-starting",
+                    workspace=str(workspace),
+                    model=model,
+                    provider=model_provider,
+                    backend="gateway",
+                )
+                cancel_event = CANCEL_FLAGS.setdefault(stream_id, threading.Event())
     except RunAdmissionDrainingError:
         q.put_nowait((
             "apperror",
@@ -1214,6 +1215,13 @@ def _run_gateway_chat_streaming(
             },
         ))
         _finish_gateway_run_starting(stream_id)
+        _clear_gateway_run_starting(stream_id)
+        unregister_stream_owner(stream_id)
+        clear_session_writeback_owner_if_owned(session_id, stream_id)
+        unregister_active_run(stream_id)
+        return
+    if cancelled_before_registration:
+        _finish_gateway_run_starting(stream_id, result="fallback")
         _clear_gateway_run_starting(stream_id)
         unregister_stream_owner(stream_id)
         clear_session_writeback_owner_if_owned(session_id, stream_id)
