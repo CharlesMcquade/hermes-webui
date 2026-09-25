@@ -105,6 +105,9 @@ def test_accepted_steer_is_journaled_and_broadcast_with_one_event_identity(monke
         old_agents = dict(AGENT_INSTANCES)
         AGENT_INSTANCES.clear()
         AGENT_INSTANCES[stream_id] = agent
+    with ACTIVE_RUNS_LOCK:
+        old_active_runs = dict(ACTIVE_RUNS)
+        ACTIVE_RUNS.clear()
     # Master's positive-ownership gate: stream owner AND active-run session
     # must both equal the requesting session before any Steer is accepted.
     monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
@@ -158,6 +161,9 @@ def test_accepted_steer_is_journaled_and_broadcast_with_one_event_identity(monke
             STREAMS.update(old_streams)
             AGENT_INSTANCES.clear()
             AGENT_INSTANCES.update(old_agents)
+        with ACTIVE_RUNS_LOCK:
+            ACTIVE_RUNS.clear()
+            ACTIVE_RUNS.update(old_active_runs)
 
     transaction.assert_called_once()
     assert captured["event_name"] == "steer_delivered"
