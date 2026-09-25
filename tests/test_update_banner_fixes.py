@@ -637,6 +637,16 @@ class TestApplyUpdateRestartSafety:
 class TestSuccessfulUpdateReturnsRestartScheduled:
     """#814 — successful apply_update must return restart_scheduled: True."""
 
+    @pytest.fixture(autouse=True)
+    def isolated_restart_drain(self, monkeypatch, tmp_path):
+        # The mocked scheduler cannot claim/retire a parked gateway→WebUI
+        # handoff. Keep its marker and handoff scoped to this test.
+        from api import config, gateway_restart
+        monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(tmp_path))
+        yield
+        gateway_restart._GATEWAY_RESTART_DRAIN_HANDOFF.clear()
+        config.exit_restart_drain()
+
     def test_apply_update_returns_restart_scheduled(self, tmp_path, monkeypatch):
         import api.updates as upd
 
