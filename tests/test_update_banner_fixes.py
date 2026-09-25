@@ -830,6 +830,14 @@ class TestApplyForceUpdate:
 class TestAgentUpdateRequiresGatewayRestart:
     """Agent updates must prove gateway restart before returning ok=True."""
 
+    @pytest.fixture(autouse=True)
+    def isolated_restart_drain(self, monkeypatch, tmp_path):
+        from api import config, gateway_restart
+        monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(tmp_path))
+        yield
+        gateway_restart._GATEWAY_RESTART_DRAIN_HANDOFF.clear()
+        config.exit_restart_drain()
+
     def test_agent_gateway_restart_retries_one_transient_failure(self, monkeypatch):
         import api.updates as upd
 
@@ -2535,15 +2543,15 @@ class TestClearLockButton:
 # ── Regression: sequential webui+agent update — restart coordination ──────────
 
 class TestSequentialUpdateRestartCoordination:
-    """Regression guard for the two-target race: when both webui and agent
-    have updates, the client POSTs them sequentially (webui → agent). The
-    first update's success schedules a restart timer; without coordination
-    that timer fires while the second update's git-pull is still running,
-    killing it mid-stream and leaving the second repo partial.
+    """Regression guard for sequential updates and their restart timer."""
 
-    Fix: `_schedule_restart` must acquire `_apply_lock` before calling
-    `os.execv`, so a pending second update always completes first.
-    """
+    @pytest.fixture(autouse=True)
+    def isolated_restart_drain(self, monkeypatch, tmp_path):
+        from api import config, gateway_restart
+        monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(tmp_path))
+        yield
+        gateway_restart._GATEWAY_RESTART_DRAIN_HANDOFF.clear()
+        config.exit_restart_drain()
 
     def test_schedule_restart_waits_for_apply_lock(self, monkeypatch):
         """The restart thread must wait for any in-flight update before

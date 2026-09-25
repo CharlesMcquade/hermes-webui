@@ -222,6 +222,71 @@ def test_scheduler_claims_parked_drain_without_republication(monkeypatch, tmp_pa
     assert not gateway_restart._GATEWAY_RESTART_DRAIN_HANDOFF.is_set()
 
 
+def test_failed_gateway_attempt_never_reopens_admission_before_retry(monkeypatch):
+    """The CLI failure cannot release the update's drain while retry waits."""
+    import threading
+    reached_retry = threading.Event()
+    resume_retry = threading.Event()
+    observed = []
+
+    class FakeProc:
+        returncode = 1
+        def communicate(self, timeout):
+            return ('', 'transient failure')
+
+    monkeypatch.setattr(gateway_restart.subprocess, 'Popen', Mock(return_value=FakeProc()))
+    monkeypatch.setattr(gateway_restart, '_wait_until_restart_safe', lambda: {'restart_blocked': False})
+    monkeypatch.setattr(updates, 'get_active_profile_gateway_running_pid', lambda **kw: 42)
+
+    def retry_barrier(_seconds):
+        observed.append(config.restart_drain_active())
+        reached_retry.set()
+        assert resume_retry.wait(5)
+
+    monkeypatch.setattr(updates.time, 'sleep', retry_barrier)
+    worker = threading.Thread(target=updates._ensure_gateway_restart_for_agent_update)
+    worker.start()
+    try:
+        assert reached_retry.wait(5)
+        assert config.restart_drain_active()
+        assert observed == [True]
+    finally:
+        resume_retry.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert not config.restart_drain_active()
+
+
+def test_pid_recovery_keeps_drain_through_scheduler_rollback(monkeypatch):
+    """Two failed CLI attempts plus changed PID transfer the same marker."""
+    class FakeProc:
+        returncode = 1
+        def communicate(self, timeout):
+            return ('', 'transient failure')
+
+    monkeypatch.setattr(gateway_restart.subprocess, 'Popen', Mock(return_value=FakeProc()))
+    monkeypatch.setattr(gateway_restart, '_wait_until_restart_safe', lambda: {'restart_blocked': False})
+    pids = iter([42, 43])
+    monkeypatch.setattr(updates, 'get_active_profile_gateway_running_pid', lambda **kw: next(pids))
+    monkeypatch.setattr(updates.time, 'sleep', lambda _: None)
+    ok, result = updates._ensure_gateway_restart_for_agent_update()
+    assert ok and result['process_replaced']
+    assert config.restart_drain_active()
+    assert gateway_restart._GATEWAY_RESTART_DRAIN_HANDOFF.is_set()
+
+    class ImmediateThread:
+        def __init__(self, target, daemon):
+            self.target = target
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(updates.threading, 'Thread', ImmediateThread)
+    monkeypatch.setattr(updates, '_wait_until_restart_safe', lambda: {'restart_blocked': True})
+    updates._schedule_restart(delay=0)
+    assert not config.restart_drain_active()
+    assert not gateway_restart._GATEWAY_RESTART_DRAIN_HANDOFF.is_set()
+
+
 # ---------------------------------------------------------------------------
 # Blocker 4: alive-thread queue-removal race retires the starting row
 # ---------------------------------------------------------------------------
