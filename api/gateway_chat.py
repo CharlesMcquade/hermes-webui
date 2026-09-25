@@ -1212,6 +1212,7 @@ def _run_gateway_chat_streaming(
         _clear_gateway_run_starting(stream_id)
         unregister_stream_owner(stream_id)
         clear_session_writeback_owner_if_owned(session_id, stream_id)
+        unregister_active_run(stream_id)
         return
     try:
         run_journal = RunJournalWriter(session_id, stream_id)

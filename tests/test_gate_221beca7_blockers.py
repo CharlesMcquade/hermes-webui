@@ -253,6 +253,28 @@ def test_local_worker_pre_start_exit_retires_route_starting_row(monkeypatch):
         config.unregister_active_run(stream_id)
 
 
+def test_gateway_drain_refusal_retires_route_starting_row(monkeypatch):
+    stream_id = 'race-gateway-drain'
+    events = queue.Queue()
+    with config.STREAMS_LOCK:
+        config.STREAMS[stream_id] = events
+    config.register_active_run(stream_id, session_id='sess-race-gateway', phase='starting')
+    def drain_at_worker_registration(*args, **kwargs):
+        raise config.RunAdmissionDrainingError('restart drain published after route admission')
+    monkeypatch.setattr(gateway_chat, 'register_active_run', drain_at_worker_registration)
+    try:
+        gateway_chat._run_gateway_chat_streaming(
+            session_id='sess-race-gateway', msg_text='hello', model='m',
+            workspace='/tmp', stream_id=stream_id,
+        )
+        assert events.get_nowait()[0] == 'apperror'
+        assert stream_id not in config.ACTIVE_RUNS
+    finally:
+        with config.STREAMS_LOCK:
+            config.STREAMS.pop(stream_id, None)
+        config.unregister_active_run(stream_id)
+
+
 def test_gateway_worker_pre_start_exit_retires_route_starting_row(monkeypatch):
     stream_id = 'race-gateway-starting'
     events = queue.Queue()
