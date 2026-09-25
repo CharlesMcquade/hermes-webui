@@ -1,7 +1,87 @@
 """Atomic request reservation → concrete worker admission across restart drain."""
 import threading
+from types import SimpleNamespace
 
 import pytest
+
+
+@pytest.mark.parametrize('cancel_before_worker', [False, True])
+def test_chat_route_handoff_survives_drain_and_stop(monkeypatch, tmp_path, cancel_before_worker):
+    """The real chat ingress transfers its reservation before releasing Thread.start."""
+    from api import config, routes, turn_journal
+
+    monkeypatch.setenv('HERMES_WEBUI_RESTART_DRAIN_DIR', str(tmp_path))
+    session = SimpleNamespace(session_id='7496-route-chat', title='Existing', active_stream_id=None,
+                              pending_user_message=None, pending_started_at=None,
+                              profile=None, save=lambda: None)
+    launched = threading.Event()
+    release = threading.Event()
+    worker_rows = []
+    threads = []
+    real_thread = threading.Thread
+
+    def prepare(s, *, stream_id, **kwargs):
+        s.active_stream_id = stream_id
+        s.pending_user_message = kwargs['msg']
+        s.pending_started_at = 1.0
+        config.register_session_writeback_owner(s.session_id, stream_id)
+
+    def worker(sid, msg, model, workspace, stream_id, attachments, **kwargs):
+        launched.set()
+        assert release.wait(5)
+        with config.STREAMS_LOCK:
+            if stream_id in config.STREAMS:
+                config.register_active_run(stream_id, session_id=sid, phase='running')
+                worker_rows.append(config.ACTIVE_RUNS[stream_id]['phase'])
+            else:
+                worker_rows.append('cancelled')
+
+    def thread_factory(*args, **kwargs):
+        thread = real_thread(*args, **kwargs)
+        threads.append(thread)
+        return thread
+
+    monkeypatch.setattr(routes, '_prepare_chat_start_session_for_stream', prepare)
+    monkeypatch.setattr(routes, '_run_agent_streaming', worker)
+    monkeypatch.setattr(routes, 'set_last_workspace', lambda *a, **k: None)
+    monkeypatch.setattr(routes, '_is_hidden_empty_session', lambda s: False)
+    monkeypatch.setattr(turn_journal, 'append_turn_journal_event', lambda *a, **k: {})
+    monkeypatch.setattr(routes.threading, 'Thread', thread_factory)
+    stream_id = None
+    try:
+        result = routes._start_chat_stream_for_session(
+            session, msg='hello', workspace='/tmp', model='test', external_runtime_owned=False)
+        stream_id = result['stream_id']
+        assert launched.wait(5)
+        assert config.ACTIVE_RUNS[stream_id]['phase'] == 'starting'
+        assert config.ACTIVE_RUNS[stream_id]['session_id'] == session.session_id
+        assert not any(key.startswith('admission:') for key in config.ACTIVE_RUNS)
+        config.enter_restart_drain('test')
+        with pytest.raises(config.RunAdmissionDrainingError):
+            config.register_active_run('7496-unreserved-route', session_id=session.session_id)
+        with pytest.raises(config.RunAdmissionDrainingError):
+            config.register_active_run(stream_id, session_id='different-session', phase='running')
+        if cancel_before_worker:
+            with config.STREAMS_LOCK:
+                config.STREAMS.pop(stream_id, None)
+                config.update_active_run(stream_id, phase='cancelling')
+        release.set()
+        threads[0].join(5)
+        assert not threads[0].is_alive()
+        assert worker_rows == (['cancelled'] if cancel_before_worker else ['running'])
+        if cancel_before_worker:
+            assert config.ACTIVE_RUNS[stream_id]['phase'] == 'cancelling'
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(5)
+        config.exit_restart_drain()
+        if stream_id:
+            config.unregister_active_run(stream_id)
+            with config.STREAMS_LOCK:
+                config.STREAMS.pop(stream_id, None)
+            config.unregister_stream_owner(stream_id)
+            config.clear_session_writeback_owner_if_owned(session.session_id, stream_id)
 
 
 def test_transfer_after_drain_and_worker_upgrade(monkeypatch, tmp_path):
