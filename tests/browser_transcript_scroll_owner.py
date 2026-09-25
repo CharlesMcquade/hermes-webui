@@ -102,6 +102,29 @@ def messages():
 
 # The frame sampler observes real layout only. The stable id is read from the
 # fixture message, not the shifting raw index or the virtualizer's height cache.
+# Optional, bounded writer trace for failing synthetic fixtures. No production hook.
+WRITER_TRACE = r"""() => {
+  if (window.ownerWriterTrace) return;
+  const el=document.querySelector('#messages');
+  let proto=el, descriptor;
+  while (proto && !(descriptor=Object.getOwnPropertyDescriptor(proto,'scrollTop'))) proto=Object.getPrototypeOf(proto);
+  if (!descriptor || !descriptor.set) throw Error('scrollTop descriptor unavailable');
+  const events=[];
+  const record=(kind,requested,stack)=>{
+    const rows=Array.from(document.querySelectorAll('#msgInner [data-msg-idx]'));
+    const visible=rows.find(n=>{const r=n.getBoundingClientRect(),c=el.getBoundingClientRect();return r.bottom>c.top&&r.top<c.bottom;});
+    events.push({time:performance.now(),kind,requested,top:el.scrollTop,max:el.scrollHeight-el.clientHeight,
+      first:rows[0]?.dataset.sessionMsgIdx,visible:visible?.dataset.sessionMsgIdx,
+      visibleTop:visible?.getBoundingClientRect().top,stack});
+    if(events.length>700)events.shift();
+  };
+  Object.defineProperty(el,'scrollTop',{configurable:true,get(){return descriptor.get.call(this)},
+    set(value){const before=descriptor.get.call(this);descriptor.set.call(this,value);
+      record('setter',value,new Error().stack?.split('\n').slice(1,5).join(' | '));}});
+  el.addEventListener('scroll',()=>record('scroll',null,''),{passive:true});
+  window.ownerWriterTrace=events;
+}"""
+
 PROBE = r"""() => {
   const ids=new WeakMap();let serial=0;
   const rows=()=>Array.from(document.querySelectorAll('#msgInner [data-msg-idx]'))
@@ -705,6 +728,8 @@ def main():
                                         page.evaluate('async()=>await _loadOlderMessages()')
                                     page.wait_for_timeout(600)
                                     page.evaluate(PROBE)
+                                    if os.environ.get('SCROLL_WRITER_TRACE'):
+                                        page.evaluate(WRITER_TRACE)
                                     assert page.evaluate('S.messages.length>0' if case=='natural' else 'S.messages.length>=300'), 'missing fixture history'
                                     if case=='continuity':continuity_case(page,transport,evidence)
                                     elif case in ('prepend','input','switch'):prepend_case(page,transport,evidence,case)
@@ -724,6 +749,9 @@ def main():
                                     evidence['error']=str(exc)
                                 finally:
                                     evidence['browser_errors']=errors
+                                    if os.environ.get('SCROLL_WRITER_TRACE'):
+                                        try: evidence['writer_trace']=page.evaluate('window.ownerWriterTrace || []')
+                                        except Exception as exc: evidence['writer_trace_error']=str(exc)
                                     try:
                                         evidence['final']=snapshot(page)
                                         if not os.environ.get('SCROLL_SESSION_FILE'):

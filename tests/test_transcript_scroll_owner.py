@@ -48,6 +48,7 @@ class Row {
 class List {
  constructor(rows){this.children=rows;this.dataset={windowSession:'one'};for(const n of rows)n.parent=this;}
  get firstElementChild(){return this.children[0]||null;}
+ contains(n){return this.children.includes(n);}
  insertBefore(n,c){if(n.parent)n.remove();const i=c?this.children.indexOf(c):this.children.length;this.children.splice(i,0,n);n.parent=this;}
  querySelectorAll(){return this.children;}
 }
