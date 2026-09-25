@@ -253,7 +253,6 @@ def test_launch_failure_retires_transferred_admission(monkeypatch, tmp_path, pro
                               save=lambda **kw: None)
     monkeypatch.setattr(routes, 'get_session', lambda sid: session)
     monkeypatch.setattr(routes, '_agent_runtime_barrier_response', lambda **kw: None)
-    monkeypatch.setattr(routes, '_cleanup_chat_start_launch_failure', lambda *a: None)
     monkeypatch.setattr(routes, 'set_last_workspace', lambda *a, **k: None)
     monkeypatch.setattr(routes, '_is_hidden_empty_session', lambda s: False)
     monkeypatch.setattr(turn_journal, 'append_turn_journal_event', lambda *a, **k: {})
