@@ -268,14 +268,36 @@ class TestStaleReaperSettlementRetirement:
             "unexpired dead-letter was discarded by stale cleanup before its "
             "deadline_at"
         )
-        # The newest accepted live generation won the ownership transfer
-        # (the direct-seeded dead-letter is a fixture, not a publication, so
-        # the live publish is generation 1 and wins over captured gen 1).
-        assert entry['notice']['message'] == "live newer"
-        assert entry['generation'] == 1
+        # The seeded dead-letter has generation 2; a live generation 1
+        # cannot replace it merely because it was encountered by the reaper.
+        assert entry['notice']['message'] == "already dead-lettered"
+        assert entry['generation'] == 2
         assert entry['owner_session_id'] == session_id
         assert stream_id not in _streaming_mod._STREAM_FALLBACK_NOTICES
         assert stream_id not in _streaming_mod._STREAM_SETTLEMENT_PARTICIPANTS
+
+    def test_reaper_does_not_replace_newer_dead_letter_with_older_live_notice(self):
+        """A newer failed generation retains ownership when stale cleanup runs."""
+        from api.background_process import _active_run_ids_for_session
+        from api.streaming import _publish_fallback_notice
+
+        stream_id = "stale-reaper-newer-dead-letter"
+        session_id = "sess-stale-newer-dead-letter"
+        _register_stale_cancelling_run(stream_id, session_id)
+        _publish_fallback_notice(stream_id, {
+            "message": "older live", "to_model": "m1", "to_provider": "p1",
+        })
+        _seed_dead_letter(stream_id, {
+            "message": "newer failed", "to_model": "m2", "to_provider": "p2",
+        }, generation=2, owner_session_id=session_id)
+
+        _active_run_ids_for_session(session_id, attachable_only=False)
+
+        entry = _streaming_mod._STREAM_FALLBACK_DEAD_LETTER[stream_id]
+        assert entry["generation"] == 2
+        assert entry["notice"]["message"] == "newer failed"
+        assert entry["owner_session_id"] == session_id
+        assert stream_id not in _streaming_mod._STREAM_FALLBACK_NOTICES
 
     def test_reaper_discards_expired_notice_and_dead_letter(self):
         """Both a live notice and a dead-letter seeded with a PAST deadline
