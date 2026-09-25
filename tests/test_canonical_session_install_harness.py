@@ -26,6 +26,7 @@ NODE = shutil.which("node")
 _WORKSPACE_SOURCE = WORKSPACE_JS.read_text(encoding="utf-8")
 _SESSIONS_SOURCE = SESSIONS_JS.read_text(encoding="utf-8")
 _COMMANDS_SOURCE = COMMANDS_JS.read_text(encoding="utf-8")
+_UI_SOURCE = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 def _extract_function(source: str, name: str) -> str:
@@ -95,7 +96,7 @@ const $ = () => ({ value: '' });
 const _reArmRecoveryPick = () => {};
 const _deliberateSessionModelPick = () => null;
 let routes = {};
-const api = async (url, opts) => {
+let api = async (url, opts) => {
   calls.push({ url, opts });
   if (routes[url]) return routes[url](url);
   return {};
@@ -313,3 +314,57 @@ console.log(JSON.stringify({
     assert out["calledUndo"] is True
     assert out["sessionStillB"] is True
     assert out["messagesStillB"] is True
+
+
+@pytest.mark.parametrize("operation", ["undo", "retry", "edit"])
+def test_deferred_destructive_response_cannot_restore_session_a_into_b(operation):
+    """Start on A, switch to B while the canonical GET is unresolved."""
+    install = _extract_from([_SESSIONS_SOURCE], "_installCanonicalSession")
+    adopt = _extract_from([_SESSIONS_SOURCE], "_adoptRegenerationRevision")
+    action = {
+        "undo": _extract_from([_COMMANDS_SOURCE], "cmdUndo"),
+        "retry": _extract_from([_COMMANDS_SOURCE], "cmdRetry"),
+        "edit": _extract_from([_UI_SOURCE], "submitEdit"),
+    }[operation]
+    invocation = {"undo": "cmdUndo()", "retry": "cmdRetry()", "edit": "submitEdit(0,'replacement')"}[operation]
+    out = _run_node("\n".join([
+        _HARNESS, "let _loadSessionGeneration=1;", _NORMALIZE,
+        *_projection_helpers(), _MUTATION_TOOLS, adopt, install,
+        "let _submitEditInFlight=false; let sends=0; const send=async()=>{sends++};",
+        "const setStatus=()=>{}; const _ensureAllMessagesLoaded=async()=>{};",
+        action,
+        """
+(async()=>{
+  let release, fetched=false;
+  const waiting=new Promise(resolve=>{release=resolve});
+  routes={
+    '/api/session/undo':()=>({ok:true,removed_count:1}),
+    '/api/session/retry':()=>({ok:true,last_user_text:'A draft'}),
+    '/api/session/truncate':()=>({ok:true}),
+  };
+  const apiBefore=api;
+  api=async(url,opts)=>{
+    if(url.startsWith('/api/session?session_id=a')){
+      fetched=true;
+      return waiting;
+    }
+    return apiBefore(url,opts);
+  };
+  S.session={session_id:'a',profile:'default',messages:[{role:'user',content:'A'}]};
+  S.messages=S.session.messages;
+  const running=INVOKE;
+  for(let i=0;i<20&&!fetched;i++) await Promise.resolve();
+  if(!fetched) throw new Error('canonical GET was never reached');
+  const b={session_id:'b',profile:'default',messages:[{role:'user',content:'B'}]};
+  S.session=b; S.messages=b.messages;
+  release({session:{session_id:'a',profile:'default',messages:[{role:'user',content:'late A'}]}});
+  await running;
+  console.log(JSON.stringify({sameSession:S.session===b, sameMessages:S.messages===b.messages,
+    content:S.messages[0].content,sends,composer:$('msg').value, inFlight:_submitEditInFlight}));
+})().catch(e=>{console.error(e);process.exit(1)});
+""".replace("INVOKE", invocation),
+    ]))
+    assert out["sameSession"] and out["sameMessages"]
+    assert out["content"] == "B"
+    assert out["sends"] == 0
+    assert out["inFlight"] is False
