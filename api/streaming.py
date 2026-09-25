@@ -14612,31 +14612,25 @@ def _accept_and_publish_steer_event(
         "event": journaled if isinstance(journaled, dict) else None,
         "payload": payload,
     }
-    if reason == "terminal":
-        outcome["fallback"] = "stream_dead"
-        return outcome
-    if reason == "fence_closed":
-        # #7188 rework: the acceptance fence was closed by the run's lifecycle
-        # owner (completion drain, cancel, or error teardown) before the
-        # terminal row landed. Greptile P1 (r4060416268): a fence closed by the
-        # completion path's settlement is an orderly transition — the owned
-        # stream is still live in phase "finalizing", so classify the rejection
-        # as not_running (guidance arrived after admission closed), not
-        # stream_dead (a vanished stream that would trigger dead-stream
-        # recovery). Teardown closers (cancel/error) already removed the stream
-        # from STREAMS, so an absent stream still fails closed to stream_dead.
-        # Re-read liveness/ownership outside the journal lock; an racing
-        # teardown between this check and the response only flips the
-        # classification at worst, never accepts the Steer.
-        with STREAMS_LOCK:
-            stream_live = str(stream_id) in STREAMS
+    if reason in ("terminal", "fence_closed"):
+        # Both a durable terminal row and an early-closed fence reject Steer.
+        # The prior ownership check can race the per-run journal transaction:
+        # completion can write done before this verified Steer gets the lock,
+        # while the owned stream remains live and finalizing. Classify that
+        # orderly rejection as not_running rather than a vanished stream.
+        # Re-check ownership under STREAMS_LOCK; Stop may already have detached
+        # the stream, in which case fail closed to stream_dead.
+        from api import config as cfg
+        with cfg.STREAMS_LOCK:
+            stream_live = str(stream_id) in cfg.STREAMS
+            owner = cfg.stream_owner_session_id(str(stream_id)) if stream_live else None
             if stream_live:
-                from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK
-                with ACTIVE_RUNS_LOCK:
-                    run = dict(ACTIVE_RUNS.get(str(stream_id)) or {})
+                with cfg.ACTIVE_RUNS_LOCK:
+                    run = dict(cfg.ACTIVE_RUNS.get(str(stream_id)) or {})
             else:
                 run = {}
         if (stream_live
+                and owner == str(session_id)
                 and run.get("session_id") == str(session_id)
                 and run.get("backend") == WEBUI_LOCAL_CHAT_BACKEND
                 and run.get("phase") == "finalizing"):
