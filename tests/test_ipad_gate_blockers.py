@@ -205,16 +205,61 @@ scopeReset();
 _sessionVirtualWindow(opts); // bounded deep window [9940,10000)
 
 // Scope CHANGE: profile/filter switch resets bounds to the initial batch.
+prevFingerprint = scopeFingerprint;
+scopeFingerprint = 'scope-B';
 scopeReset();
-const w = _sessionVirtualWindow({{...opts, activeIndex: -1}});
-
-console.log(JSON.stringify({{ start: w.start, end: w.end }}));
+const w = _sessionVirtualWindow({{...opts, activeIndex: -1, total: 100}});
+// Model the caller's row loop using the returned production interval.
+const painted = Array.from({{length: 100}}, (_, i) => i)
+  .filter(i => i >= w.start && i < w.end);
+console.log(JSON.stringify({{ start: w.start, end: w.end, painted }}));
 """
     result = json.loads(_run_node_vm(source))
     assert result["start"] == 0, \
         f"Scope change must reset start to 0, got {result['start']}"
     assert result["end"] == 60, \
         f"Scope change must reset end to the initial batch, got {result['end']}"
+    assert result["painted"] == list(range(60)), result
+
+
+@_node_tests
+def test_invalidation_cancels_deferred_touch_render_timer():
+    """A queued cooldown render must not repaint after skeleton/profile teardown."""
+    source = "const SESSIONS_JS = " + repr(SESSIONS_JS) + ";\n" + r"""
+function extractFunc(name) {
+  const start=SESSIONS_JS.indexOf('function '+name+'(');
+  if(start<0) throw Error(name+' missing');
+  let i=SESSIONS_JS.indexOf('{',start)+1, depth=1;
+  while(depth && i<SESSIONS_JS.length){
+    if(SESSIONS_JS[i]==='{') depth++;
+    else if(SESSIONS_JS[i]==='}') depth--;
+    i++;
+  }
+  return SESSIONS_JS.slice(start,i);
+}
+let _pendingTouchDeferredRenderTimer=0, _touchSentinelObserver=null;
+let _touchScrollOwner=null, _touchRenderState=null, _sessionTouchListEl=null;
+let _sessionTouchStartIndex=7, _sessionTouchLoadedCount=60, _sessionTouchTotalCount=100;
+let _touchBatchPending=false, _touchContinuousBatchOwner=null;
+let _touchContinuousBatchScheduled=false, _sessionTouchGen=1, _touchBatchToken=1;
+const SESSION_LIST_TOUCH_INTERACTION_IDLE_MS=1200;
+let nextId=0, callbacks=new Map(), renders=0, cancellations=0;
+function setTimeout(fn){ callbacks.set(++nextId,fn); return nextId; }
+function clearTimeout(id){ if(callbacks.delete(id)) cancellations++; }
+function renderSessionListFromCache(){ renders++; }
+const requestAnimationFrame=()=>0, cancelAnimationFrame=()=>{};
+eval(extractFunc('_deferRenderSessionListFromCache'));
+eval(extractFunc('_invalidateTouchRender'));
+_deferRenderSessionListFromCache();
+const queued=_pendingTouchDeferredRenderTimer;
+_invalidateTouchRender();
+for(const fn of callbacks.values()) fn();
+console.log(JSON.stringify({queued,cancellations,pending:_pendingTouchDeferredRenderTimer,
+  remaining:callbacks.size,renders,gen:_sessionTouchGen}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result == {"queued": 1, "cancellations": 1, "pending": 0,
+                      "remaining": 0, "renders": 0, "gen": 2}, result
 
 
 def test_pointer_tap_does_not_write_scroll_timestamp():
