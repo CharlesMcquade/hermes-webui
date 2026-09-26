@@ -7054,6 +7054,7 @@ if(typeof window!=='undefined'){
         // An above-tail collapse may move scrollTop upward while the reader is
         // still flush with the tail. With Auto-follow on, ignore near-tail
         // anchoring artifacts, but explicit reader input always escapes.
+        const explicitReaderScrollIntent=_scrollbarDragActive||_recentMessageWheelIntent()||_recentMessageTouchScrollIntent()||_recentMessageKeyScrollIntent();
         if(typeof window!=='undefined'&&window._autoScrollFollow&&_scrollPinned&&bottomDistance<=el.clientHeight&&!explicitReaderScrollIntent){
           _nearBottomCount=0;
         }else{

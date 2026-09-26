@@ -128,9 +128,9 @@ def test_recent_render_scroll_artifact_window_suppresses_upward_unpin():
     # (0b1d19ab's aggressive-follow guards grew the listener past the old
     # 4000-byte estimate; slice at the movedUp branch instead so the window
     # tracks the code the artifact suppression actually fronts.)
-    moved_up_idx = UI_JS.find("if(movedUp){", listener_idx)
+    moved_up_idx = UI_JS.find("if(movedUp&&bottomDistance>1){", listener_idx)
     assert moved_up_idx != -1, "movedUp branch not found after scroll listener"
-    listener = UI_JS[listener_idx: moved_up_idx + len("if(movedUp){")]
+    listener = UI_JS[listener_idx: moved_up_idx + len("if(movedUp&&bottomDistance>1){")]
     assert "_recentMessageRenderArtifactWindow(1400)" in listener
     assert "!_recentMessageTouchScrollIntent()" in listener
     assert "!_recentNonMessageScrollIntent()" in listener
@@ -368,7 +368,7 @@ def test_low_delta_wheel_intent_is_tracked_separately():
     assert "function _recentMessageWheelIntent" in UI_JS
     rec_idx = UI_JS.find("function _recordNonMessageScrollIntent")
     assert rec_idx != -1, "_recordNonMessageScrollIntent not found"
-    rec = UI_JS[rec_idx: rec_idx + 2000]
+    rec = _extract_fn_body("_recordNonMessageScrollIntent")
     assert "e.deltaY<0) _lastMessageWheelIntentMs=performance.now()" in rec, (
         "#4970: _recordNonMessageScrollIntent must record low-delta upward wheel "
         "intent (deltaY<0) separately from the decisive deltaY<-30 unpin."

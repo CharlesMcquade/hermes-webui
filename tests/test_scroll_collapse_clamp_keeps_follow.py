@@ -78,10 +78,12 @@ def _run_listener(
         "const payload = " + json.dumps(payload) + ";\n"
         + r"""
 global.window = { _autoScrollFollow: payload.autoFollow, _showThinking: true };
+console.debug = () => {}; // Production breadcrumb is not the harness result.
 const step = new Function(
   'el',
   '_lastScrollTop',
   '_lastMessageClientHeight',
+  '_lastMessageScrollHeight',
   '_nearBottomCount',
   '_scrollPinned',
   '_messageUserUnpinned',
@@ -106,6 +108,7 @@ const step = new Function(
 return {
   _lastScrollTop,
   _lastMessageClientHeight,
+  _lastMessageScrollHeight,
   _nearBottomCount,
   _scrollPinned,
   _messageUserUnpinned,
@@ -116,6 +119,7 @@ return {
 let state = {
   _lastScrollTop: payload.startTop,
   _lastMessageClientHeight: payload.startClientHeight,
+  _lastMessageScrollHeight: payload.startTop + payload.startClientHeight,
   _nearBottomCount: 0,
   _scrollPinned: true,
   _messageUserUnpinned: false,
@@ -135,6 +139,7 @@ for (const sample of payload.samples) {
     el,
     state._lastScrollTop,
     state._lastMessageClientHeight,
+    state._lastMessageScrollHeight,
     state._nearBottomCount,
     state._scrollPinned,
     state._messageUserUnpinned,
@@ -196,7 +201,7 @@ class TestCollapseClampKeepsFollow:
 
     def test_real_upward_scroll_still_unpins(self):
         state = _run_listener(
-            [_SCROLL_AWAY], start_scroll_top=_CLAMP_BEFORE_TOP
+            [_SCROLL_AWAY], start_scroll_top=_CLAMP_BEFORE_TOP, wheel_intent=True
         )
         assert state["_messageUserUnpinned"] is True, (
             "A real upward scroll leaves the true bottom (bottomDistance>1) and must "
@@ -222,6 +227,7 @@ class TestCollapseClampKeepsFollow:
         state = _run_listener(
             [{"scrollTop": 5699, "scrollHeight": 6177, "clientHeight": 474}],
             start_scroll_top=_CLAMP_BEFORE_TOP,
+            wheel_intent=True,
         )
         assert state["_messageUserUnpinned"] is True
         assert state["_scrollPinned"] is False
@@ -232,7 +238,7 @@ def test_upward_unpin_branch_requires_leaving_the_bottom():
     # refactor from dropping the bottom-distance check while the behavioural tests
     # above still exercise the real callback body.
     listener_start = UI_JS.index("el.addEventListener('scroll'")
-    listener = UI_JS[listener_start : listener_start + 4000]
+    listener = _scroll_listener_raf_body()
     assert "if(movedUp&&bottomDistance>1){" in listener, (
         "The movedUp branch must require the reader to have left the true bottom "
         "(bottomDistance>1) before it unpins; an above-tail collapse clamp fires "
