@@ -33,7 +33,9 @@ def test_loading_older_messages_preserves_viewport_without_bottom_snap():
     assert "_restoreMessageWindowReader(target,anchor)" in commit
     # Compensation is now by a stable content landmark, not estimated prepended
     # height. Both retained nodes and replacement nodes must resolve that owner.
-    assert "anchor.node.isConnected?anchor.node:null" in restore
+    # A connected node can belong to a different transcript subtree after a
+    # staged replacement; only an owner inside this target may restore scroll.
+    assert "anchor.node&&target.contains(anchor.node)?anchor.node:null" in restore
     assert "Number(node.dataset.sessionMsgIdx)===anchor.sessionIndex" in restore
     assert "row.getBoundingClientRect().top-container.getBoundingClientRect().top-anchor.offset" in restore
     assert "container.scrollTop+=delta" in restore
