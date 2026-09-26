@@ -148,7 +148,7 @@ def main(origin='turn_worklog', scenario='turn-worklog'):
                if not key.endswith('_API_KEY') and key not in (
                    'API_SERVER_KEY', 'HERMES_WEBUI_PASSWORD',
                    'HERMES_WEBUI_EXTENSION_DIR', 'HERMES_WEBUI_EXTENSION_MANIFEST')}
-        env.update(HERMES_WEBUI_HOST='127.0.0.1',
+        env.update(HOME=str(state), HERMES_WEBUI_HOST='127.0.0.1',
                    HERMES_WEBUI_STATE_DIR=str(state / 'webui-state'),
                    HERMES_HOME=str(state / 'hermes-home'),
                    HERMES_BASE_HOME=str(state / 'hermes-home'),
@@ -265,6 +265,25 @@ def main(origin='turn_worklog', scenario='turn-worklog'):
                     assert all('running' not in (row['status'] or '') for row in live['rows'] if row['role'] == 'tool'), live
                     if scenario == 'turn-worklog':
                         capture_layout_evidence(page, 'turn-live')
+                if origin == 'turn_worklog' and scenario == 'turn-worklog':
+                    # The stream is held before terminal settlement. Replaying the
+                    # identical wire identity must not create another visible row;
+                    # distinct identities carrying identical text remain distinct.
+                    before = snapshot(page)
+                    page.evaluate("""text => {
+                      const source=window.__turnWorklogTestSource;
+                      source.dispatchEvent(new MessageEvent('interim_assistant', {
+                        data:JSON.stringify({text,event_id:'fixture-progress-1'}),
+                        lastEventId:'fixture-progress-1',
+                      }));
+                    }""", PROGRESS)
+                    replayed = snapshot(page)
+                    assert [r['id'] for r in replayed['rows'] if r['role']=='prose'] == [
+                        r['id'] for r in before['rows'] if r['role']=='prose'], (before,replayed)
+                    assert [r['id'] for r in replayed['rows'] if r['role']=='prose'] == [
+                        'fixture-progress-0','fixture-progress-1','fixture-progress-2'], replayed
+                    assert len([r for r in replayed['rows'] if r['role']=='tool']) == 1, replayed
+                    print('IDENTITY live/replay', [(r['role'],r['id'],r['status']) for r in replayed['rows']],flush=True)
                 gateway.release_settle.set()
                 assert gateway.final_prefix_ready.wait(10)
                 gateway.release_terminal.set()
@@ -299,6 +318,11 @@ def main(origin='turn_worklog', scenario='turn-worklog'):
                 capture_layout_evidence(page, 'turn-after' if origin == 'compact_worklog' else 'turn-settled')
                 settled = assert_settled(page)
                 assert sum(PROGRESS in row['text'] for row in settled['rows'] if row['role'] == 'prose') == 3, settled
+                if origin == 'turn_worklog' and scenario == 'turn-worklog':
+                    assert [r['id'] for r in settled['rows'] if r['role']=='prose'] == [
+                        'fixture-progress-0','fixture-progress-1','fixture-progress-2'], settled
+                    assert len([r for r in settled['rows'] if r['role']=='tool']) == 1, settled
+                    assert settled['final'] == [FINAL_TEXT], settled
                 if origin == 'turn_worklog':
                     assert [row['role'] for row in ordered_rows(settled)] == [
                         row['role'] for row in ordered_rows(live)
@@ -306,6 +330,11 @@ def main(origin='turn_worklog', scenario='turn-worklog'):
                 page.reload(wait_until='domcontentloaded')
                 page.wait_for_function("() => (document.querySelector('#msgInner') || {}).innerText.includes('Lifecycle gate final answer.')")
                 reloaded = assert_settled(page, expected_open=True)
+                if origin == 'turn_worklog' and scenario == 'turn-worklog':
+                    assert [(r['role'],r['id']) for r in reloaded['rows'] if r['role'] in ('prose','user','tool')] == [
+                        (r['role'],r['id']) for r in settled['rows'] if r['role'] in ('prose','user','tool')], (settled,reloaded)
+                    assert reloaded['final'] == [FINAL_TEXT], reloaded
+                    print('IDENTITY settled/reload', [(r['role'],r['id']) for r in reloaded['rows']],flush=True)
                 assert [(row['role'], row['text']) for row in ordered_rows(settled)] == [
                     (row['role'], row['text']) for row in ordered_rows(reloaded)], (settled, reloaded)
                 assert not errors, errors
