@@ -680,9 +680,9 @@ class TestScrollPositionPreservation:
             "Older-history paging must leave the transcript unpinned so the next "
             "render does not snap back to the newest output."
         )
-        target_idx = fn_body.find("container.scrollTop = oldTop + addedHeight")
-        scroll_idx = fn_body.find("requestAnimationFrame(()=>{ _programmaticScroll = false; })")
+        target_idx = fn_body.find("const viewportAnchor = container ? _messageWindowSnapshot() : null")
+        scroll_idx = fn_body.find("renderMessages({preserveScroll:true, _prependAnchor:viewportAnchor, _ownedPrepend:true})")
         pinned_idx = fn_body.rfind("_scrollPinned = false")
         assert target_idx >= 0 and scroll_idx >= 0 and pinned_idx >= 0 and target_idx < scroll_idx < pinned_idx, (
-            "_scrollPinned = false must appear AFTER the older-history viewport-preserve scroll."
+            "_scrollPinned = false must appear AFTER the owned prepend render."
         )

@@ -96,18 +96,39 @@ def test_js_recycle_stash_exists():
 
 
 def test_js_recycle_flag_lifecycle():
-    """_scheduleMessageVirtualizedRender sets _msgNodeRecycleEnabled=true
-    before the compensate call and clears it in finally."""
-    fn_match = re.search(
-        r'function _scheduleMessageVirtualizedRender\(force(?:, request)?\)\{(.+?)^(?=function )',
-        JS, re.DOTALL | re.MULTILINE
-    )
-    assert fn_match, "_scheduleMessageVirtualizedRender not found"
-    body = fn_match.group(1)
-    assert '_msgNodeRecycleEnabled=true' in body
-    finally_match = re.search(r'finally\{([^}]*)\}', body)
-    assert finally_match, "no finally block in _scheduleMessageVirtualizedRender"
-    assert '_msgNodeRecycleEnabled=false' in finally_match.group(1)
+    """The owned virtual window stages DOM, rather than enabling legacy recycling."""
+    scheduler = _virtual_scheduler()
+    render = _render_messages_source()
+    assert 'renderMessages({preserveScroll:true, _windowOnly:true' in scheduler
+    assert 'const ownedWindow=windowOnly||' in render
+    assert '_commitMessageWindow(liveInner,inner,windowAnchor,windowOnly)' in render
+    assert '_reconcilePreservedLiveTurn(inner,_preservedLiveTurn)' in render
+
+
+def _virtual_scheduler():
+    start = JS.index('function _scheduleMessageVirtualizedRender(')
+    return JS[start:JS.index('\nfunction ', start + 1)]
+
+
+def _render_messages_source():
+    start = JS.index('function renderMessages(options){')
+    return JS[start:JS.index('\nfunction ', start + 1)]
+
+
+def _assert_owned_drag_render():
+    """Drag and release both enter the owned-window render; no spacer-only bypass."""
+    scheduler = _virtual_scheduler()
+    render = _render_messages_source()
+    assert 'if(_scrollbarDragActive)' not in scheduler
+    assert 'renderMessages({preserveScroll:true, _windowOnly:true' in scheduler
+    assert '_settleMessageWindowReader()' in scheduler
+    assert "if(!force&&liveKey===_messageVirtualWindowKey) return;" in scheduler
+    assert 'const ownedWindow=windowOnly||' in render
+    owned = render[render.index('if(ownedWindow){'):]
+    assert '_commitMessageWindow(liveInner,inner,windowAnchor,windowOnly)' in owned
+    assert '_messageVirtualWindowKey=renderWindowKey' in owned
+    assert '_deferClearProgrammaticScroll()' in owned
+    assert 'data-virtual-spacer' not in scheduler
 
 
 def test_js_stash_populated_before_wipe():
@@ -1090,81 +1111,23 @@ console.log(JSON.stringify({
 
 
 class TestScrollbarDragRenderDuringDrag:
-    """During scrollbar drag, _scheduleMessageVirtualizedRender must run full
-    renders (with recycling) via _compensateScrollForMeasurementDelta. This
-    keeps scrollHeight stable so the thumb position doesn't jump on release.
-    The scroll container (#messages) is never destroyed, so the browser
-    maintains the native pointer grab even though innerHTML='' fires on
-    the inner container (#msgInner)."""
+    """Drag and release share the owned virtual-window render path.
+
+    The scroller remains mounted while staging and committing its inner window;
+    the browser retains the native thumb pointer grab across that swap.
+    """
 
     def test_drag_guard_exists_in_render_scheduler(self):
-        """_scheduleMessageVirtualizedRender must have a _scrollbarDragActive
-        branch that runs a full render with scroll compensation."""
-        fn_match = re.search(
-            r'function _scheduleMessageVirtualizedRender\(force(?:, request)?\)\{(.+?)^(?=function )',
-            JS, re.DOTALL | re.MULTILINE
-        )
-        assert fn_match, "_scheduleMessageVirtualizedRender not found"
-        body = fn_match.group(1)
-        assert 'if(_scrollbarDragActive)' in body, \
-            "scrollbar drag guard not found in _scheduleMessageVirtualizedRender"
+        _assert_owned_drag_render()
 
     def test_drag_path_uses_full_render(self):
-        """The drag path must call renderMessages via _compensateScrollForMeasurementDelta,
-        NOT use a spacer-only shortcut."""
-        source = _extract_func_script(JS) + r"""
-const fn = extractFunc('_scheduleMessageVirtualizedRender');
-const dragGuard = fn.indexOf('if(_scrollbarDragActive)');
-const returnIdx = fn.indexOf('return;', dragGuard);
-const dragBlock = fn.slice(dragGuard, returnIdx + 10);
-const usesCompensate = dragBlock.includes('_compensateScrollForMeasurementDelta');
-const callsRender = dragBlock.includes('renderMessages');
-const hasSpacerOnly = dragBlock.includes('data-virtual-spacer') && !callsRender;
-console.log(JSON.stringify({
-  uses_compensate: usesCompensate,
-  calls_render: callsRender,
-  has_spacer_only: hasSpacerOnly,
-}));
-"""
-        out = json.loads(_run_node(source))
-        assert out["uses_compensate"] is True, \
-            "drag path must use _compensateScrollForMeasurementDelta"
-        assert out["calls_render"] is True, \
-            "drag path must call renderMessages"
-        assert out["has_spacer_only"] is False, \
-            "drag path must not use spacer-only updates"
+        _assert_owned_drag_render()
 
     def test_drag_path_sets_programmatic_scroll(self):
-        """The drag path must suppress scroll event re-entry during render."""
-        source = _extract_func_script(JS) + r"""
-const fn = extractFunc('_scheduleMessageVirtualizedRender');
-const dragGuard = fn.indexOf('if(_scrollbarDragActive)');
-const returnIdx = fn.indexOf('return;', dragGuard);
-const dragBlock = fn.slice(dragGuard, returnIdx + 10);
-console.log(JSON.stringify({
-  sets_programmatic: dragBlock.includes('_programmaticScroll=true'),
-}));
-"""
-        out = json.loads(_run_node(source))
-        assert out["sets_programmatic"] is True, \
-            "drag path must set _programmaticScroll=true"
+        _assert_owned_drag_render()
 
     def test_release_uses_same_render_path(self):
-        """After pointerup clears _scrollbarDragActive, the forced render
-        must go through the normal _compensateScrollForMeasurementDelta path
-        (no special-case release handling needed since drag renders are full)."""
-        source = _extract_func_script(JS) + r"""
-const fn = extractFunc('_scheduleMessageVirtualizedRender');
-const dragGuard = fn.indexOf('if(_scrollbarDragActive)');
-const afterDrag = fn.indexOf('_msgNodeRecycleEnabled=true', dragGuard);
-const normalPath = fn.slice(afterDrag, afterDrag + 200);
-const usesCompensate = normalPath.includes('_compensateScrollForMeasurementDelta');
-console.log(JSON.stringify({ uses_compensate: usesCompensate }));
-"""
-        out = json.loads(_run_node(source))
-        assert out["uses_compensate"] is True, \
-            "normal render path must use _compensateScrollForMeasurementDelta"
-
+        _assert_owned_drag_render()
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Tier 6: Maintainer must-fix regression tests — raw numerical evidence
@@ -1689,98 +1652,24 @@ console.log(JSON.stringify({
 
 
 class TestScrollbarDragFullRender:
-    """During scrollbar drag, full renders (with recycling) must run instead of
-    spacer-only updates. This keeps scrollHeight stable so the thumb position
-    doesn't jump on release."""
+    """Drag uses the same owned-window commit as a normal forced render."""
 
     def test_drag_path_calls_compensate_scroll(self):
-        """The drag-active path must use _compensateScrollForMeasurementDelta
-        to run a full render, not just update spacer heights."""
-        source = _extract_func_script(JS) + r"""
-const fn = extractFunc('_scheduleMessageVirtualizedRender');
-const dragGuard = fn.indexOf('if(_scrollbarDragActive)');
-const returnIdx = fn.indexOf('return;', dragGuard);
-const dragBlock = fn.slice(dragGuard, returnIdx + 10);
-const usesCompensate = dragBlock.includes('_compensateScrollForMeasurementDelta');
-const callsRenderMessages = dragBlock.includes('renderMessages');
-console.log(JSON.stringify({
-  uses_compensate: usesCompensate,
-  calls_render: callsRenderMessages,
-}));
-"""
-        out = json.loads(_run_node(source))
-        assert out["uses_compensate"] is True, \
-            "drag path must use _compensateScrollForMeasurementDelta for full render"
-        assert out["calls_render"] is True, \
-            "drag path must call renderMessages"
+        _assert_owned_drag_render()
 
     def test_drag_path_sets_programmatic_scroll(self):
-        """The drag path must set _programmaticScroll to suppress the scroll
-        event handler from re-entering during the render."""
-        source = _extract_func_script(JS) + r"""
-const fn = extractFunc('_scheduleMessageVirtualizedRender');
-const dragGuard = fn.indexOf('if(_scrollbarDragActive)');
-const returnIdx = fn.indexOf('return;', dragGuard);
-const dragBlock = fn.slice(dragGuard, returnIdx + 10);
-const setsProgrammatic = dragBlock.includes('_programmaticScroll=true');
-console.log(JSON.stringify({ sets_programmatic: setsProgrammatic }));
-"""
-        out = json.loads(_run_node(source))
-        assert out["sets_programmatic"] is True, \
-            "drag path must set _programmaticScroll=true"
+        _assert_owned_drag_render()
+        render = _render_messages_source()
+        assert '_programmaticScroll=true' in render
 
     def test_drag_path_no_spacer_only_update(self):
-        """The drag path must NOT have a spacer-only shortcut that skips
-        renderMessages, since that causes scrollHeight divergence."""
-        source = _extract_func_script(JS) + r"""
-const fn = extractFunc('_scheduleMessageVirtualizedRender');
-const dragGuard = fn.indexOf('if(_scrollbarDragActive)');
-const returnIdx = fn.indexOf('return;', dragGuard);
-const dragBlock = fn.slice(dragGuard, returnIdx + 10);
-const hasSpacerOnly = dragBlock.includes('data-virtual-spacer') &&
-    !dragBlock.includes('renderMessages');
-console.log(JSON.stringify({ has_spacer_only: hasSpacerOnly }));
-"""
-        out = json.loads(_run_node(source))
-        assert out["has_spacer_only"] is False, \
-            "drag path must not use spacer-only updates (causes scrollHeight drift)"
+        _assert_owned_drag_render()
 
     def test_drag_path_updates_window_key(self):
-        """The drag path must update _messageVirtualWindowKey so the next
-        render sees a fresh key."""
-        source = _extract_func_script(JS) + r"""
-const fn = extractFunc('_scheduleMessageVirtualizedRender');
-const dragGuard = fn.indexOf('if(_scrollbarDragActive)');
-const returnIdx = fn.indexOf('return;', dragGuard);
-const dragBlock = fn.slice(dragGuard, returnIdx + 10);
-const updatesKey = dragBlock.includes('_messageVirtualWindowKey=liveKey') ||
-    dragBlock.includes('_messageVirtualWindowKey =liveKey');
-console.log(JSON.stringify({ updates_key: updatesKey }));
-"""
-        out = json.loads(_run_node(source))
-        assert out["updates_key"] is True, \
-            "drag path must update _messageVirtualWindowKey"
+        _assert_owned_drag_render()
 
     def test_drag_path_defers_programmatic_scroll_clear(self):
-        """The drag path must schedule a deferred clear even when delta < 2px."""
-        source = _extract_func_script(JS) + r"""
-const fn = extractFunc('_scheduleMessageVirtualizedRender');
-const dragGuard = fn.indexOf('if(_scrollbarDragActive)');
-const returnIdx = fn.indexOf('return;', dragGuard);
-const dragBlock = fn.slice(dragGuard, returnIdx + 10);
-const schedulesClear = dragBlock.includes('_deferClearProgrammaticScroll()');
-const compensatePos = dragBlock.indexOf('_compensateScrollForMeasurementDelta');
-const clearPos = dragBlock.indexOf('_deferClearProgrammaticScroll()');
-console.log(JSON.stringify({
-  schedules_clear: schedulesClear,
-  clear_after_compensate: compensatePos !== -1 && clearPos > compensatePos,
-}));
-"""
-        out = json.loads(_run_node(source))
-        assert out["schedules_clear"] is True, \
-            "drag path must call _deferClearProgrammaticScroll()"
-        assert out["clear_after_compensate"] is True, \
-            "drag path must defer the clear after the compensate render"
+        _assert_owned_drag_render()
 
     def test_recycled_assistant_turn_refreshes_role_header(self):
         """Recycled assistant turns must refresh timestamp and TPS header markup."""
