@@ -353,9 +353,11 @@ def test_session_visit_overlapping_stale_calls_do_not_duplicate_over_budget_rebu
     fingerprint = {"profile": "demo"}
     stale_load_counts = {}
     stale_load_lock = threading.Lock()
+    delayed_ident = None
     second_load_gate = threading.Barrier(2)
     rebuild_count = 0
     rebuild_lock = threading.Lock()
+    published = threading.Event()
 
     monkeypatch.setattr(cfg, "_SESSION_VISIT_MODELS_FRESHNESS_SECONDS", 300.0, raising=False)
     monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.01, raising=False)
@@ -365,15 +367,20 @@ def test_session_visit_overlapping_stale_calls_do_not_duplicate_over_budget_rebu
     monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: None)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache: published.set())
 
     def _load_stale_models_cache_from_disk():
+        nonlocal delayed_ident
         ident = threading.get_ident()
         with stale_load_lock:
             count = stale_load_counts.get(ident, 0) + 1
             stale_load_counts[ident] = count
+            if count == 1 and len(stale_load_counts) == 2:
+                delayed_ident = ident
         if count == 2:
             second_load_gate.wait(timeout=5)
+            if ident == delayed_ident:
+                assert published.wait(timeout=5)
         return stale_catalog
 
     def _invoke_models_rebuild(_builder):
@@ -390,9 +397,12 @@ def test_session_visit_overlapping_stale_calls_do_not_duplicate_over_budget_rebu
         futures = [executor.submit(cfg.get_available_models_for_session_visit) for _ in range(2)]
         results = [future.result(timeout=10) for future in futures]
 
-    assert all(result == stale_catalog for result in results)
+    # Both callers entered on stale disk, but the late follower can legitimately
+    # observe the just-published live result instead of its stale fallback.
+    assert stale_catalog in results
+    assert rebuilt_catalog in results
     assert rebuild_count == 1
-    time.sleep(0.1)
+    assert published.wait(timeout=5)
     assert cfg._available_models_cache == rebuilt_catalog
     assert cfg._cache_build_in_progress is False
 
