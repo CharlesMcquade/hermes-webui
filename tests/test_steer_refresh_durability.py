@@ -67,7 +67,9 @@ def test_structured_steer_paths_must_be_real_session_uploads(tmp_path, monkeypat
     uploaded = session_dir / "benign.pdf"
     uploaded.write_text("content", encoding="utf-8")
 
-    assert streaming._verified_steer_attachment_paths("sid", [str(uploaded)]) == [str(uploaded)]
+    snapshot = streaming._verified_steer_attachment_paths("sid", [str(uploaded)])
+    assert len(snapshot) == 1 and snapshot[0] != str(uploaded)
+    assert Path(snapshot[0]).read_text() == "content"
     with pytest.raises(ValueError, match="not a session upload"):
         streaming._verified_steer_attachment_paths(
             "sid",

@@ -15717,31 +15717,119 @@ def _steer_attachment_paths(value) -> list[str]:
 
 
 def _verified_steer_attachment_paths(session_id: str, value) -> list[str]:
-    """Accept inbox files or expand contained extracted archives into files."""
+    """Copy inbox inputs through no-follow descriptors into private, stable files.
+
+    Snapshots live until session inbox deletion: accepted guidance can be read
+    later by the Agent, including after the HTTP request and run have ended.
+    """
+    import shutil
+    import stat
+    import tempfile
     from api.upload import _session_attachment_dir
 
-    session_root = _session_attachment_dir(str(session_id)).resolve()
-    verified = []
-    for raw in _steer_attachment_paths(value):
-        source = Path(raw).expanduser()
-        candidate = source.resolve()
-        if source.is_symlink() or not candidate.is_relative_to(session_root) or candidate == session_root:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not value or len(value) > 20:
+        raise ValueError("Steer requires 1-20 attachment paths")
+    root = _session_attachment_dir(str(session_id)).resolve()
+    raw_paths = []
+    for raw in value:
+        if not isinstance(raw, str) or not raw.strip() or len(raw) > 2048 or re.search(r"[\x00-\x1f\x7f]", raw):
+            raise ValueError("Invalid Steer attachment path")
+        path = Path(raw).expanduser()
+        try:
+            parts = path.relative_to(root).parts
+        except ValueError:
+            raise ValueError("Steer attachment path is not a session upload") from None
+        if not parts or any(part in (".", "..") for part in parts) or parts[0].startswith(".steer-snapshot-"):
             raise ValueError("Steer attachment path is not a session upload")
-        if candidate.is_file():
-            verified.append(str(candidate))
-            continue
-        if not candidate.is_dir():
-            raise ValueError("Steer attachment path is not a session upload")
-        # Archive extraction returns a directory. Validate every member before
-        # passing any paths to the runtime; never follow links out of the inbox.
-        members = sorted(candidate.rglob("*"))
-        for member in members:
-            if member.is_symlink() or not member.resolve().is_relative_to(session_root):
-                raise ValueError("Steer attachment path escapes session root or is a symlink")
-            if not member.is_file() and not member.is_dir():
-                raise ValueError("Steer attachment path is not a regular file")
-        verified.extend(str(member.resolve()) for member in members if member.is_file())
-    return verified
+        raw_paths.append(parts)
+    if len(set(raw_paths)) != len(raw_paths):
+        raise ValueError("Duplicate Steer attachment path")
+
+    # The inbox itself is server-owned. Every untrusted descendant is opened
+    # relative to a retained directory fd; no resolve/stat-then-open gap.
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    snapshot = None
+    result = []
+    seen = set()
+    visited = 0
+    total = 0
+    try:
+        snapshot = Path(tempfile.mkdtemp(prefix=".steer-snapshot-", dir=root))
+        dest_fd = os.open(snapshot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            def copy_file(fd, identity):
+                nonlocal total
+                if identity in seen:
+                    return
+                seen.add(identity)
+                if len(result) >= 20:
+                    raise ValueError("Steer has more than 20 attachment files")
+                safe_name = re.sub(r"[^\w.\-]", "_", identity[-1])[:180]
+                name = f"{len(result):02d}-{safe_name}"
+                out_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=dest_fd)
+                try:
+                    while True:
+                        chunk = os.read(fd, 65536)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > 20 * 1024 * 1024:
+                            raise ValueError("Steer attachments exceed 20 MiB")
+                        offset = 0
+                        while offset < len(chunk):
+                            offset += os.write(out_fd, chunk[offset:])
+                    os.fchmod(out_fd, 0o400)
+                finally:
+                    os.close(out_fd)
+                result.append(str(snapshot / name))
+
+            def visit(parent_fd, name, identity):
+                nonlocal visited
+                visited += 1
+                if visited > 200 or len(identity) > 32:
+                    raise ValueError("Steer archive exceeds traversal limit")
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=parent_fd)
+                try:
+                    mode = os.fstat(fd).st_mode
+                    if stat.S_ISREG(mode):
+                        copy_file(fd, identity)
+                    elif stat.S_ISDIR(mode):
+                        if identity in seen:
+                            return
+                        seen.add(identity)
+                        for child in sorted(os.listdir(fd)):
+                            visit(fd, child, identity + (child,))
+                    else:
+                        raise ValueError("Steer attachment is not a regular file or directory")
+                finally:
+                    os.close(fd)
+
+            for parts in raw_paths:
+                parent = os.dup(root_fd)
+                try:
+                    for component in parts[:-1]:
+                        next_fd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                          dir_fd=parent)
+                        os.close(parent)
+                        parent = next_fd
+                    visit(parent, parts[-1], parts)
+                finally:
+                    os.close(parent)
+            if not result:
+                raise ValueError("Steer attachments contain no files")
+        finally:
+            os.close(dest_fd)
+        return result
+    except (OSError, ValueError) as exc:
+        if snapshot is not None:
+            shutil.rmtree(snapshot)
+        raise ValueError("Steer attachment rejected: " + str(exc)) from exc
+    finally:
+        os.close(root_fd)
 
 
 def _steer_display_file_names(value) -> list[str]:
@@ -15889,6 +15977,7 @@ def _handle_chat_steer(handler, body: dict) -> bool:
 
     sid = str((body or {}).get("session_id", "") or "").strip()
     structured_input = "user_text" in (body or {}) or "attachment_paths" in (body or {})
+    attachment_paths = []
     if structured_input:
         display_text = str((body or {}).get("user_text") or "").strip()
         try:
@@ -15899,28 +15988,42 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), 400)
         text = _steer_runtime_text(display_text, attachment_paths)
-        display_files = _steer_display_file_names(attachment_paths)
+        display_files = [re.sub(r"^\d{2}-", "", Path(path).name) for path in attachment_paths]
     else:
         # Legacy clients send one authoritative text string. Ignore any separate
         # display_text so the transcript can never hide different runtime input.
         text = str((body or {}).get("text", "") or "").strip()
         display_text = text
         display_files = _steer_display_file_names((body or {}).get("files"))
+    def discard_snapshot():
+        if structured_input and attachment_paths:
+            import shutil
+            shutil.rmtree(Path(attachment_paths[0]).parent)
+
     if not sid:
+        discard_snapshot()
         return bad(handler, "session_id required")
     if not text:
+        discard_snapshot()
         return bad(handler, "text required")
 
     try:
         session = get_session(sid)
     except KeyError:
+        discard_snapshot()
         return j(handler, {"accepted": False, "fallback": "session_not_found", "stream_id": None})
     stream_id = getattr(session, "active_stream_id", None) or None
     if not stream_id:
+        discard_snapshot()
         return j(handler, {"accepted": False, "fallback": "not_running", "stream_id": None})
-    # HTTP writes occur after the stream lock is released.
-    return j(handler, _steer_bound_stream(sid, stream_id, text,
-        display_text=display_text, files=display_files))
+    # HTTP writes occur after the stream lock is released. Rejected guidance
+    # has no future reader; accepted snapshots remain until session deletion.
+    outcome = _steer_bound_stream(sid, stream_id, text,
+        display_text=display_text, files=display_files)
+    if structured_input and attachment_paths and not outcome.get("accepted"):
+        import shutil
+        shutil.rmtree(Path(attachment_paths[0]).parent)
+    return j(handler, outcome)
 
 
 def _steer_response(outcome: dict, sid: str, active_stream_id: str) -> dict:
