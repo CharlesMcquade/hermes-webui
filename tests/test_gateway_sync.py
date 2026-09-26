@@ -298,6 +298,8 @@ def test_webui_state_db_session_without_sidecar_appears_when_agent_sessions_enab
 def test_active_cli_state_db_session_with_persisted_user_turn_is_visible_in_cli_bucket():
     """Active default-title CLI rows with persisted user content stay visible in the CLI bucket."""
     conn = _ensure_state_db()
+    # Match Agent's canonical title constraint even in a standalone test DB.
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_title_unique ON sessions(title) WHERE title IS NOT NULL")
     active_sid = 'cli_active_visible_001'
     older_sid = 'cli_older_visible_001'
     ended_sid = 'cli_ended_hidden_001'
@@ -325,7 +327,7 @@ def test_active_cli_state_db_session_with_persisted_user_turn_is_visible_in_cli_
             "INSERT OR REPLACE INTO sessions "
             "(id, source, title, model, started_at, message_count, ended_at, end_reason) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (ended_sid, 'cli', 'Untitled', 'openai/gpt-5', now + 10, 1, now + 11, 'cli-close'),
+            (ended_sid, 'cli', 'Cli Session', 'openai/gpt-5', now + 10, 1, now + 11, 'cli-close'),
         )
         conn.execute("DELETE FROM messages WHERE session_id = ?", (ended_sid,))
         _insert_message(conn, ended_sid, 'user', 'Ended CLI session', now + 11)
@@ -897,6 +899,8 @@ def test_compression_chain_with_all_empty_segments_is_hidden():
 def test_default_title_cli_compression_chain_is_kept_by_lineage():
     """Default-titled CLI compression chains are meaningful even with a short tip."""
     conn = _ensure_state_db()
+    # Full runs initialize Agent's unique-title index; standalone runs must too.
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_title_unique ON sessions(title) WHERE title IS NOT NULL")
     ids_to_remove = ('cli_default_compress_root_001', 'cli_default_compress_tip_001')
     t0 = time.time() - 430
     try:
@@ -904,7 +908,7 @@ def test_default_title_cli_compression_chain_is_kept_by_lineage():
             conn,
             'cli_default_compress_root_001',
             source='cli',
-            title='Cli Session',
+            title='Untitled',
             started_at=t0,
             ended_at=t0 + 100,
             end_reason='compression',
