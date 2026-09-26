@@ -86,7 +86,7 @@ def test_import_cli_queue_helper_is_guarded_and_runs_in_background():
     assert "threading.Thread(target=_run, daemon=True" in block
 
 
-def test_import_cli_queue_helper_generates_title_once_for_placeholder_session(monkeypatch):
+def test_import_cli_queue_helper_generates_title_once_for_placeholder_session(monkeypatch, isolated_title_db):
     persisted = []
     generated = []
 
@@ -101,6 +101,7 @@ def test_import_cli_queue_helper_generates_title_once_for_placeholder_session(mo
             self.read_only = False
 
     current = FakeSession("CLI Session")
+    isolated_title_db.ensure_session(session_id=current.session_id, source="webui")
 
     class InlineThread:
         def __init__(self, *, target, daemon, name):
