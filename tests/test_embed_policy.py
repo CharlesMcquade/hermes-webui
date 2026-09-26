@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import io
 import json
-import os
+
 import threading
 from urllib.parse import urlparse
 
@@ -63,7 +63,7 @@ class _FakeHandler:
 def _get(handler, path):
     from api.routes import handle_get
 
-    result = handle_get(handler, urlparse("http://testserver" + path))
+    handle_get(handler, urlparse("http://testserver" + path))
     return True  # 404s are surfaced via j(); assert on handler.status instead
 
 
@@ -264,7 +264,7 @@ def test_embed_route_denied_without_session_when_auth_enabled(monkeypatch, tmp_p
     monkeypatch.setattr(auth_mod, "is_auth_enabled", lambda: True)
     monkeypatch.setattr(auth_mod, "parse_cookie", lambda handler: "")
 
-    from server import Handler as ServerHandler
+
 
     # Public-path dispatch for /embed must reach the route handler (shell
     # served), while /api/* on the same anonymous request stays 401.

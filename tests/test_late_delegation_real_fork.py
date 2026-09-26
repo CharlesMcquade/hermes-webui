@@ -1,10 +1,10 @@
 """No-network exercise of a real Agent AIAgent review fork in isolated state."""
-import json
+
 import os
 from pathlib import Path
 import subprocess
 import sys
-import textwrap
+
 
 import pytest
 
