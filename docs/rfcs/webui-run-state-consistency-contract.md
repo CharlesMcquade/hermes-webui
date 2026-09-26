@@ -364,6 +364,15 @@ both movement and terminal-marker removal. Cancelled provider context remains
 exact-token owned; no cross-turn context ownership is inferred from text,
 timestamps, or display ordinals.
 
+A session-journal deletion must first block new leases for that session and
+wait for both current holders and already-waiting users of its per-path locks.
+Only after their append/publication transactions finish may it remove files
+and evict the corresponding lock, acceptance fence, and sequence caches. A
+later explicit writer may recreate a journal, but an in-flight Steer and
+terminal publication must never acquire different locks for the same path
+across deletion. This is an in-process ordering guarantee, not a cross-process
+session-delete admission protocol.
+
 ## Inactive compression continuation recovery
 
 The Agent profile's SQLite compression lineage owns the canonical continuation,

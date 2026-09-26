@@ -4,6 +4,8 @@ Only scheduling at the real append boundary is controlled. Writers, sequence
 allocation, on-disk JSONL and the session replay reader are production code.
 """
 from concurrent.futures import ThreadPoolExecutor
+import os
+import shutil
 import threading
 
 import pytest
@@ -97,3 +99,102 @@ def test_unused_writers_do_not_grow_registry_and_used_lock_is_cleaned_up(tmp_pat
     assert writers[0].append_sse_event("token", {"text": "again"})["seq"] == 1
     assert sum(key[0] == parent for key in run_journal._WRITER_LOCKS) == 1
     assert run_journal.delete_run_journal(sid, session_dir=tmp_path)
+
+
+def test_delete_cannot_overtake_accepted_steer_or_split_terminal_lock(tmp_path, monkeypatch):
+    """Deletion drains in-flight users before removing/evicting a run path."""
+    writer = run_journal.RunJournalWriter("delete_race", "run", session_dir=tmp_path)
+    writer.append_sse_event("start", {})
+    path = writer._path
+    key = (str(path.parent), path.name, str(os.getpid()))
+    original_lock = run_journal._WRITER_LOCKS[key]
+    entered = threading.Event()
+    release = threading.Event()
+    delete_started = threading.Event()
+    remove_attempted = threading.Event()
+    terminal_started = threading.Event()
+    real_rmtree = shutil.rmtree
+
+    def traced_rmtree(*args, **kwargs):
+        remove_attempted.set()
+        return real_rmtree(*args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", traced_rmtree)
+
+    def accept():
+        entered.set()
+        assert release.wait(5), "paused Steer was not released"
+        return True
+
+    def delete():
+        delete_started.set()
+        return run_journal.delete_run_journal("delete_race", session_dir=tmp_path)
+
+    def close():
+        terminal_started.set()
+        return writer.publish_terminal("cancel", {}, lambda _: None)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        guiding = pool.submit(writer.accept_and_append_if_nonterminal,
+                              "steer_delivered", {"text": "accepted"}, accept)
+        try:
+            assert entered.wait(5)
+            deleting = pool.submit(delete)
+            assert delete_started.wait(5)
+            closing = pool.submit(close)
+            assert terminal_started.wait(5)
+            # The old implementation deletes and evicts the old lock while
+            # Steer is still in its journal critical section; a terminal then
+            # acquires a *different* lock for the very same path.
+            assert not remove_attempted.wait(0.2)
+            assert run_journal._WRITER_LOCKS[key] is original_lock
+            assert not closing.done()
+        finally:
+            release.set()
+        assert guiding.result(timeout=5)[0] is True
+        assert deleting.result(timeout=5) is True
+        closing.result(timeout=5)
+
+
+def test_delete_drains_waiting_terminal_before_evicting_path(tmp_path):
+    writer = run_journal.RunJournalWriter("delete_waiters", "run", session_dir=tmp_path)
+    writer.append_sse_event("start", {})
+    key = (str(writer._path.parent), writer._path.name, str(os.getpid()))
+    entered = threading.Event()
+    release = threading.Event()
+    frames = []
+
+    def accept():
+        entered.set()
+        assert release.wait(5)
+        return True
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        steering = pool.submit(writer.accept_and_append_if_nonterminal,
+                               "steer_delivered", {}, accept, publish=frames.append)
+        try:
+            assert entered.wait(5)
+            terminal = pool.submit(writer.publish_terminal, "cancel", {}, frames.append)
+            with run_journal._WRITER_LOCKS_COND:
+                assert run_journal._WRITER_LOCKS_COND.wait_for(
+                    lambda: run_journal._WRITER_LOCK_USERS.get(key) == 2, timeout=5
+                ), "terminal did not acquire a waiting lease"
+            deleting = pool.submit(run_journal.delete_run_journal,
+                                   "delete_waiters", session_dir=tmp_path)
+            with run_journal._WRITER_LOCKS_COND:
+                assert run_journal._WRITER_LOCKS_COND.wait_for(
+                    lambda: str(writer._path.parent) in run_journal._DELETING_SESSION_DIRS,
+                    timeout=5,
+                ), "deletion did not enter its session gate"
+            assert not terminal.done()
+            assert not deleting.done()
+        finally:
+            release.set()
+        assert steering.result(timeout=5)[0] is True
+        terminal.result(timeout=5)
+        assert deleting.result(timeout=5) is True
+    assert [frame["event"] for frame in frames] == ["steer_delivered", "cancel"]
+    assert not writer._path.exists()
+    assert key not in run_journal._WRITER_LOCK_USERS
+    assert key not in run_journal._WRITER_LOCKS
+    assert str(writer._path.parent) not in run_journal._DELETING_SESSION_DIRS
