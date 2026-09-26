@@ -773,6 +773,15 @@ def _run_gateway_runs_api_streaming(
                         update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
                 sse_event = "message"
                 continue
+            if payload_event == "interim_assistant":
+                interim_text = str(payload.get("text") or "")
+                if interim_text:
+                    put_gateway_event("interim_assistant", {
+                        "text": interim_text,
+                        "already_streamed": bool(payload.get("already_streamed")),
+                    })
+                sse_event = "message"
+                continue
             if payload_event == "message.delta":
                 delta = str(payload.get("delta") or "")
                 if delta:

@@ -415,9 +415,11 @@ class DeterministicGateway:
                             "delta": TERMINAL_PROCESS_TEXT,
                         })
                     if owner.scenario == "turn-worklog":
-                        # Let the browser test deliver a real interim_assistant
-                        # client event before the next tool. Gateway message.delta
-                        # is final-answer text, not an interim update.
+                        self._event("interim_assistant", {
+                            "event": "interim_assistant",
+                            "text": "Lifecycle progress: checking fixture data.",
+                            "already_streamed": False,
+                        })
                         owner.activity_ready.set()
                         if not owner.release_tool.wait(timeout=30):
                             return
