@@ -7984,6 +7984,9 @@ def _reload_cli_sessions_after_inflight(
                 db_path=db_path,
             )
     try:
+        cached_sessions = _copy_fresh_cli_sessions_cache_entry(cache_key)
+        if cached_sessions is not None:
+            return cached_sessions
         invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
         return _load_and_cache_cli_sessions(
             cache_key=cache_key,
@@ -9495,6 +9498,11 @@ def get_cli_sessions(
         event, is_owner = _cli_sessions_cache_claim_rebuild(cache_key)
         if is_owner:
             try:
+                # A peer may have published between the initial miss and our
+                # singleflight claim. Recheck before paying for another scan.
+                cached_sessions = _copy_fresh_cli_sessions_cache_entry(cache_key)
+                if cached_sessions is not None:
+                    return cached_sessions
                 invalidation_stamp = _cli_sessions_cache_invalidation_stamp()
                 return _load_and_cache_cli_sessions(
                     cache_key=cache_key,
