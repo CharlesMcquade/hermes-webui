@@ -31,6 +31,13 @@ can later read that result via `delegate_task(action="inspect", delegation_ids=[
 Background claim/settlement and the private review worker use the exact session's
 resolved profile home, not an ambient WebUI startup/request home.
 
+The Gateway transcript merge must retain `delegation_wakeup` provenance on the
+stream-owned user row even when `state.db` has already supplied an untagged copy
+of that same turn. Match the active stream token and an explicitly tagged result
+row before stamping the retained display row; matching message text alone is not
+proof of origin. The WebUI display filter hides tagged rows only, leaving model
+context intact. Historical untagged rows are not reclassified on load.
+
 For isolated integration against an Agent feature checkout, set
 `HERMES_AGENT_TRIAGE_SOURCE` to that checkout when running
 `./scripts/test.sh tests/test_late_delegation_crossrepo.py tests/test_late_delegation_real_fork.py`;
