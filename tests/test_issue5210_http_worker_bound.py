@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._ssl_test_context import server_ssl_context
 from server import QuietHTTPServer
 
 
@@ -338,7 +339,7 @@ def test_long_running_request_does_not_reject_healthy_in_cap_request(monkeypatch
 def test_tls_overflow_does_not_force_accept_loop_handshake(monkeypatch, tmp_path):
     monkeypatch.setattr(QuietHTTPServer, "max_request_workers", 1, raising=False)
     cert, key = _generate_self_signed_cert(tmp_path)
-    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context = server_ssl_context()
     server_context.load_cert_chain(cert, key)
 
     with _ServerRunner(_GateHandler, ssl_context=server_context) as srv:

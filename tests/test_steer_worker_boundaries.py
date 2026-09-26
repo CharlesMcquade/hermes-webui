@@ -99,6 +99,11 @@ def worker_scene(tmp_path, monkeypatch):
     monkeypatch.setattr(streaming, "get_session", lambda sid: session)
     monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
     monkeypatch.setattr(streaming, "resolve_model_provider", lambda *a, **kw: ("test-model", "openai", None))
+    # The synthetic Agent can reach the real final context-length lookup on
+    # settlement. Keep this control-plane fixture off endpoint metadata I/O;
+    # that client also injects truststore into ssl process-wide during pytest.
+    from agent import model_metadata
+    monkeypatch.setattr(model_metadata, "get_model_context_length", lambda *a, **kw: 128000)
     monkeypatch.setattr(config, "get_config", lambda *a, **kw: {})
     monkeypatch.setattr(config, "_resolve_cli_toolsets", lambda *a, **kw: [])
     state = types.ModuleType("hermes_state")

@@ -17,12 +17,13 @@ import http.server
 import importlib.util
 import os
 import socket
-import ssl
 import subprocess
 import threading
 from pathlib import Path
 
 import pytest
+
+from tests._ssl_test_context import server_ssl_context
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -57,7 +58,7 @@ class _Server:
         self.port = _free_port()
         self.httpd = http.server.HTTPServer(("127.0.0.1", self.port), _HealthHandler)
         if cert and key:
-            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx = server_ssl_context()
             ctx.load_cert_chain(cert, key)
             self.httpd.socket = ctx.wrap_socket(self.httpd.socket, server_side=True)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
