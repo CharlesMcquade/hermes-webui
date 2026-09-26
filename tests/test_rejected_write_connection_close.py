@@ -1130,6 +1130,7 @@ def _render_response_headers(prepare=None) -> str:
 
     handler = Handler.__new__(Handler)
     handler.request_version = "HTTP/1.1"
+    handler.headers = {}  # end_headers also evaluates extension-origin CORS.
     handler.close_connection = False
     handler.wfile = io.BytesIO()
     handler._headers_buffer = []
@@ -1186,6 +1187,7 @@ def test_end_headers_on_handler_stub_without_close_connection(monkeypatch):
 
     sent: list[tuple[str, str]] = []
     handler = Handler.__new__(Handler)
+    handler.headers = {}  # Keep the stub's missing close_connection as the only omission.
     handler.send_header = lambda key, value: sent.append((key, value))
     monkeypatch.setattr(BaseHTTPRequestHandler, "end_headers", lambda self: None)
 
