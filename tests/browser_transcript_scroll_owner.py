@@ -642,9 +642,28 @@ def cache_case(page, transport, evidence):
     assert evidence['state']['stamp']==evidence['state']['sid']=='fixture', evidence
     assert evidence['state']['observed']=='fixture' and evidence['state']['anchor'], evidence
     before=snapshot(page)
-    page.evaluate('async()=>await _loadOlderMessages()')
-    after=snapshot(page)
-    assert abs(movement(before,after))<=4, ('cache re-entry prepend drift',before,after)
+    # _loadOlderMessages resolves after the synchronous DOM transaction, but
+    # before Chromium has resolved content-visibility's offscreen estimates for
+    # paint. A same-task forced layout can report a temporary scroll maximum
+    # that never reaches the screen. Check the first three paint opportunities
+    # and later idle position instead of that pre-paint intermediate geometry.
+    frames=page.evaluate("""async()=>{
+      await _loadOlderMessages();
+      const painted=[];
+      for(let i=0;i<3;i++){
+        await new Promise(resolve=>requestAnimationFrame(resolve));
+        painted.push(ownerSnapshot());
+      }
+      return painted;
+    }""")
+    evidence['painted']=frames
+    for frame in frames:
+        assert_snapshot(frame)
+        assert frame['oldest']<before['oldest'], ('cache prepend not loaded',before,frame)
+        assert abs(movement(before,frame))<=4, ('cache re-entry painted-frame drift',before,frame)
+    idle(page)
+    evidence['after_idle']=snapshot(page)
+    assert abs(movement(before,evidence['after_idle']))<=4, ('cache re-entry idle drift',before,evidence['after_idle'])
 
 
 def main():

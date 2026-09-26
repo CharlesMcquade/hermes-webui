@@ -131,6 +131,7 @@ let writeObservation = null;
 const container = {{
   scrollHeight: 1000,
   clientHeight: 300,
+  contains(node) {{ return node === row; }},
   getBoundingClientRect() {{ return {{top:0}}; }},
   get scrollTop() {{ return storedTop; }},
   set scrollTop(value) {{
