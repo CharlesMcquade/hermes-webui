@@ -147,7 +147,7 @@ class TestHandleChatSteerHappyPath:
         assert body["published"] is True
         assert body["steer_event"]["type"] == "steer_delivered"
 
-    def test_steers_exact_active_stream_agent_not_retired_session_cache(self, _clear_caches):
+    def test_steers_exact_active_stream_agent_not_retired_session_cache(self, _clear_caches, monkeypatch):
         from api.streaming import _handle_chat_steer
         from api.config import AGENT_INSTANCES, SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK, STREAMS, STREAMS_LOCK
         import queue as _q
@@ -160,6 +160,9 @@ class TestHandleChatSteerHappyPath:
         with STREAMS_LOCK:
             STREAMS[stream_id] = _q.Queue()
             AGENT_INSTANCES[stream_id] = active_agent
+        from api import config
+        monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
+        monkeypatch.setattr(config, "ACTIVE_RUNS", {stream_id: {"session_id": sid, "backend": "legacy", "phase": "running"}})
 
         session = MagicMock(active_stream_id=stream_id)
         with patch("api.streaming.get_session", return_value=session), patch(
@@ -184,7 +187,7 @@ class TestHandleChatSteerHappyPath:
 class TestHandleChatSteerFallbacks:
     """Each gate that fails returns a structured fallback the frontend can branch on."""
 
-    def test_no_cached_agent(self, _clear_caches):
+    def test_no_cached_agent(self, _clear_caches, monkeypatch):
         from api.streaming import _handle_chat_steer
         from api.config import STREAMS, STREAMS_LOCK
         import queue as _q
@@ -192,6 +195,9 @@ class TestHandleChatSteerFallbacks:
         sid, stream_id = "sid_x", "stream_x"
         with STREAMS_LOCK:
             STREAMS[stream_id] = _q.Queue()
+        from api import config
+        monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
+        monkeypatch.setattr(config, "ACTIVE_RUNS", {stream_id: {"session_id": sid, "backend": "legacy", "phase": "running"}})
         with patch("api.streaming.get_session", return_value=MagicMock(active_stream_id=stream_id)):
             handler = _make_handler()
             _handle_chat_steer(handler, {"session_id": sid, "text": "hint"})
@@ -225,7 +231,7 @@ class TestHandleChatSteerFallbacks:
             "stream_id": stream_id,
         }
 
-    def test_agent_lacks_steer_method(self, _clear_caches):
+    def test_agent_lacks_steer_method(self, _clear_caches, monkeypatch):
         from api.streaming import _handle_chat_steer
         from api.config import AGENT_INSTANCES, STREAMS, STREAMS_LOCK
         import queue as _q
@@ -236,6 +242,9 @@ class TestHandleChatSteerFallbacks:
         with STREAMS_LOCK:
             STREAMS[stream_id] = _q.Queue()
             AGENT_INSTANCES[stream_id] = agent
+        from api import config
+        monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
+        monkeypatch.setattr(config, "ACTIVE_RUNS", {stream_id: {"session_id": sid, "backend": "legacy", "phase": "running"}})
         with patch("api.streaming.get_session", return_value=MagicMock(active_stream_id=stream_id)):
             handler = _make_handler()
             _handle_chat_steer(handler, {"session_id": sid, "text": "hint"})
