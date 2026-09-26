@@ -59,8 +59,11 @@ $('messages').scrollTop=1000;
  _commitMessageWindow($('msgInner'),staged,null,true);
  if(release){if($('messages').style.overflowAnchor!=='none')throw Error('lost outer owner');release();}
 }""")
-        page.wait_for_timeout(100)
-        assert page.evaluate("getComputedStyle($('messages')).overflowAnchor") == expected
+        # The shared suppressor releases on the next animation frame, not after
+        # a fixed wall-clock delay. Wait for that paint opportunity so a busy
+        # headless browser cannot make this an arbitrary 100 ms timing test.
+        page.wait_for_function("expected => getComputedStyle($('messages')).overflowAnchor === expected",
+                               arg=expected, timeout=1500)
         # The mobile hold must also survive commit and release on its own timer.
         mobile_start = source.index('const _MOBILE_ANCHOR_BASE_SETTLE_MS=')
         mobile_end = source.index('\n};', source.index('window._fixMobileScrollJank=function')) + 3

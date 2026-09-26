@@ -39,6 +39,10 @@ submitted as a merge of the divergent development fork.
 - Programmatic-scroll freshness suppresses follow interpretation, not mounting
   required by subsequent real input. Blank recovery requests an owned window
   update instead of recursively switching to a full transcript render.
+- Auto-follow and deferred bottom-settle writers may run only while the reader
+  still owns the tail. A queued resize frame, quiet timer, or static-content
+  fallback must not reclaim a reader who moved away, including a programmatic
+  move with no wheel event. Genuine pinned readers still follow late growth.
 - Markdown cache identity uses the complete input; the existing entry-count
   bound remains. Equal-length messages sharing a prefix and suffix must not
   paint one another's bodies.
@@ -232,6 +236,29 @@ native-anchoring disabled by CSS. The browser regression runs through pytest.
 Both-engine desktop/narrow/mobile reruns pass oversized natural traversal (6/6)
 and the text/lifecycle matrix (60/60). [Tested source hashes and results](../images/transcript-scroll-owner/native-anchor-results.json)
 identify this follow-up separately from the earlier evidence.
+
+## Upstream merge verification
+
+After the upstream semantic merge, the reader-owner and queued-follow guards
+were checked with the executed Node callback regression
+`tests/test_7617_deferred_follow_owner.py` (red on the pre-guard merge, green
+with the guard). It covers programmatic movement, wheel/key/touch intent,
+queued frames/timers, late image growth, and a genuinely pinned tail.
+The cached-session prepend oracle checks three painted frames and idle
+continuity; a same-task forced layout during a `content-visibility` estimate
+can differ from what is painted and is not itself a visible jump. The synthetic
+Compact Worklog fixture marks a non-final tool activity burst so its visible
+reasoning is actually projected into a Worklog before asserting activity-only
+reader ownership. Neither correction relaxes the content-offset or mounted-row
+bounds.
+
+Local isolated Chromium/WebKit checks passed at desktop, narrow, and mobile
+for the identity/image/cold/cache matrix (24/24), and for the activity/natural
+matrix on ordinary and oversized tool histories (12/12 per fixture). A
+neighboring native-anchor browser test now waits for its own animation-frame
+release instead of asserting at an arbitrary 100 ms; the bounded release gate
+passed six consecutive runs after intermittent pre-fix failures. These are
+local results, not hosted CI or hardware-touch certification.
 
 ## Scope limits
 
