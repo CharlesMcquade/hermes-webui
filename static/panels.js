@@ -7300,7 +7300,7 @@ async function switchToProfile(name) {
     // reconciliation below; every other exit releases it in `finally`.
     _tabVisGuardHeld = true;
     if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending++;
-    _invalidateVisionCapabilityFirst();
+    if(typeof _invalidateVisionCapabilityFirst==='function') _invalidateVisionCapabilityFirst();
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
