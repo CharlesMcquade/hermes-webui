@@ -26,7 +26,7 @@ def test_streaming_uses_one_transaction_for_journal_and_queue_delivery():
     assert "run_journal.append_and_publish_sse_event(event, data, _publish_journaled)" in block
     assert "q.put_nowait(queue_item)" in block
     assert "Failed to append run journal event" in block
-    assert 'queue_item = (event, data, event_id) if hasattr(q, "subscribe_with_snapshot") else (event, data)' in block
+    assert 'queue_item = (event, data, event_id) if event_id and hasattr(q, "subscribe_with_snapshot") else (event, data)' in block
 
 
 def test_gateway_uses_same_transaction_for_journal_and_queue_delivery():

@@ -71,6 +71,10 @@ const step = new Function(
   '_isSessionEndlessScrollEnabled',
   '_messagesTruncated',
   '_loadOlderMessages',
+  '_scrollbarDragActive',
+  '_recentMessageWheelIntent',
+  '_recentMessageTouchScrollIntent',
+  '_recentMessageKeyScrollIntent',
   payload.body + `
 return {
   _lastScrollTop,
@@ -91,6 +95,7 @@ let state = {
 };
 
 const noop = () => {};
+const window = { _autoScrollFollow: false };
 for (const sample of payload.samples) {
   state = step(
     sample,
@@ -107,6 +112,10 @@ for (const sample of payload.samples) {
     noop,
     () => false,
     false,
+    noop,
+    false,
+    noop,
+    noop,
     noop
   );
 }

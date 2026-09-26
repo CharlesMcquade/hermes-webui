@@ -72,7 +72,11 @@ def test_markdown_tables_use_a_scroll_surface_and_readable_wrapping():
     assert ".md-table-scroll{max-width:100%;overflow-x:auto" in style
     assert ".md-table-scroll table{width:max-content;min-width:100%" in style
     assert "overflow-wrap:normal;word-break:normal;hyphens:none" in style
-    assert ".msg-body table { font-family:var(--font-mono); }" not in style
+    # Monospace is the default for tabular data; reading-focused skins override it.
+    assert ".msg-body table { font-family:var(--font-mono); }" in style
+    for skin in ("graphite", "codex", "terracotta", "github"):
+        assert f':root[data-skin="{skin}"] .msg-body table' in style
+    assert "font-family:var(--font-conversation)!important;" in style
     assert "table-layout:fixed" not in style
 
 

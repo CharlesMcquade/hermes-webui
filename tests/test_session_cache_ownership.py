@@ -138,7 +138,7 @@ def test_handle_chat_steer_ignores_mismatched_session_cache_without_stream_agent
 
     payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
     assert handler.status == 200
-    assert payload == {"accepted": False, "fallback": "no_cached_agent", "stream_id": None}
+    assert payload == {"accepted": False, "fallback": "stream_dead", "stream_id": None}
     assert config.SESSION_AGENT_CACHE["requested"] == (wrong_agent, "sig")
     assert closed_entries == []
     assert steered == []

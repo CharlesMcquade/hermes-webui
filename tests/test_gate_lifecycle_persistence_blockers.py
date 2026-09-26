@@ -186,12 +186,12 @@ class TestBlocker1PreStartWorkerRetirement:
         from pathlib import Path
         streaming_src = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text()
 
-        # Find the pre-start return block: "q = STREAMS.get(stream_id)" followed
-        # by "if q is None:" ... "return"
+        # Find the cancellation pre-start return block by its unique branch
+        # comment; channel lookup now happens inside the publication lock.
         import re
         # The pre-start block should contain _retire_worker_cancelled_state
         # between "if q is None:" and the first "return" after it
-        m = re.search(r'q = STREAMS\.get\(stream_id\)\s*\n\s*if q is None:.*?return', streaming_src, re.DOTALL)
+        m = re.search(r'if q is None:\s*\n\s*# The stream was cancelled before the worker started;.*?\n\s*return\b', streaming_src, re.DOTALL)
         assert m, "pre-start return block not found in streaming.py"
         prestart_block = m.group()
         assert '_retire_worker_cancelled_state' in prestart_block, (

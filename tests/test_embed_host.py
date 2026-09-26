@@ -201,15 +201,15 @@ def test_workspace_embed_401_no_reload():
 
 
 def test_messages_js_untouched_by_spike():
-    """Spike constraint: messages.js must not be edited (frame adapts beneath it)."""
-    import subprocess
-    out = subprocess.run(
-        ["git", "diff", "--name-only", "b75268eb248a3443bb9b177e75e4845cb86aa5f3", "HEAD"],
-        cwd=str(ROOT), capture_output=True, text=True,
-    ).stdout
-    changed = {line.strip() for line in out.splitlines() if line.strip()}
-    assert "static/messages.js" not in changed
-    assert "static/ui.js" not in changed
+    """Embedding stays in the frame/boot layer, not the stream/render engines.
+
+    The original spike diff against a historical commit cannot constrain all
+    future, unrelated edits to messages.js and ui.js.
+    """
+    for source in ((ROOT / "static" / "messages.js").read_text(encoding="utf-8"),
+                   (ROOT / "static" / "ui.js").read_text(encoding="utf-8")):
+        assert "hermes:embed-init" not in source
+        assert "hermes:embed-ready" not in source
 
 
 # ── Executed node-VM tests ──────────────────────────────────────────────────
