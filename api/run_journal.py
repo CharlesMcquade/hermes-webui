@@ -566,6 +566,12 @@ class RunJournalWriter:
             _CLOSED_ACCEPTANCE.add(self._path)
             existing, malformed = _read_jsonl(self._path)
             terminal = any(row.get("terminal") for row in existing)
+            # A second closure cannot create another replay row or live frame.
+            if event_name == "stream_end" and any(
+                row.get("event") == "stream_end" for row in existing
+            ):
+                _CLOSED_ACCEPTANCE.discard(self._path)
+                return None
             event = None
             if not malformed and (not terminal or event_name == "stream_end"):
                 try:
@@ -581,10 +587,9 @@ class RunJournalWriter:
                     "_synthetic": True}
             try:
                 publish(event)
-            except Exception:
-                logger.warning("Terminal publication failed for %s", self.run_id, exc_info=True)
-            if event.get("seq") is not None or terminal:
-                _CLOSED_ACCEPTANCE.discard(self._path)
+            finally:
+                if event.get("seq") is not None or terminal:
+                    _CLOSED_ACCEPTANCE.discard(self._path)
             return event
 
 

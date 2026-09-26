@@ -11327,6 +11327,8 @@ def _run_agent_streaming(
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
                 logger.debug("Failed to put event to queue")
+                if event in TERMINAL_SSE_EVENTS:
+                    raise
 
         if run_journal is not None:
             try:
@@ -11340,6 +11342,8 @@ def _run_agent_streaming(
                 return
             except Exception:
                 logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
+                if event in TERMINAL_SSE_EVENTS:
+                    return  # Never requeue a failed terminal publication twice.
         try:
             q.put_nowait((event, data))
         except Exception:
@@ -16564,6 +16568,12 @@ def cancel_stream(stream_id: str) -> dict:
                                 _STREAM_FALLBACK_NOTICES.pop(stream_id, None)
                     _claimed_fb_notice = None
 
+        if _emit_cancel_event and not q and (active_run_session_id or _snap_owner_session_id or _cancel_session_id):
+            # A detached worker still needs a durable terminal for reconnect.
+            _journal_sid = active_run_session_id or _snap_owner_session_id or _cancel_session_id
+            RunJournalWriter(str(_journal_sid), str(stream_id)).publish_terminal(
+                'cancel', _cancel_event_payload('Cancelled by user', session=_cancel_session_payload),
+                lambda _row: None)
         if _emit_cancel_event and q:
             _cancel_event_id = STREAM_LAST_EVENT_ID.get(stream_id)
             if _cancel_event_id and hasattr(q, "note_last_event_id"):
