@@ -27,6 +27,9 @@ _WRITER_LOCKS_COND = threading.Condition(_WRITER_LOCKS_GUARD)
 _WRITER_LOCK_USERS: dict[tuple[str, str, str], int] = {}
 _DELETING_SESSION_DIRS: set[str] = set()
 _CLOSED_ACCEPTANCE: set[Path] = set()
+# Live-only terminal frames have no journal row to dedupe retries against.
+# Access is serialized by the same per-path lease as append and deletion.
+_SYNTHETIC_TERMINALS: dict[Path, set[str]] = {}
 logger = logging.getLogger(__name__)
 # Next-seq to assign per run-journal file path, kept in memory so repeat appends
 # to the same run do not re-parse the whole file on every call. The per-path
@@ -592,12 +595,17 @@ class RunJournalWriter:
             _CLOSED_ACCEPTANCE.add(self._path)
             existing, malformed = _read_jsonl(self._path)
             terminal = any(row.get("terminal") for row in existing)
+            synthetic = _SYNTHETIC_TERMINALS.get(self._path, set())
             # A second closure cannot create another replay row or live frame.
             # A semantic terminal is settled once; only transport closure may
             # follow it, without replacing the authoritative outcome.
             if (event_name == "stream_end" and any(
                 row.get("event") == "stream_end" for row in existing
-            )) or (event_name != "stream_end" and terminal):
+            )) or (event_name == "stream_end" and "stream_end" in synthetic) or (
+                event_name != "stream_end" and (terminal or any(
+                    name != "stream_end" for name in synthetic
+                ))
+            ):
                 return None
             event = None
             if not malformed and (not terminal or event_name == "stream_end"):
@@ -607,6 +615,7 @@ class RunJournalWriter:
                 except Exception:
                     logger.warning("Terminal journal append failed for %s", self.run_id, exc_info=True)
             if event is None:
+                _SYNTHETIC_TERMINALS.setdefault(self._path, set()).add(event_name)
                 event = {"event_id": None, "seq": None, "run_id": self.run_id,
                     "session_id": self.session_id, "event": event_name,
                     "type": event_name, "payload": payload or {}, "terminal": True,
@@ -974,6 +983,8 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
                 _CLOSED_ACCEPTANCE.difference_update(
                     path for path in _CLOSED_ACCEPTANCE if path.parent == session_journal_dir
                 )
+                for path in [p for p in _SYNTHETIC_TERMINALS if p.parent == session_journal_dir]:
+                    del _SYNTHETIC_TERMINALS[path]
                 for key in [k for k in _WRITER_LOCKS if k[0] == dir_key]:
                     del _WRITER_LOCKS[key]
             with _SEQ_CACHE_LOCK:

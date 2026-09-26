@@ -43,3 +43,20 @@ def test_failed_terminal_append_does_not_reopen_steer_admission(tmp_path, monkey
     assert result[0] is False
     assert accepted == []
     assert [row["event"] for row in live] == ["cancel"]
+
+
+def test_failed_terminal_append_retry_publishes_once_even_without_journal_row(tmp_path, monkeypatch):
+    writer = run_journal.RunJournalWriter("retry_session", "run", session_dir=tmp_path)
+    live = []
+
+    def fail_append(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(run_journal, "_append_run_event_locked", fail_append)
+    writer.publish_terminal("error", {"message": "first"}, live.append)
+    writer.publish_terminal("error", {"message": "retry"}, live.append)
+    writer.publish_terminal("stream_end", {}, live.append)
+    writer.publish_terminal("stream_end", {}, live.append)
+    assert [row["event"] for row in live] == ["error", "stream_end"]
+    assert all(row["_synthetic"] for row in live)
+    assert run_journal.read_run_events("retry_session", "run", session_dir=tmp_path)["events"] == []
