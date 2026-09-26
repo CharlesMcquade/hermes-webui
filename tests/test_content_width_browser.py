@@ -208,7 +208,7 @@ def test_unbroken_prose_wraps_without_changing_table_or_code_scroll(page, width)
 def test_locale_switch_updates_width_control_text_and_accessible_names(page):
     page.add_script_tag(content=(ROOT / 'static/i18n.js').read_text())
     page.evaluate("_pickContentWidth('wide')")
-    for locale in ('en', 'fr', 'ja', 'en'):
+    for locale in ('en', 'fr', 'de', 'ja', 'en'):
         page.evaluate("lang => { setLocale(lang); applyLocaleToDOM(); }", locale)
         expected = page.evaluate("""() => ({
           button:t('content_width_current',t('content_width_wide')),
@@ -223,6 +223,8 @@ def test_locale_switch_updates_width_control_text_and_accessible_names(page):
             assert option.locator('span').inner_text() == text
             assert option.get_attribute('aria-label') == label
     assert page.evaluate("LOCALES.en.content_width_default !== LOCALES.fr.content_width_default")
+    assert page.evaluate("LOCALES.en.content_width_label !== LOCALES.de.content_width_label")
+    assert page.evaluate("LOCALES.en.content_width_default_aria !== LOCALES.de.content_width_default_aria")
 
 
 def test_width_locales_have_complete_independent_labels(page):
