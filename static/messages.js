@@ -4347,7 +4347,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _applyToAnchor('reasoning',{
       text:clean,
       local_id:localId,
-      seq:_nextAnchorLocalSeq(),
+      // The first journaled reasoning chunk owns this aggregate row. Keep its
+      // wire identity across subsequent chunks and journal snapshot hydration.
+      ...((options.sseEvent&&options.sseEvent.lastEventId)?{}:{seq:_nextAnchorLocalSeq()}),
       status:options.sealed?'completed':'running',
       activitySegmentSeq:segmentSeq,
       activityBurstId:_currentActivityBurstId,
