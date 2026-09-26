@@ -317,4 +317,3 @@ def test_manual_regenerate_api_rejects_concurrent_rename(title_state, monkeypatc
     assert status == 409
     assert "changed" in payload["error"]
     assert (s.title if writer == "webui" else db.get_session_title(s.session_id)) == "New manual title"
-
