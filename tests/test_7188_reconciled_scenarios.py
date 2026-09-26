@@ -133,3 +133,15 @@ def test_terminal_relay_closes_after_done_and_synthetic_errors(tmp_path, monkeyp
     assert len(published) == 1
     assert published[0]["event"] == "apperror"
     assert published[0].get("_synthetic") is True
+
+
+def test_archive_steer_accepts_ui_empty_attachment_list(tmp_path, monkeypatch):
+    """Regression: the UI always sends attachment_paths, [] for a text-only steer."""
+    root = tmp_path / "uploads"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(upload, "_session_attachment_dir", lambda _: root)
+    assert streaming._verified_steer_attachment_paths("sid", []) == []
+    assert streaming._verified_steer_attachment_paths("sid", None) == []
+    with pytest.raises(ValueError):
+        streaming._verified_steer_attachment_paths("sid", "not-a-list")
+    assert not list(root.glob(".steer-snapshot-*"))

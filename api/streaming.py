@@ -15729,7 +15729,13 @@ def _verified_steer_attachment_paths(session_id: str, value) -> list[str]:
 
     if value is None:
         return []
-    if not isinstance(value, list) or not value or len(value) > 20:
+    if not isinstance(value, list):
+        raise ValueError("Steer requires 1-20 attachment paths")
+    if not value:
+        # The UI always sends attachment_paths, [] when no files are staged —
+        # a text-only steer is legitimate and must not be rejected.
+        return []
+    if len(value) > 20:
         raise ValueError("Steer requires 1-20 attachment paths")
     root = _session_attachment_dir(str(session_id)).resolve()
     raw_paths = []
