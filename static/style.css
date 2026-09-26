@@ -6031,6 +6031,8 @@ main.main > #mainPlugin{display:none;}
 .msg-body p,.msg-body li,.msg-body td{overflow-wrap:anywhere;}
 .msg-body code,
 .msg-body pre { font-family:var(--font-mono); }
+/* Tabular data stays monospace by default; reading-focused skins opt into prose below. */
+.msg-body table { font-family:var(--font-mono); }
 :root[data-skin="graphite"] .msg-body table,
 :root[data-skin="codex"] .msg-body table,
 :root[data-skin="terracotta"] .msg-body table,
