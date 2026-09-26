@@ -58,6 +58,11 @@ def test_openai_codex_group_uses_provider_model_ids(monkeypatch, tmp_path):
     codex_groups = [g for g in result["groups"] if g.get("provider_id") == "openai-codex"]
     assert "openai-codex" in calls
     assert codex_groups, "OpenAI Codex group should be present"
+    # The live catalog can prepend newer companion models. The regression is
+    # Spark's presence and a usable label, not an unrelated first-row position.
+    spark = next(m for g in codex_groups for m in g["models"]
+                 if m.get("id") == "gpt-5.3-codex-spark")
+    assert spark.get("label")
     assert "gpt-6-astra" not in [m["id"] for m in config._PROVIDER_MODELS["openai-codex"]]
     assert any(m["id"] == "gpt-6-astra" and m["label"] == "GPT 6 Astra" for g in codex_groups for m in g["models"])
 
