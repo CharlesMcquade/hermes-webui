@@ -145,26 +145,33 @@ def test_initial_run_registration_is_fenced_with_cancel_flag(worker_scene, monke
     scene = worker_scene
     register = streaming.register_active_run
     registrations = []
+    published_flags = []
 
     def observed_register(stream_id, **metadata):
         assert scene.lock.owner == threading.get_ident()
         assert stream_id in config.STREAMS
-        flag = config.CANCEL_FLAGS[stream_id]
-        assert not flag.is_set()
-        registrations.append(flag)
+        registrations.append(stream_id)
         return register(stream_id, **metadata)
 
     monkeypatch.setattr(streaming, "register_active_run", observed_register)
-    # Stop just after registration, before journal setup used to recreate flags.
+    # Stop just after registration and cancel-flag publication, before journal
+    # setup; both publications share STREAMS_LOCK even though the flag is set
+    # immediately after register_active_run returns.
     def cancel_at_journal(*args, **kwargs):
         assert scene.lock.owner != threading.get_ident()
-        assert streaming.cancel_stream("run")
+        flag = config.CANCEL_FLAGS["run"]
+        assert not flag.is_set()
+        published_flags.append(flag)
+        assert streaming.cancel_stream("run") == {
+            "cancelled": True, "persistence_failed": False, "stream_id": "run",
+        }
         return None
 
     monkeypatch.setattr(streaming, "RunJournalWriter", cancel_at_journal)
     scene.run()
-    assert len(registrations) == 1
-    assert registrations[0].is_set()
+    assert registrations == ["run"]
+    assert len(published_flags) == 1
+    assert published_flags[0].is_set()
     assert scene.agent is None, "cancel event was replaced before preflight"
     assert "run" not in config.CANCEL_FLAGS
     assert "run" not in config.ACTIVE_RUNS
@@ -195,7 +202,9 @@ def test_stop_during_agent_creation_prevents_provider_run(worker_scene, monkeypa
             assert reached.wait(5), "worker never reached agent creation"
             event = config.CANCEL_FLAGS["run"]
             if cancellation == "stop":
-                assert streaming.cancel_stream("run") is True
+                assert streaming.cancel_stream("run") == {
+                    "cancelled": True, "persistence_failed": False, "stream_id": "run",
+                }
                 assert event.is_set()
                 assert "run" not in config.CANCEL_FLAGS
                 assert "run" not in config.STREAMS
@@ -263,7 +272,16 @@ def test_final_drain_fences_steer(worker_scene, monkeypatch, registered, rotated
             streaming._handle_chat_steer(handler, {"session_id": "original", "text": "guidance"})
             result = _captured_response(handler)
             if first == "steer":
-                assert result == {"accepted": True, "fallback": None, "stream_id": "run"}
+                assert result["accepted"] is True
+                assert result["fallback"] is None
+                assert result["stream_id"] == "run"
+                assert result["durable"] is True
+                assert result["published"] is True
+                assert result["steer_event"]["event"] == "steer_delivered"
+                assert result["steer_event"]["stream_id"] == "run"
+                assert result["steer_event"]["session_id"] == "original"
+                assert result["steer_event"]["payload"]["text"] == "guidance"
+                assert result["steer_event"]["event_id"]
             else:
                 assert result == {"accepted": False, "fallback": "not_running", "stream_id": "run"}
                 assert scene.agent.pending == []
@@ -271,8 +289,9 @@ def test_final_drain_fences_steer(worker_scene, monkeypatch, registered, rotated
             release.set()
         worker.result(timeout=10)
     emitted = list(scene.events.queue)
-    assert not [payload for event, payload in emitted if event == "apperror"]
-    leftovers = [payload["text"] for event, payload in emitted if event == "pending_steer_leftover"]
+    assert all(isinstance(item, tuple) and len(item) in (2, 3) for item in emitted)
+    assert not [item[1] for item in emitted if item[0] == "apperror"]
+    leftovers = [item[1]["text"] for item in emitted if item[0] == "pending_steer_leftover"]
     assert leftovers == (["guidance"] if first == "steer" else [])
     assert scene.drained == (["guidance"] if first == "steer" else [""])
     assert scene.agent.pending == []
