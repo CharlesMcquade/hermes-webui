@@ -262,6 +262,8 @@ eval(extractFunc('_refreshTransparentThinkingLiveRow'));
 eval(extractFunc('_refreshTransparentLiveRow'));
 eval(extractFunc('_anchorSceneRowTimestampSeconds'));
 eval(extractFunc('_anchorSceneToolCallFromRow'));
+eval(extractFunc('chatActivityMode'));
+eval(extractFunc('isTurnWorklogMode'));
 // #5966: the settled transparent render now consults _transparentToolRowHasDetail
 // to decide whether to defer a collapsed tool row's detail body. It is referenced
 // by _anchorSceneTransparentNodeForRow below, so extract it into the harness (it

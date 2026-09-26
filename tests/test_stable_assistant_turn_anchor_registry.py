@@ -1107,6 +1107,7 @@ def test_activity_scene_projects_current_activity_events_for_both_render_modes()
     assert compact_rows[4]["tool"]["snippet"] == "done"
     assert compact_rows[4]["display_hints"] == {
         "compact_worklog": "tool_row",
+        "turn_worklog": "tool_row",
         "transparent_stream": "chronological_activity",
     }
     seqless_ids = [row["row_id"] for row in data["seqless"]["activity_rows"]]

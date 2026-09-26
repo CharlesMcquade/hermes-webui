@@ -469,7 +469,7 @@ global._firstValidTimestampSeconds=()=>null;
 
 eval(anchorsSrc);
 for(const name of [
-  'chatActivityMode','isTransparentStream','isFinalAnswerOnlyMode','isCompactWorklogMode','isSimplifiedToolCalling',
+  'chatActivityMode','isTransparentStream','isFinalAnswerOnlyMode','isCompactWorklogMode','isTurnWorklogMode','isSimplifiedToolCalling',
   '_anchorSceneIsSettledSuccessfulCompression','_anchorSceneRowsForRendering',
   '_anchorSceneRetainedRowSignature','_anchorSceneDataRowKey','_anchorScenePlaceChildren',
   '_anchorSceneRowTimestampSeconds','_anchorSceneTransparentNodeForRow',
