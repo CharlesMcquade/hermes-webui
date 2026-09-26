@@ -440,22 +440,26 @@ def test_cross_origin_sidecar_401_does_not_reload_webui():
           _patchOfflineFetch(); global.fetch=window.fetch;
           await _checkExtensionSidecarHealth({{health_url:'http://127.0.0.1:9999/health'}},0,1);
           const afterSidecar=reloads;
+          await _checkExtensionSidecarHealth({{health_url:'http://127.0.0.1:8787/extensions/companion/health'}},1,1);
+          const afterSameOriginSidecar=reloads;
           await fetch(new URL('http://127.0.0.1:9999/health'),{{__hermesRedirect401:true}});
           await fetch(new Request('https://sidecar.example/health'),{{__hermesRedirect401:false}});
           const afterForeign=reloads;
           await fetch('/api/bootstrap',{{__hermesRedirect401:false}});
           const afterOptOut=reloads;
           await Promise.all([fetch('/api/one'),fetch('/api/two')]);
-          process.stdout.write(JSON.stringify({{afterSidecar,afterForeign,afterOptOut,reloads,calls,health,runtime}}));
+          process.stdout.write(JSON.stringify({{afterSidecar,afterSameOriginSidecar,afterForeign,afterOptOut,reloads,calls,health,runtime}}));
         }})().catch(err=>{{console.error(err);process.exit(1);}});
     """))
     assert observed["afterSidecar"] == 0
+    assert observed["afterSameOriginSidecar"] == 0
     assert observed["afterForeign"] == 0
     assert observed["afterOptOut"] == 0
     assert observed["reloads"] == 1
-    assert observed["health"] == [[0, "unhealthy", "unhealthy"]]
-    assert observed["runtime"] == [[0, None]]
-    assert observed["calls"][0]["credentials"] == "omit"
-    assert all("x-requested-with" not in call["headers"] for call in observed["calls"][:3])
-    assert all(call["headers"]["x-requested-with"] == "XMLHttpRequest" for call in observed["calls"][3:])
+    assert observed["health"] == [[0, "unhealthy", "unhealthy"], [1, "unhealthy", "unhealthy"]]
+    assert observed["runtime"] == [[0, None], [1, None]]
+    assert all(call["credentials"] == "omit" for call in observed["calls"][:2])
+    assert "x-requested-with" in observed["calls"][1]["headers"]  # same-origin wrapper
+    assert all("x-requested-with" not in call["headers"] for call in [observed["calls"][0], *observed["calls"][2:4]])
+    assert all(call["headers"]["x-requested-with"] == "XMLHttpRequest" for call in observed["calls"][4:])
     assert not any(call["leaked"] for call in observed["calls"])
