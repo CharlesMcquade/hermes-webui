@@ -31,8 +31,11 @@ abort and release admission. Synchronous chat retains a registry reservation
 through persistence; streaming request preparation reserves occupancy before
 pending-state mutation. Worker registration still checks the drain separately.
 Agent updates must observe a completed Gateway restart, not merely an in-progress
-command, before scheduling replacement. Admission-surface regressions live in
-`tests/test_restart_admission_surfaces.py`.
+command, before scheduling replacement. If the quick timeout returns in-progress,
+the update transaction transfers its admission drain to the background subprocess
+waiter; it releases admission only after the CLI exits or is terminated.
+Admission-surface regressions live in
+`tests/test_restart_admission_surfaces.py` and `tests/test_gate_221beca7_blockers.py`.
 
 The Gateway wait currently runs synchronously before its command launch, so a
 busy restart request may wait up to the existing drain ceiling. End-to-end
