@@ -10175,7 +10175,9 @@ async function _checkExtensionSidecarHealth(sidecar,index,seq){
       controller=new AbortController();
       timeoutId=setTimeout(()=>controller.abort(),2500);
     }
-    const res=await fetch(healthUrl,{credentials:'omit',cache:'no-store',signal:controller?controller.signal:undefined});
+    // This endpoint belongs to the sidecar even when proxied on our origin.
+    // A 401 here cannot be repaired by reloading WebUI's auth session.
+    const res=await fetch(healthUrl,{credentials:'omit',cache:'no-store',signal:controller?controller.signal:undefined,__hermesRedirect401:false});
     if(seq!==_extensionsSidecarMonitorSeq) return;
     if(res.ok){
       _setExtensionSidecarHealth(index,'healthy','healthy');
