@@ -222,7 +222,7 @@ def test_restore_settled_session_projects_through_production_path(browser):
               window.syncTopbar = () => {};
               window.renderMessages = () => {};
               window.renderSessionList = () => {};
-              window._setActivePaneIdleIfOwner = () => {};
+              window._setActivePaneIdleIfOwner = () => { window.paneIdle = true; };
               window._setActiveSessionUrl = () => {};
               window.localStorage = {setItem: () => {}};
             }
@@ -239,22 +239,28 @@ def test_restore_settled_session_projects_through_production_path(browser):
               window.artifactFetches = [];
               window.api = async url => {
                 artifactFetches.push(url);
-                return {session:{
-                session_id:'session-a', workspace:'/workspace', active_stream_id:null,
-                pending_user_message:null, messages:[],
-                _messages_truncated: artifactFetches.length === 1,
-                _messages_offset: artifactFetches.length === 1 ? 3 : 0,
-                tool_calls:[
-                  {name:'write_file', args:{path:'/workspace/new.md'}, done:true}
-                ]
-              }};
+                const response = {session:{
+                  session_id:'session-a', workspace:'/workspace', active_stream_id:null,
+                  pending_user_message:null, messages:[],
+                  _messages_truncated: artifactFetches.length === 1,
+                  _messages_offset: artifactFetches.length === 1 ? 3 : 0,
+                  tool_calls:[
+                    {name:'write_file', args:{path:'/workspace/new.md'}, done:true}
+                  ]
+                }};
+                // A full-history load may never settle. The turn still must.
+                if(artifactFetches.length === 2) return new Promise(resolve => {
+                  window.resolveArtifacts = () => resolve(response);
+                });
+                return response;
               };
               const status = await _restoreSettledSession({close:()=>{}}, {status:true});
               return {
                 status,
                 error: window.restoreError || null,
                 old: !!document.querySelector('[data-artifact-path="/workspace/old.md"]'),
-                fresh: !!document.querySelector('[data-artifact-path="/workspace/new.md"]'),
+                idle: !!window.paneIdle,
+                pendingArtifacts: typeof window.resolveArtifacts === 'function',
                 fetchedFull: artifactFetches.length === 2 &&
                   artifactFetches[1].includes('messages=1&resolve_model=0') &&
                   !artifactFetches[1].includes('msg_limit=30')
@@ -263,6 +269,9 @@ def test_restore_settled_session_projects_through_production_path(browser):
             """
         )
         assert result == {"status": "restored", "error": None, "old": False,
-                          "fresh": True, "fetchedFull": True}
+                          "idle": True, "pendingArtifacts": True, "fetchedFull": True}
+        page.evaluate('resolveArtifacts()')
+        page.wait_for_selector('[data-artifact-path="/workspace/new.md"]')
+        assert page.locator('#workspaceArtifactsCount').inner_text() == '1'
     finally:
         page.close()

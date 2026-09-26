@@ -7238,24 +7238,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         syncTopbar();renderMessages({preserveScroll:true});
         if(typeof _restoreMessageRenderWindowAfterSettledRender==='function') _restoreMessageRenderWindowAfterSettledRender();
-        // The bounded settle tail cannot authorize a complete artifact list.
-        // Enrich from full history and install only while this exact pane and
-        // snapshot still own the result (a session switch may win the await).
-        if(typeof _hydrateSessionArtifactProjection==='function' &&
-           typeof _artifactProjectionMatches==='function' &&
-           !_artifactProjectionMatches(session,session._artifactProjection)){
-          const settledSnapshot=S.session;
-          const projection=await _hydrateSessionArtifactProjection(settledSnapshot,
-            ()=>S.session===settledSnapshot && _isSessionCurrentPane(completedSid));
-          if(projection && S.session===settledSnapshot && _isSessionCurrentPane(completedSid)){
-            settledSnapshot._artifactProjection=projection;
-          }
-        }
+        // Do not display stale artifacts while the complete projection loads.
         if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);
       }
       if(_isActiveSession()) _queueDrainSid=activeSid;
       renderSessionList();
       _setActivePaneIdleIfOwner();
+      // Full-history enrichment may take minutes or fail. It is not part of
+      // turn settlement: queued input can drain as soon as the pane is idle.
+      // Only the still-current snapshot may receive the eventual projection.
+      if(isActiveSession && S.session===session && _isSessionCurrentPane(completedSid) &&
+         typeof _hydrateSessionArtifactProjection==='function' &&
+         typeof _artifactProjectionMatches==='function' &&
+         !_artifactProjectionMatches(session,session._artifactProjection)){
+        const settledSnapshot=S.session;
+        _hydrateSessionArtifactProjection(settledSnapshot,
+          ()=>S.session===settledSnapshot && _isSessionCurrentPane(completedSid))
+          .then(projection=>{
+            if(projection && S.session===settledSnapshot && _isSessionCurrentPane(completedSid)){
+              settledSnapshot._artifactProjection=projection;
+              if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(completedSid);
+            }
+          }).catch(()=>{}); // Artifact enrichment cannot reopen a settled turn.
+      }
       return returnStatus?'restored':true;
     }catch(_){
       return returnStatus?'error':false;

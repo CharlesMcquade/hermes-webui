@@ -257,6 +257,49 @@ def test_failed_gateway_attempt_never_reopens_admission_before_retry(monkeypatch
     assert not config.restart_drain_active()
 
 
+def test_in_progress_update_keeps_drain_until_gateway_subprocess_exits(monkeypatch):
+    """The quick timeout cannot reopen admission while restart still runs."""
+    import io
+    import subprocess
+    import threading
+    import time
+
+    finished = threading.Event()
+    waiting = threading.Event()
+
+    class SlowProc:
+        stdout = io.StringIO('')
+        stderr = io.StringIO('')
+        returncode = None
+
+        def communicate(self, timeout):
+            raise subprocess.TimeoutExpired('gateway restart', timeout)
+
+        def wait(self, timeout=None):
+            waiting.set()
+            assert finished.wait(5)
+            self.returncode = 0
+            return 0
+
+    monkeypatch.setattr(gateway_restart.subprocess, 'Popen', Mock(return_value=SlowProc()))
+    monkeypatch.setattr(gateway_restart, '_wait_until_restart_safe', lambda: {'restart_blocked': False})
+    monkeypatch.setattr(updates, 'get_active_profile_gateway_running_pid', lambda **kw: 42)
+    try:
+        ok, result = updates._ensure_gateway_restart_for_agent_update()
+        assert not ok and result['status'] == 'in_progress'
+        assert waiting.wait(5)
+        assert config.restart_drain_active()
+        with pytest.raises(config.RunAdmissionDrainingError):
+            config.register_active_run('during-gateway-restart')
+    finally:
+        finished.set()
+    deadline = time.monotonic() + 5
+    while config.restart_drain_active() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not config.restart_drain_active()
+    config.unregister_active_run('during-gateway-restart')
+
+
 def test_pid_recovery_keeps_drain_through_scheduler_rollback(monkeypatch):
     """Two failed CLI attempts plus changed PID transfer the same marker."""
     class FakeProc:

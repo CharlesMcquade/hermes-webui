@@ -48,11 +48,12 @@ def gateway_update_drain():
 
     enter_restart_drain(reason='gateway_restart')
     _RESTART_TRANSACTION.active = True
+    _RESTART_TRANSACTION.deferred = False
     try:
         yield
     finally:
         _RESTART_TRANSACTION.active = False
-        if not _GATEWAY_RESTART_DRAIN_HANDOFF.is_set():
+        if not _GATEWAY_RESTART_DRAIN_HANDOFF.is_set() and not _RESTART_TRANSACTION.deferred:
             exit_restart_drain()
 
 
@@ -331,10 +332,25 @@ def restart_active_profile_gateway(
                                 )
                     except Exception:
                         logger.exception("Failed to terminate timed out gateway restart process.")
+                    if transaction_owned:
+                        # If termination failed, do not reopen admission while
+                        # the supervised restart can still replace the gateway.
+                        proc.wait()
                 finally:
                     release()
+                    if transaction_owned:
+                        # The update transaction returned in_progress, so its
+                        # context must transfer drain ownership to this waiter.
+                        exit_restart_drain()
 
-            threading.Thread(target=_wait_and_release, daemon=True).start()
+            if transaction_owned:
+                _RESTART_TRANSACTION.deferred = True
+            try:
+                threading.Thread(target=_wait_and_release, daemon=True).start()
+            except BaseException:
+                if transaction_owned:
+                    _RESTART_TRANSACTION.deferred = False
+                raise
             return {
                 "status": "in_progress",
                 "message": "Gateway service restart initiated (in progress)",
