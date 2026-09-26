@@ -262,6 +262,45 @@ console.log('OK');
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_preserved_live_turn_append_executes_ownership_guard():
+    """Exercise the real reattach branch, not just its ownership predicate."""
+    script = DOM_STUB + js(
+        "msgContent",
+        "_settledAssistantStreamId",
+        "_messageHasLiveAssistantProjection",
+        "_liveTurnCarriesUnsettledContent",
+        "_settledTranscriptOwnsLiveTurn",
+        "_reconcilePreservedLiveTurn",
+    ) + """
+function _liveAssistantSegmentTextLength(){ return 1; }
+El.prototype.getAttribute=function(key){ return this.attrs[key] || null; };
+El.prototype.querySelector=function(sel){ return this.querySelectorAll(sel)[0] || null; };
+const ANSWER='Hey! What can I help you with today?';
+function reattach(messages, inflight, active, turn){
+  setState(messages, inflight, active);
+  const appended=[];
+  const inner={querySelector:()=>null,appendChild:(node)=>appended.push(node)};
+  _reconcilePreservedLiveTurn(inner, turn);
+  return appended;
+}
+const dead=turnWith(seg(ANSWER)); dead.dataset={};
+assert.deepStrictEqual(reattach([user('Hi'),settledAnswer(ANSWER,'st1')],
+  {streamId:'st1'},'st1',dead),[],
+  'settled transcript owns the answer: do not append the preserved duplicate');
+const live=turnWith(seg(ANSWER)); live.dataset={};
+assert.deepStrictEqual(reattach([user('Hi'),settledAnswer(ANSWER,'st1'),user('Again')],
+  {streamId:'st2'},'st2',live),[live],
+  'a new live turn still appends, even if its text repeats an old answer');
+const unsaved=turnWith(toolCard(),seg(ANSWER)); unsaved.dataset={};
+assert.deepStrictEqual(reattach([user('Hi'),settledAnswer(ANSWER,'st1')],
+  {streamId:'st1'},'st1',unsaved),[unsaved],
+  'live-only tool structure cannot be dropped as a duplicate');
+console.log('OK');
+"""
+    run_node(script)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_settled_scene_drops_the_prose_row_that_is_the_final_answer():
     script = DOM_STUB + js(
         "_anchorSceneIsSettledSuccessfulCompression",
@@ -272,6 +311,7 @@ def test_settled_scene_drops_the_prose_row_that_is_the_final_answer():
 function _anchorSceneToolRowLogicalKey(row){ return (row&&row.row_id)||''; }
 function _anchorSceneMergeToolRows(_prev,row){ return row; }
 const FINAL='Hey! What can I help you with today?';
+function isTurnWorklogMode(){ return false; }
 const scene={
   final_answer:FINAL,
   activity_rows:[
@@ -327,8 +367,7 @@ def test_both_append_branches_are_gated_by_the_ownership_check():
     assert "inflight.liveTurnHtml=null;" in restore, (
         "a refused snapshot must be released, or it is re-refused on every restore"
     )
-    reattach = UI_JS[UI_JS.index("    const _rebuilt=document.getElementById('liveAssistantTurn');"):]
-    reattach = reattach[:reattach.index("  // Only force-scroll when not actively streaming")]
+    reattach = extract_function(UI_JS, "_reconcilePreservedLiveTurn")
     assert "_settledTranscriptOwnsLiveTurn(sid,_preservedLiveTurn)" in reattach, (
         "the renderMessages append branch must be gated by the ownership check"
     )
