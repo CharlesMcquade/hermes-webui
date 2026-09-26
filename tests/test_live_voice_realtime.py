@@ -151,17 +151,19 @@ def test_capability_endpoint(monkeypatch):
 # ── route wiring ─────────────────────────────────────────────────────
 
 
-def test_routes_wired():
-    assert '"/api/voice/live/sdp"' in ROUTES_PY
-    assert '"/api/voice/live/capability"' in ROUTES_PY
+def test_routes_not_wired():
+    assert '"/api/voice/live/sdp"' not in ROUTES_PY
+    assert '"/api/voice/live/capability"' not in ROUTES_PY
+    assert 'parsed.path.startswith("/api/voice/live/")' in ROUTES_PY
 
 
 # ── frontend wiring ─────────────────────────────────────────────────
 
 
-def test_index_has_button_and_script():
-    assert 'id="btnLiveVoice"' in INDEX_HTML
-    assert "static/voice_live.js?v=__WEBUI_VERSION__" in INDEX_HTML
+def test_index_omits_retired_button_and_script():
+    assert 'id="btnLiveVoice"' not in INDEX_HTML
+    assert "static/voice_live.js?v=__WEBUI_VERSION__" not in INDEX_HTML
+    assert 'id="btnVoiceMode"' in INDEX_HTML
 
 
 def test_voice_js_uses_backend_and_agent_bridge():
@@ -199,15 +201,9 @@ def test_voice_js_async_bridge_contract():
     assert "digest:_digest" in VOICE_JS
 
 
-def test_routes_wired_v2():
-    assert '"/api/voice/live/ask"' in ROUTES_PY
-    assert '"/api/voice/live/turn"' in ROUTES_PY
-    assert '"/api/voice/live/connect"' in ROUTES_PY
-    assert '"/api/voice/live/disconnect"' in ROUTES_PY
-    assert '"/api/voice/live/steer"' in ROUTES_PY
-    assert '"/api/voice/live/status"' in ROUTES_PY
-    assert '"/api/voice/live/stop"' in ROUTES_PY
-    assert '"/api/voice/live/usage"' in ROUTES_PY
+def test_routes_unwired_v2():
+    for action in ("ask", "turn", "connect", "disconnect", "steer", "status", "stop", "usage"):
+        assert f'"/api/voice/live/{action}"' not in ROUTES_PY
 
 
 # ── v2 backend unit tests ────────────────────────────────────────────
