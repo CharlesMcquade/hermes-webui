@@ -70,7 +70,7 @@ hermes chat -q "Say: fallback test complete" --provider custom:vllm-dead-test -m
 Expect the same fallback in `~/.hermes/logs/agent.log`
 (`Fallback activated: dead-model-test → …`). For a callback-level probe that
 bypasses the WebUI entirely, the pattern used on 2026-08-27 lives in the
-session transcript: construct `AIAgent(provider=..., model=..., 
+session transcript: construct `AIAgent(provider=..., model=...,
 status_callback=spy, fallback_model=cfg['fallback_providers'])` and run
 `run_conversation` — the spy should receive
 `('warn', '⚠️ Model fallback: …')`.

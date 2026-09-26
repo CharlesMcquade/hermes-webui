@@ -67,4 +67,3 @@ assert.equal(_messageWindowRevision,1);
 console.log('ok');
 """
     assert _run_node(source) == 'ok'
-
