@@ -7,8 +7,11 @@ import json
 from collections import OrderedDict
 from pathlib import Path
 
+import pytest
+
 import api.models as models
 import api.routes as routes
+import api.state_sync as state_sync
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +36,29 @@ class _FakeHandler:
 
     def json_body(self):
         return json.loads(self.wfile.getvalue().decode("utf-8"))
+
+
+@pytest.fixture
+def isolated_title_db(tmp_path, monkeypatch):
+    """Use the real Agent title writer/CAS against a private, Agent-created DB.
+
+    Other tests intentionally create minimal sessions tables in the suite's
+    shared home; neither their schema nor an installed release DB is a title
+    authority fixture for this test.
+    """
+    session_db = pytest.importorskip("hermes_state").SessionDB
+    home = tmp_path / "agent-home"
+    home.mkdir()
+    db_path = home / "state.db"
+    db = session_db(db_path=db_path)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_BASE_HOME", str(home))
+    monkeypatch.setattr(
+        state_sync, "_get_state_db",
+        lambda profile=None, *, strict=False: session_db(db_path=db_path),
+    )
+    yield db
+    db.close()
 
 
 def test_import_cli_handler_queues_default_titles_after_persisting_import():
@@ -149,7 +175,7 @@ def test_import_cli_queue_helper_skips_sessions_that_already_have_real_titles(mo
     assert persisted == []
 
 
-def test_generated_title_persist_reloads_latest_session_before_saving(tmp_path, monkeypatch):
+def test_generated_title_persist_reloads_latest_session_before_saving(tmp_path, monkeypatch, isolated_title_db):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     cache = OrderedDict()
@@ -191,6 +217,7 @@ def test_generated_title_persist_reloads_latest_session_before_saving(tmp_path, 
     )
     latest.save(skip_index=True)
     cache[latest.session_id] = latest
+    isolated_title_db.ensure_session(session_id=latest.session_id, source="webui")
 
     saved_title = routes._persist_generated_session_title(
         stale_snapshot,
@@ -207,6 +234,9 @@ def test_generated_title_persist_reloads_latest_session_before_saving(tmp_path, 
     assert reloaded.manual_title is False
     assert len(cache[stale.session_id].messages) == 3
     assert stale_snapshot.title == "Better imported title"
+    assert state_sync.get_session_title_state(stale.session_id, profile="default") == (
+        "Better imported title", "llm",
+    )
 
 
 def test_regenerate_endpoint_only_blocks_read_only_imported_sessions():
