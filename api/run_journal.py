@@ -593,10 +593,11 @@ class RunJournalWriter:
             existing, malformed = _read_jsonl(self._path)
             terminal = any(row.get("terminal") for row in existing)
             # A second closure cannot create another replay row or live frame.
-            if event_name == "stream_end" and any(
+            # A semantic terminal is settled once; only transport closure may
+            # follow it, without replacing the authoritative outcome.
+            if (event_name == "stream_end" and any(
                 row.get("event") == "stream_end" for row in existing
-            ):
-                _CLOSED_ACCEPTANCE.discard(self._path)
+            )) or (event_name != "stream_end" and terminal):
                 return None
             event = None
             if not malformed and (not terminal or event_name == "stream_end"):
