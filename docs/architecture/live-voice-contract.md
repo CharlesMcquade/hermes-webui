@@ -1,4 +1,13 @@
-# Live voice: turn and run ownership
+# Live voice: historical turn and run ownership
+
+**Retired custom-overlay feature.** The shipped shell no longer offers or loads
+this Realtime client; all `/api/voice/live/*` GET and POST requests return HTTP
+410 before invoking its handlers. The legacy module and tests remain for
+historical reference only. Ordinary transcription, TTS, and voice mode are
+separate features and remain available. Do not infer deployment authorization
+from this archived design, or re-enable it because an API key is configured.
+
+The following describes the old design, not active runtime behavior.
 
 Live voice uses OpenAI Realtime over WebRTC as a conversational front end to
 Hermes, not as a second executor. The implementation lives in

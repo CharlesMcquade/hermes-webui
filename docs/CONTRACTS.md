@@ -32,9 +32,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
   fence, and ordinary-delivery fallback.
 
 - [`docs/architecture/live-voice-contract.md`](architecture/live-voice-contract.md):
-  Historical Realtime audio/reply gating, tool settlement, reconnect ownership,
-  and exact-run result retrieval. This feature is retired in the target overlay;
-  this reference is preserved only until the final candidate excludes its runtime.
+  historical Realtime audio/reply gating and run-ownership design. This feature
+  is retired in the custom overlay: `/api/voice/live/*` returns 410 and the
+  shipped shell does not load its script or offer its control. The old module
+  and tests are retained only as historical source, not a runtime capability.
 - [`docs/rfcs/webui-run-state-consistency-contract.md`](rfcs/webui-run-state-consistency-contract.md):
   proposed consistency rules for current WebUI streaming, recovery, replay,
   model-context reconstruction, compression, UI scene/cache, and sidebar metadata

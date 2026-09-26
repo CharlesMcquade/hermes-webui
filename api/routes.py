@@ -6159,11 +6159,6 @@ def _csrf_exempt_path(path: str) -> bool:
         "/api/auth/passkey/options",
         "/api/auth/passkey/login",
         "/api/csp-report",
-        # Voice disconnect via navigator.sendBeacon (page unload) cannot send
-        # custom CSRF headers. Exempting is fail-SAFE: the endpoint only ever
-        # RESTORES the pre-call approval state — it can restrict privilege,
-        # never grant it (connect, which enables YOLO, still requires CSRF).
-        "/api/voice/live/disconnect",
     }
 
 
@@ -14566,6 +14561,10 @@ def _handle_session_get(handler, parsed) -> bool:
 
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
+    # Live voice was retired. Fail closed even for stale tabs or direct callers;
+    # ordinary transcription/TTS endpoints have a separate lifecycle.
+    if parsed.path.startswith("/api/voice/live/"):
+        return j(handler, {"error": "live_voice_retired"}, status=410) or True
     from api import extension_auth
     if parsed.path == "/extension-pair" or parsed.path.startswith(extension_auth.PREFIX):
         return extension_auth.handle_get(handler, parsed)
@@ -15153,10 +15152,6 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/transcribe/capability":
         return handle_transcribe_capability(handler)
-
-    if parsed.path == "/api/voice/live/capability":
-        from api.voice_live import handle_voice_live_capability
-        return handle_voice_live_capability(handler)
 
     if parsed.path == "/api/reasoning":
         # Current reasoning config (shared source of truth with the CLI —
@@ -16237,6 +16232,11 @@ def _llm_update_summary(system_prompt: str, user_prompt: str, active_profile: st
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
+    # Reject every legacy action before reading its body or touching voice
+    # session state. Close pending request bodies on keep-alive connections.
+    if parsed.path.startswith("/api/voice/live/"):
+        arm_connection_close_if_body_pending(handler)
+        return j(handler, {"error": "live_voice_retired"}, status=410) or True
     from api import extension_auth
     if parsed.path.startswith(extension_auth.PREFIX):
         return extension_auth.handle_post(handler, parsed)
@@ -16331,42 +16331,6 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/tts":
         return _handle_tts(handler, parsed)
-
-    if parsed.path == "/api/voice/live/sdp":
-        from api.voice_live import handle_voice_live_sdp
-        return handle_voice_live_sdp(handler)
-
-    if parsed.path == "/api/voice/live/connect":
-        from api.voice_live import handle_voice_live_connect
-        return handle_voice_live_connect(handler)
-
-    if parsed.path == "/api/voice/live/disconnect":
-        from api.voice_live import handle_voice_live_disconnect
-        return handle_voice_live_disconnect(handler)
-
-    if parsed.path == "/api/voice/live/turn":
-        from api.voice_live import handle_voice_live_turn
-        return handle_voice_live_turn(handler)
-
-    if parsed.path == "/api/voice/live/ask":
-        from api.voice_live import handle_voice_live_ask
-        return handle_voice_live_ask(handler)
-
-    if parsed.path == "/api/voice/live/steer":
-        from api.voice_live import handle_voice_live_steer
-        return handle_voice_live_steer(handler)
-
-    if parsed.path == "/api/voice/live/status":
-        from api.voice_live import handle_voice_live_status
-        return handle_voice_live_status(handler)
-
-    if parsed.path == "/api/voice/live/stop":
-        from api.voice_live import handle_voice_live_stop
-        return handle_voice_live_stop(handler)
-
-    if parsed.path == "/api/voice/live/usage":
-        from api.voice_live import handle_voice_live_usage
-        return handle_voice_live_usage(handler)
 
     if parsed.path == "/api/client-events/log":
         if diag:
