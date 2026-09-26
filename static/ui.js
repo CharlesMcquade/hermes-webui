@@ -1772,8 +1772,12 @@ function _reconcilePreservedLiveTurn(inner, _preservedLiveTurn){
           if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
           _rebuilt.replaceWith(_preservedLiveTurn);
         }else{
-          if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
-          inner.appendChild(_preservedLiveTurn);
+          const sid=S.session&&S.session.session_id;
+          // This branch adds a turn; replacement branches above cannot duplicate.
+          if(!sid||!_settledTranscriptOwnsLiveTurn(sid,_preservedLiveTurn)){
+            if(sid) _preservedLiveTurn.dataset.sessionId=sid;
+            inner.appendChild(_preservedLiveTurn);
+          }
         }
       }
     }
