@@ -187,6 +187,43 @@ process.stdout.write(JSON.stringify({{ CASES, sent }}));
     # document.hidden") would otherwise veto the unfocused-but-visible case.
     assert all(o["options"].get("forceHidden") for o in sent)
 
+
+def test_prompt_force_hidden_crosses_live_notification_gate_without_overriding_setting():
+    """Exercise both real functions: forceHidden bypasses visibility, not opt-out."""
+    script = f"""
+const document = {{ hidden: false, visibilityState: 'visible', hasFocus: () => false }};
+const window = {{ _notificationsEnabled: true }};
+const shown = [];
+window.Notification = function() {{}};
+const Notification = window.Notification;
+Notification.permission = 'granted';
+const _promptNotifySeen = new Map();
+let _loadingSessionId = null;
+const S = {{ session: {{ session_id: 'sid-1' }} }};
+function _isBackgroundedForBrowserNotification() {{ return document.hidden; }}
+async function _showPwaNotification(title, body, options) {{ shown.push({{title, body, options}}); }}
+{_extract_fn(MESSAGES_JS, '_isSessionCurrentPane')}
+{_extract_fn(MESSAGES_JS, '_isDocumentVisibleAndFocused')}
+{_extract_fn(MESSAGES_JS, '_isSessionActivelyViewed')}
+{_extract_fn(MESSAGES_JS, '_promptNotifyKey')}
+{_extract_fn(MESSAGES_JS, 'sendBrowserNotification')}
+{_extract_fn(MESSAGES_JS, '_notifyPromptCard')}
+async function run() {{
+  _notifyPromptCard('approval', 'sid-1', {{approval_id:'a', description:'blurred'}});
+  await new Promise(resolve => setImmediate(resolve));
+  const blurred = shown.length;
+  window._notificationsEnabled = false;
+  _notifyPromptCard('clarify', 'sid-1', {{clarify_id:'b', question:'question'}});
+  await new Promise(resolve => setImmediate(resolve));
+  process.stdout.write(JSON.stringify({{ blurred, optedOut: shown.length, options: shown[0]?.options }}));
+}}
+run().catch(err => {{ console.error(err); process.exitCode = 1; }});
+"""
+    result = _run_node(script)
+    assert result["blurred"] == 1
+    assert result["optedOut"] == 1
+    assert result["options"] == {"sid": "sid-1", "forceHidden": True}
+
 # ── Reviewer reproduction regressions (PR #7493 round 2) ────────────────────
 
 def test_owner_key_is_injective():
