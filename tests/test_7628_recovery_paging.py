@@ -112,6 +112,7 @@ function runtimeStubs() {
   globalThis._isSessionCurrentPane = () => scenario.isSessionCurrentPane !== false;
   globalThis._isSessionActivelyViewed = () => !!scenario.isSessionActivelyViewed;
   globalThis._closeSource = () => calls.push('closeSource');
+  globalThis._bailOutOfTerminalEventsFromStaleStream = () => false;
   globalThis._clearStreamEndRecovery = () => calls.push('clearStreamEndRecovery');
   globalThis._clearOwnerInflightState = () => calls.push('clearOwnerInflight');
   globalThis.clearLiveToolCards = () => calls.push('clearLiveToolCards');

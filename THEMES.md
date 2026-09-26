@@ -172,7 +172,10 @@ CSS rather than skin registration.
 Leaving `--font-conversation` untouched keeps prose coupled to `--font-ui`;
 override it only when a different reading face is explicitly required. Avoid
 hard-coded selector-level font declarations when one of these tokens already
-expresses the intent.
+expresses the intent. Markdown tables use `--font-mono` by default so column
+values and sort controls align; the Graphite, Codex, Terracotta, and GitHub skins
+intentionally use `--font-conversation` for table readability. The sort button
+inherits the table font in either case.
 
 ---
 

@@ -223,6 +223,20 @@ def test_playwright_regression_ensures_font_contract_for_syntax_and_edit_surface
                 )
                 """
             )
+            # Sorting controls inherit their table's typeface at desktop and phone widths.
+            # Reading-focused skins intentionally opt tables back into conversation prose.
+            for width in (1024, 390):
+                page.set_viewport_size({"width": width, "height": 768})
+                for skin in ("default", "graphite", "codex", "terracotta", "github"):
+                    page.evaluate("skin => document.documentElement.dataset.skin = skin", skin)
+                    sort_font, cell_font = page.evaluate("""
+                        () => ["markdownTableSort", "markdownTableCell"]
+                            .map(id => getComputedStyle(document.getElementById(id)).fontFamily)
+                    """)
+                    expected = "MonoFontSentinel" if skin == "default" else "ConvoFontSentinel"
+                    assert expected in sort_font, (width, skin, sort_font)
+                    assert sort_font == cell_font, (width, skin, sort_font, cell_font)
+            page.evaluate("() => delete document.documentElement.dataset.skin")
             native_control_fonts = page.evaluate(
                 """
                 () => Object.fromEntries(
