@@ -4211,11 +4211,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _applyToAnchor('reasoning',{
       text:clean,
       local_id:localId,
-      seq:_nextAnchorLocalSeq(),
+      // The first journaled reasoning chunk owns this aggregate row. Keep its
+      // wire identity across subsequent chunks and journal snapshot hydration.
+      ...((options.sseEvent&&options.sseEvent.lastEventId)?{}:{seq:_nextAnchorLocalSeq()}),
       status:options.sealed?'completed':'running',
       activitySegmentSeq:segmentSeq,
       activityBurstId:_currentActivityBurstId,
-    },null,renderOutcome);
+    },options.sseEvent||null,renderOutcome);
     return renderOutcome.rendered?_findAnchorActivityEventByLocalId(localId,'reasoning'):null;
   }
   function _compactVisibleEchoText(value){
@@ -5982,7 +5984,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       syncInflightAssistantMessage();
       if(text&&S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId){
         const liveThinkingText=_liveThinkingText();
-        const anchorReasoningFallback={};
+        const anchorReasoningFallback={sseEvent:e};
         if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback)){
           _updateLiveThinkingCard(liveThinkingText,{
             ...anchorReasoningFallback,
