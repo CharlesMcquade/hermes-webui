@@ -40,8 +40,10 @@ def test_session_switch_updates_url_path_for_tab_local_anchor():
 
 
 def test_boot_prefers_url_session_over_local_storage_session():
-    assert "const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;" in BOOT_JS
-    assert "const savedLocal=localStorage.getItem('hermes-webui-session');" in BOOT_JS
+    # Embed must bypass restore; ordinary tabs still choose URL before localStorage.
+    assert "const _embedSkipRestore=_isEmbedBoot();" in BOOT_JS
+    assert re.search(r"const urlSession=_embedSkipRestore\?null:\(\(typeof _sessionIdFromLocation==='function'\)\?_sessionIdFromLocation\(\):null\);", BOOT_JS)
+    assert "const savedLocal=_embedSkipRestore?null:localStorage.getItem('hermes-webui-session');" in BOOT_JS
     assert "const saved=urlSession||savedLocal;" in BOOT_JS
     assert "const savedSidebarOnlyState=(!urlSession&&savedLocal)" in BOOT_JS
     assert "? await _savedSessionSidebarOnlyState(savedLocal)" in BOOT_JS
@@ -68,9 +70,10 @@ def test_session_url_route_serves_index_and_base_href_handles_session_path():
 
 
 def _evaluate_base_href_for_path(path: str) -> str:
-    script_match = re.search(r"<script>\(function\(\).*?</script>", INDEX_HTML)
+    scripts = re.findall(r"<script>\(function\(\).*?</script>", INDEX_HTML)
+    script_match = next((s for s in scripts if '<base href=' in s), None)
     assert script_match, "index.html should include the dynamic base href script"
-    script = script_match.group(0).removeprefix("<script>").removesuffix("</script>")
+    script = script_match.removeprefix("<script>").removesuffix("</script>")
     node = f"""
 const location={{origin:'https://example.test', pathname:{json.dumps(path)}}};
 let written='';

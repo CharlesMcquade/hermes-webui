@@ -93,9 +93,17 @@ def _node_eval(script: str, timeout: float = 2.0) -> subprocess.CompletedProcess
     )
 
 
+def _api_harness_source() -> str:
+    source = _source(WORKSPACE_JS)
+    # Run the real embed policy with the extracted api() function.
+    start = source.index("function _embedNoRedirect401(){")
+    end = source.index("\n}", start) + 2
+    return source[start:end] + "\n" + _extract_js_function(source, "api")
+
+
 def test_api_rejects_hung_fetch_with_timeout_and_toast():
     """A hung fetch must reject quickly and surface a recognizable timeout toast."""
-    api_fn = _extract_js_function(_source(WORKSPACE_JS), "api")
+    api_fn = _api_harness_source()
     script = textwrap.dedent(
         f"""
         const events=[];
@@ -127,7 +135,7 @@ def test_api_rejects_hung_fetch_with_timeout_and_toast():
 
 def test_api_rejects_stalled_response_body_with_timeout():
     """The timeout must stay active through JSON/text body consumption, not only headers."""
-    api_fn = _extract_js_function(_source(WORKSPACE_JS), "api")
+    api_fn = _api_harness_source()
     script = textwrap.dedent(
         f"""
         const events=[];
@@ -162,7 +170,7 @@ def test_api_rejects_stalled_response_body_with_timeout():
 
 def test_api_can_suppress_timeout_toast_for_background_pollers():
     """Passive pollers need abort/reject cleanup without a user-visible toast."""
-    api_fn = _extract_js_function(_source(WORKSPACE_JS), "api")
+    api_fn = _api_harness_source()
     script = textwrap.dedent(
         f"""
         const events=[];

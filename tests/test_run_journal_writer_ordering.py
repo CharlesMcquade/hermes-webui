@@ -79,3 +79,21 @@ def test_unused_writer_does_not_allocate_a_registry_lock(tmp_path):
     writer = run_journal.RunJournalWriter("unused_session", "unused_run", session_dir=tmp_path)
     assert writer.append_sse_event("metering", {"tps": 10}) is None
     assert not any(key[0] == parent for key in run_journal._WRITER_LOCKS)
+
+
+def test_unused_writers_do_not_grow_registry_and_used_lock_is_cleaned_up(tmp_path):
+    sid = "bounded_session"
+    parent = str(tmp_path / run_journal.RUN_JOURNAL_DIR_NAME / sid)
+    writers = [run_journal.RunJournalWriter(sid, f"run_{i}", session_dir=tmp_path)
+               for i in range(64)]
+    for writer in writers:
+        assert writer.append_sse_event("metering", {"tps": 10}) is None
+    assert not any(key[0] == parent for key in run_journal._WRITER_LOCKS)
+    assert writers[0].append_sse_event("token", {"text": "first"})["seq"] == 1
+    assert sum(key[0] == parent for key in run_journal._WRITER_LOCKS) == 1
+    assert run_journal.delete_run_journal(sid, session_dir=tmp_path)
+    assert not any(key[0] == parent for key in run_journal._WRITER_LOCKS)
+    # A surviving writer must reacquire the current registry lock after cleanup.
+    assert writers[0].append_sse_event("token", {"text": "again"})["seq"] == 1
+    assert sum(key[0] == parent for key in run_journal._WRITER_LOCKS) == 1
+    assert run_journal.delete_run_journal(sid, session_dir=tmp_path)
