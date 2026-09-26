@@ -1103,8 +1103,10 @@ def _start_async_delegation_wakeup_turn(
                 exc_info=True,
             )
 
+    import contextvars
     threading.Thread(
-        target=_runner,
+        target=contextvars.copy_context().run,
+        args=(_runner,),
         name=f"hermes-webui-delegation-wakeup-{str(session_id)[:8]}",
         daemon=True,
     ).start()
@@ -1117,7 +1119,42 @@ def _process_async_delegation_event(
     delegation_id: str,
     process_registry,
 ) -> None:
+    """Route every claim and settlement through the exact owner's Agent home."""
+    from api.delegation_triage import owned_delegation_ledger
+    try:
+        with owned_delegation_ledger(session_id):
+            _process_async_delegation_event_owned(
+                evt, session_id=session_id, delegation_id=delegation_id,
+                process_registry=process_registry,
+            )
+    except (KeyError, ValueError, OSError):
+        logger.warning("Async delegation %s owner profile unavailable; retrying", delegation_id, exc_info=True)
+        _retry_unclaimed_async_delegation_event(process_registry, evt, keep_legacy_retrying=True)
+
+
+def _process_async_delegation_event_owned(
+    evt: dict,
+    *,
+    session_id: str,
+    delegation_id: str,
+    process_registry,
+) -> None:
     """Claim and route one async completion without private registry markers."""
+
+    # Agent's atomic admission precedes ordinary claims. Only exact, enrolled
+    # parent IDs enter assessment; all other completions retain normal delivery.
+    from api.delegation_triage import late_result_disposition, assess_late_result
+    disposition = late_result_disposition(session_id, delegation_id)
+    if disposition == "claimed":
+        _retry_unclaimed_async_delegation_event(process_registry, evt)
+        return
+    if disposition == "triage":
+        outcome = assess_late_result(session_id, delegation_id)
+        if outcome == "suppressed":
+            return  # No SSE, wakeup, or ordinary ACK for an assessed no-change.
+        if outcome == "retry":
+            _retry_unclaimed_async_delegation_event(process_registry, evt)
+            return
 
     # A durable claim has a finite attempt budget. A busy foreground turn is
     # not a delivery attempt, so leave the record unclaimed and let the shared

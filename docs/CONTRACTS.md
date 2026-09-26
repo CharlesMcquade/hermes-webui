@@ -23,6 +23,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+- [`docs/architecture/late-delegation-triage.md`](architecture/late-delegation-triage.md):
+  WebUI's opt-in late-child assessment, Agent-ledger admission, session revision
+  fence, and ordinary-delivery fallback.
+
 - [`docs/architecture/live-voice-contract.md`](architecture/live-voice-contract.md):
   Realtime audio/reply gating, tool settlement, reconnect ownership, and exact-run
   result retrieval. Voice reuses the existing Hermes launch/steer/cancel paths;
