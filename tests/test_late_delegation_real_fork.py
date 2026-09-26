@@ -79,6 +79,8 @@ finally:
     env["HERMES_WEBUI_STATE_DIR"] = str(tmp_path / "webui")
     env["PYTHONPATH"] = str(Path(agent_source).resolve())
     env.pop("PYTHONSAFEPATH", None)
-    child = subprocess.run([sys.executable, "-c", code, decision], env=env,
+    # The real Agent checkout may have dependencies absent from WebUI's test venv.
+    agent_python = os.environ.get("HERMES_AGENT_TRIAGE_PYTHON") or sys.executable
+    child = subprocess.run([agent_python, "-c", code, decision], env=env,
                            capture_output=True, text=True, timeout=90)
     assert child.returncode == 0, child.stderr
