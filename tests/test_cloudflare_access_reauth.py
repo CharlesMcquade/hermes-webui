@@ -83,6 +83,11 @@ def _node(script: str) -> dict:
     return json.loads(result.stdout)
 
 
+def _api_with_embed_policy(source: str) -> str:
+    # Extract the production policy, not a test-only stub that bypasses it.
+    return _extract_function(source, "_embedNoRedirect401") + "\n" + _extract_function(source, "api")
+
+
 def test_fetch_wrapper_marks_same_origin_subrequests_for_access_401s():
     """The shared fetch chokepoint must opt into Cloudflare's expired-session 401 contract."""
     source = UI_JS.read_text(encoding="utf-8")
@@ -236,7 +241,7 @@ def test_resume_events_share_one_inflight_auth_probe():
 def test_api_401_uses_shared_reload_without_rewriting_deep_link():
     """api() must not race the wrapper's top-level reload with a /login assignment."""
     source = WORKSPACE_JS.read_text(encoding="utf-8")
-    api = _extract_function(source, "api")
+    api = _api_with_embed_policy(source)
     script = textwrap.dedent(
         f"""
         let helperCalls=0;
@@ -263,7 +268,7 @@ def test_api_401_uses_shared_reload_without_rewriting_deep_link():
 def test_api_401_opt_out_leaves_navigation_to_bootstrap_owner():
     """The existing redirect401:false contract must survive proxy recovery support."""
     source = WORKSPACE_JS.read_text(encoding="utf-8")
-    api = _extract_function(source, "api")
+    api = _api_with_embed_policy(source)
     script = textwrap.dedent(
         f"""
         let helperCalls=0;
@@ -290,7 +295,7 @@ def test_api_401_opt_out_leaves_navigation_to_bootstrap_owner():
 def test_api_marks_requests_before_dom_content_loaded():
     """api() cannot depend on the later global fetch patch during boot."""
     source = WORKSPACE_JS.read_text(encoding="utf-8")
-    api = _extract_function(source, "api")
+    api = _api_with_embed_policy(source)
     script = textwrap.dedent(
         f"""
         let captured={{}};
@@ -316,7 +321,7 @@ def test_api_marks_requests_before_dom_content_loaded():
 def test_api_preserves_empty_headers_opt_out_for_form_data():
     """Workspace upload needs the browser to synthesize multipart Content-Type and boundary."""
     source = WORKSPACE_JS.read_text(encoding="utf-8")
-    api = _extract_function(source, "api")
+    api = _api_with_embed_policy(source)
     script = textwrap.dedent(
         f"""
         let captured={{}};
@@ -343,7 +348,7 @@ def test_api_preserves_empty_headers_opt_out_for_form_data():
 def test_api_form_data_transport_generates_multipart_boundary():
     """A real Fetch/FormData request must retain its synthesized multipart boundary."""
     source = WORKSPACE_JS.read_text(encoding="utf-8")
-    api = _extract_function(source, "api")
+    api = _api_with_embed_policy(source)
     script = textwrap.dedent(
         f"""
         const http=require('node:http');

@@ -476,7 +476,6 @@ class RunJournalWriter:
         self.run_id = _validate_id(run_id, "run_id")
         self.session_dir = Path(session_dir) if session_dir is not None else None
         self._path = _run_path(self.session_id, self.run_id, session_dir=self.session_dir)
-        self._lock = _lock_for(self._path)
 
     def append_sse_event(self, event_name: str, payload=None) -> dict | None:
         # Metering is live-only telemetry. Skipping its write also preserves
@@ -495,11 +494,11 @@ class RunJournalWriter:
     def append_and_publish_sse_event(self, event_name: str, payload, publish) -> dict:
         """Append and publish one SSE event in the per-run ordering domain.
 
-        The callback receives the canonical journal envelope while ``self._lock``
-        is still held. Every producer that exposes live SSE alongside replay must
+        The callback receives the canonical journal envelope while the per-path
+        lock is still held. Every producer that exposes live SSE alongside replay must
         use this transaction so queue order cannot disagree with journal ``seq``.
         """
-        with self._lock:
+        with _lock_for(self._path):
             event = _append_run_event_locked(
                 self._path,
                 self.session_id,
@@ -518,7 +517,7 @@ class RunJournalWriter:
         acceptance is reported separately because runtime acceptance cannot be
         rolled back.
         """
-        with self._lock:
+        with _lock_for(self._path):
             existing, malformed = _read_jsonl(self._path)
             if malformed:
                 return False, None, "journal_malformed", None

@@ -645,17 +645,22 @@ def test_transient_fallback_warning_classifies_broad_lifecycle_messages():
         "Fallback activated",
     )
 
-    # Confirmed post-switch must NOT match the transient classifier
-    assert not _is_transient_fallback_warning(
+    # The broad phrase matcher also matches confirmed notices. The callback's
+    # confirmed-first gate, not disjoint classifiers, prevents a duplicate live
+    # transient warning and preserves the post-switch notice.
+    assert _is_transient_fallback_warning(
         "lifecycle",
         "Switched to fallback model: m1 via p1 → m2 via p2",
     )
-
-    # Confirmed post-switch must still match the confirmed classifier
     assert _is_fallback_lifecycle_message(
         "lifecycle",
         "Switched to fallback model: m1 via p1 → m2 via p2",
     )
+    src = _read("api/streaming.py")
+    callback = src.split("def _agent_status_callback", 1)[1].split("# Initialised here", 1)[0]
+    assert "if _is_transient_warning and not _is_fallback_notice:" in callback
+    assert "elif _is_fallback_notice:" in callback
+    assert callback.index("if _is_transient_warning and not _is_fallback_notice:") < callback.index("elif _is_fallback_notice:")
 
     # Non-lifecycle kinds must not match either classifier
     assert not _is_transient_fallback_warning(
@@ -784,8 +789,13 @@ def test_auto_compression_live_card_appends_to_worklog_timeline():
     assert "_toolWorklogListEl(group)" in helper
     assert "_autoCompressionWorklogNode(state)" in helper
     automatic_branch = helper.split("if(state.automatic){", 1)[1].split("const node=_compressionCardsNode(state);", 1)[0]
-    assert "inner.appendChild(node)" not in automatic_branch
-    assert "list.appendChild(node)" in automatic_branch
+    assert "const turnWorklog=isTurnWorklogMode();" in automatic_branch
+    assert "const group=turnWorklog?null:ensureLiveWorklogContainer(inner," in automatic_branch
+    assert "const list=turnWorklog?inner:_toolWorklogListEl(group);" in automatic_branch
+    assert "else if(turnWorklog){" in automatic_branch
+    assert "if(footer&&footer.parentElement===inner) inner.insertBefore(node,footer);" in automatic_branch
+    assert "else inner.appendChild(node);" in automatic_branch
+    assert "}else list.appendChild(node);" in automatic_branch
 
 
 def test_final_settle_removes_live_auto_compression_row():
@@ -888,10 +898,15 @@ def test_auto_compression_live_repeated_starts_keep_only_current_running_row():
     helper = src[start:end]
 
     assert "node.setAttribute('data-compression-phase',String(state.phase||''));" in helper
-    assert "const existingRunning=group.querySelector('[data-live-compression-card=\"1\"][data-compression-started-at]');" in helper
+    assert "const list=turnWorklog?inner:_toolWorklogListEl(group);" in helper
+    assert "const existingRunning=list.querySelector('[data-live-compression-card=\"1\"][data-compression-started-at]');" in helper
+    assert "const existingDone=Array.from(list.querySelectorAll('[data-live-compression-card=\"1\"][data-compression-phase=\"done\"]')).pop();" in helper
     assert 'const existing=state.phase===\'running\'?existingRunning:(existingRunning||existingDone);' in helper
     assert "if(existing) existing.replaceWith(node);" in helper
-    assert "else list.appendChild(node);" in helper
+    assert "else if(turnWorklog){" in helper
+    assert "if(footer&&footer.parentElement===inner) inner.insertBefore(node,footer);" in helper
+    assert "else inner.appendChild(node);" in helper
+    assert "}else list.appendChild(node);" in helper
 
 
 def test_auto_compression_running_card_completes_on_followup_live_events():
