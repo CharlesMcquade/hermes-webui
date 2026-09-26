@@ -70,7 +70,7 @@ from api.compression_anchor import is_context_compression_marker, visible_messag
 from api.compression_recovery import stamp_compression_exhausted_recovery
 from api.gateway_chat import WEBUI_LOCAL_CHAT_BACKEND
 from api.metering import meter
-from api.run_journal import RunJournalWriter
+from api.run_journal import RunJournalWriter, TERMINAL_SSE_EVENTS
 from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
@@ -11294,6 +11294,8 @@ def _run_agent_streaming(
             target = AGENT_INSTANCES.get(stream_id) or agent
             if stream_id in STREAMS and not cancel_event.is_set():
                 update_active_run(stream_id, phase="finalizing")
+        if run_journal is not None:
+            run_journal.close_acceptance_fence()
         leftovers = list(_returned_pending_steer)
         try:
             drain = getattr(target, '_drain_pending_steer', None)
@@ -11331,7 +11333,10 @@ def _run_agent_streaming(
                 # Journal append and queue publication share the per-run lock.
                 # Otherwise a concurrent Steer can append N+1 and queue before
                 # this already-appended N, reversing live order vs replay.
-                run_journal.append_and_publish_sse_event(event, data, _publish_journaled)
+                if event in TERMINAL_SSE_EVENTS:
+                    run_journal.publish_terminal(event, data, _publish_journaled)
+                else:
+                    run_journal.append_and_publish_sse_event(event, data, _publish_journaled)
                 return
             except Exception:
                 logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
@@ -15759,6 +15764,9 @@ def _accept_and_publish_steer_event(
     if reason == "terminal":
         outcome["fallback"] = "stream_dead"
         return outcome
+    if reason == "fence_closed":
+        outcome["fallback"] = "not_running"
+        return outcome
     if reason == "journal_malformed":
         outcome["fallback"] = "steer_error"
         return outcome
@@ -16565,7 +16573,21 @@ def cancel_stream(stream_id: str) -> dict:
                     logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
             try:
                 _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
-                q.put_nowait(('cancel', _payload))
+                # Journal identity belongs to the admitted run, not a rotated
+                # Agent session or a reusable cache entry.
+                _journal_sid = (active_run_session_id or _snap_owner_session_id
+                                or _cancel_session_id)
+                def _publish_cancel(row):
+                    event_id = row.get('event_id')
+                    item = ('cancel', _payload, event_id) if event_id and hasattr(q, 'subscribe_with_snapshot') else ('cancel', _payload)
+                    q.put_nowait(item)
+                    if event_id:
+                        STREAM_LAST_EVENT_ID[stream_id] = event_id
+                if _journal_sid:
+                    RunJournalWriter(str(_journal_sid), str(stream_id)).publish_terminal(
+                        'cancel', _payload, _publish_cancel)
+                else:
+                    q.put_nowait(('cancel', _payload))
             except Exception:
                 logger.debug("Failed to put cancel event to queue")
 

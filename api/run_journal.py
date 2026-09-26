@@ -6,6 +6,7 @@ the existing in-process streaming path without changing execution ownership.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -19,6 +20,8 @@ RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _WRITER_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
 _WRITER_LOCKS_GUARD = threading.Lock()
+_CLOSED_ACCEPTANCE: set[Path] = set()
+logger = logging.getLogger(__name__)
 # Next-seq to assign per run-journal file path, kept in memory so repeat appends
 # to the same run do not re-parse the whole file on every call. The per-path
 # ``_lock_for(path)`` serializes same-path reserve→append so seqs stay monotonic
@@ -518,6 +521,8 @@ class RunJournalWriter:
         rolled back.
         """
         with _lock_for(self._path):
+            if self._path in _CLOSED_ACCEPTANCE:
+                return False, None, "fence_closed", None
             existing, malformed = _read_jsonl(self._path)
             if malformed:
                 return False, None, "journal_malformed", None
@@ -545,6 +550,42 @@ class RunJournalWriter:
                 except Exception as exc:
                     return True, event, "publication_error", exc
             return True, event, None, None
+
+    def close_acceptance_fence(self):
+        """Serialize admission closure with in-flight journaled Steer callbacks."""
+        with _lock_for(self._path):
+            _CLOSED_ACCEPTANCE.add(self._path)
+
+    def publish_terminal(self, event_name, payload, publish):
+        """Close admission and publish transport closure even if persistence fails.
+
+        A synthetic frame is live-only; it must never masquerade as a replay row.
+        The semantic terminal remains authoritative when stream_end follows done.
+        """
+        with _lock_for(self._path):
+            _CLOSED_ACCEPTANCE.add(self._path)
+            existing, malformed = _read_jsonl(self._path)
+            terminal = any(row.get("terminal") for row in existing)
+            event = None
+            if not malformed and (not terminal or event_name == "stream_end"):
+                try:
+                    event = _append_run_event_locked(self._path, self.session_id,
+                        self.run_id, event_name, payload or {})
+                except Exception:
+                    logger.warning("Terminal journal append failed for %s", self.run_id, exc_info=True)
+            if event is None:
+                event = {"event_id": None, "seq": None, "run_id": self.run_id,
+                    "session_id": self.session_id, "event": event_name,
+                    "type": event_name, "payload": payload or {}, "terminal": True,
+                    "terminal_state": _terminal_state_for_event(event_name, payload),
+                    "_synthetic": True}
+            try:
+                publish(event)
+            except Exception:
+                logger.warning("Terminal publication failed for %s", self.run_id, exc_info=True)
+            if event.get("seq") is not None or terminal:
+                _CLOSED_ACCEPTANCE.discard(self._path)
+            return event
 
 
 def journal_replay_visible(event) -> bool:
@@ -881,6 +922,11 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
         return False
     shutil.rmtree(session_journal_dir, ignore_errors=True)
     removed = not session_journal_dir.exists()
+    if removed:
+        with _WRITER_LOCKS_GUARD:
+            _CLOSED_ACCEPTANCE.difference_update(
+                path for path in _CLOSED_ACCEPTANCE if path.parent == session_journal_dir
+            )
     # Evict any writer locks the removed runs left behind. `_lock_for` keys are
     # ``(str(path.parent), path.name, pid)`` and every run file for this session
     # lives directly under ``session_journal_dir``, so drop all keys whose parent
