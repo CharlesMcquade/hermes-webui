@@ -1830,7 +1830,7 @@ function _reconcilePreservedLiveTurn(inner, _preservedLiveTurn){
           // restore the whole preserved turn so nothing the user saw vanishes.
           if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
           _rebuilt.replaceWith(_preservedLiveTurn);
-        }else{
+        }else if(!_settledTranscriptOwnsLiveTurn(S.session?.session_id,_preservedLiveTurn)){
           if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
           inner.appendChild(_preservedLiveTurn);
         }

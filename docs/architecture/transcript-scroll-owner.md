@@ -32,6 +32,8 @@ submitted as a merge of the divergent development fork.
   restore flag; callers not opting into this keep their existing behavior.
 - `_reconcilePreservedLiveTurn` preserves upstream's parser-tail and structural
   superset decisions, but resolves the rebuilt turn inside the staged root.
+  If no rebuilt turn exists, it checks settled-stream ownership before appending
+  the preserved node; a settled answer must not be duplicated by that fallback.
 - A page-lifetime ResizeObserver owns the reader snapshot. Session identity,
   message-array identity, render revision, input epoch, and position gate its
   use. New renders replace the snapshot; mismatched state cannot restore an old
