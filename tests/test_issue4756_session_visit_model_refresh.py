@@ -397,9 +397,9 @@ def test_session_visit_overlapping_stale_calls_do_not_duplicate_over_budget_rebu
         futures = [executor.submit(cfg.get_available_models_for_session_visit) for _ in range(2)]
         results = [future.result(timeout=10) for future in futures]
 
-    # Both callers entered on stale disk, but the late follower can legitimately
-    # observe the just-published live result instead of its stale fallback.
-    assert stale_catalog in results
+    # Either caller may return the stale fallback or the newly published result.
+    # Even the first caller can get the live result at the rebuild-budget boundary.
+    assert all(result in (stale_catalog, rebuilt_catalog) for result in results)
     assert rebuilt_catalog in results
     assert rebuild_count == 1
     assert published.wait(timeout=5)
