@@ -15717,16 +15717,30 @@ def _steer_attachment_paths(value) -> list[str]:
 
 
 def _verified_steer_attachment_paths(session_id: str, value) -> list[str]:
-    """Accept only real files from this session's server-owned upload inbox."""
+    """Accept inbox files or expand contained extracted archives into files."""
     from api.upload import _session_attachment_dir
 
     session_root = _session_attachment_dir(str(session_id)).resolve()
     verified = []
     for raw in _steer_attachment_paths(value):
-        candidate = Path(raw).expanduser().resolve()
-        if not candidate.is_relative_to(session_root) or not candidate.is_file():
+        source = Path(raw).expanduser()
+        candidate = source.resolve()
+        if source.is_symlink() or not candidate.is_relative_to(session_root) or candidate == session_root:
             raise ValueError("Steer attachment path is not a session upload")
-        verified.append(str(candidate))
+        if candidate.is_file():
+            verified.append(str(candidate))
+            continue
+        if not candidate.is_dir():
+            raise ValueError("Steer attachment path is not a session upload")
+        # Archive extraction returns a directory. Validate every member before
+        # passing any paths to the runtime; never follow links out of the inbox.
+        members = sorted(candidate.rglob("*"))
+        for member in members:
+            if member.is_symlink() or not member.resolve().is_relative_to(session_root):
+                raise ValueError("Steer attachment path escapes session root or is a symlink")
+            if not member.is_file() and not member.is_dir():
+                raise ValueError("Steer attachment path is not a regular file")
+        verified.extend(str(member.resolve()) for member in members if member.is_file())
     return verified
 
 
