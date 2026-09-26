@@ -63,8 +63,11 @@ def test_archive_steer_expands_contained_files_and_rejects_symlink(tmp_path, mon
     nested = archive / "nested"
     nested.mkdir()
     (nested / "two.txt").write_text("two")
-    assert set(streaming._verified_steer_attachment_paths("sid", [str(archive)])) == {
-        str(archive / "one.txt"), str(nested / "two.txt")}
+    snapshots = streaming._verified_steer_attachment_paths("sid", [str(archive)])
+    assert [open(path).read() for path in snapshots] == ["two", "one"]
+    assert all(".steer-snapshot-" in path for path in snapshots)
+    (archive / "one.txt").write_text("changed")
+    assert open(snapshots[1]).read() == "one"
     with pytest.raises(ValueError):
         streaming._verified_steer_attachment_paths("sid", [str(root)])
     outside = tmp_path / "outside.txt"
@@ -72,6 +75,46 @@ def test_archive_steer_expands_contained_files_and_rejects_symlink(tmp_path, mon
     (archive / "escape").symlink_to(outside)
     with pytest.raises(ValueError):
         streaming._verified_steer_attachment_paths("sid", [str(archive)])
+
+
+def test_archive_steer_rejects_ancestor_links_and_swapped_member(tmp_path, monkeypatch):
+    root = tmp_path / "uploads"
+    root.mkdir()
+    monkeypatch.setattr(upload, "_session_attachment_dir", lambda _: root)
+    outside = tmp_path / "secret"
+    outside.write_text("secret")
+    directory = root / "archive"
+    directory.mkdir()
+    (directory / "file").write_text("safe")
+    (root / "alias").symlink_to(directory, target_is_directory=True)
+    with pytest.raises(ValueError):
+        streaming._verified_steer_attachment_paths("sid", [str(root / "alias" / "file")])
+    (directory / "file").unlink()
+    (directory / "file").symlink_to(outside)
+    with pytest.raises(ValueError):
+        streaming._verified_steer_attachment_paths("sid", [str(directory)])
+    assert not list(root.glob(".steer-snapshot-*"))
+
+
+def test_archive_steer_count_empty_duplicates_and_snapshot_reentry(tmp_path, monkeypatch):
+    root = tmp_path / "uploads"
+    directory = root / "archive"
+    directory.mkdir(parents=True)
+    monkeypatch.setattr(upload, "_session_attachment_dir", lambda _: root)
+    for index in range(21):
+        (directory / f"{index:02}.txt").write_text(str(index))
+    with pytest.raises(ValueError, match="20"):
+        streaming._verified_steer_attachment_paths("sid", [str(directory)])
+    assert not list(root.glob(".steer-snapshot-*"))
+    file = directory / "00.txt"
+    for paths in ([""], [str(file), str(file)], [str(file)] * 21):
+        with pytest.raises(ValueError):
+            streaming._verified_steer_attachment_paths("sid", paths)
+    (directory / "20.txt").unlink()
+    paths = streaming._verified_steer_attachment_paths("sid", [str(file), str(directory)])
+    assert len(paths) == 20  # overlap deduplicated by relative identity
+    with pytest.raises(ValueError):
+        streaming._verified_steer_attachment_paths("sid", [paths[0]])
 
 
 def test_terminal_relay_closes_after_done_and_synthetic_errors(tmp_path, monkeypatch):

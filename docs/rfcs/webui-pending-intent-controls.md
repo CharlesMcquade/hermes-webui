@@ -381,8 +381,15 @@ payload records `session_id`, `stream_id`, one authoritative user-authored
 `text`, bounded path-free attachment labels in `files`, `status: delivered`, and
 `created_at`. The browser sends structured `user_text` plus uploaded
 `attachment_paths`; the server accepts only files that actually exist inside that
-session's server-owned upload inbox, then constructs Agent-facing file-tool
-guidance from those verified paths. It does not trust independent visible and
+session's server-owned upload inbox. File and extracted-archive inputs are opened
+through no-follow directory descriptors and copied into a private, exclusive
+per-Steer snapshot under that session inbox before Agent-facing file-tool
+guidance is built. Guidance names only snapshot files, never mutable upload
+sources. Empty paths, duplicate explicit inputs, symlinks in any source
+component, more than 20 expanded unique files, and over 20 MiB combined
+content are rejected rather than truncated. Rejected snapshots are removed;
+accepted snapshots remain until the session inbox is deleted so delayed Agent
+file reads still work. It does not trust independent visible and
 runtime strings—or arbitrary path text—so the durable timeline cannot hide
 different instructions sent to the Agent. The event
 remains presentation/replay metadata: its `control_boundary` kind preserves
