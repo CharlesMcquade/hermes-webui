@@ -74,6 +74,15 @@ individually valid rows can reach disk out of order and the session replay
 reader must reject them as noncontiguous. This does not change caller-supplied
 sequence semantics, cross-process ownership, or failed-write recovery.
 
+A session-journal deletion must first block new leases for that session and
+wait for both current holders and already-waiting users of its per-path locks.
+Only after their append/publication transactions finish may it remove files
+and evict the corresponding lock, acceptance fence, and sequence caches. A
+later explicit writer may recreate a journal, but an in-flight Steer and
+terminal publication must never acquire different locks for the same path
+across deletion. This is an in-process ordering guarantee, not a cross-process
+session-delete admission protocol.
+
 ## Inactive compression continuation recovery
 
 The Agent profile's SQLite compression lineage owns the canonical continuation,

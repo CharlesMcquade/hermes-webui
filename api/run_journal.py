@@ -11,6 +11,7 @@ import os
 import re
 import threading
 import time
+from contextlib import contextmanager
 from copy import deepcopy
 from collections import OrderedDict
 from pathlib import Path
@@ -20,6 +21,11 @@ RUN_JOURNAL_DIR_NAME = "_run_journal"
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _WRITER_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
 _WRITER_LOCKS_GUARD = threading.Lock()
+_WRITER_LOCKS_COND = threading.Condition(_WRITER_LOCKS_GUARD)
+# A lease includes threads waiting for the path lock, not just its current
+# holder. Deletion must drain both before evicting a lock or its sequence cache.
+_WRITER_LOCK_USERS: dict[tuple[str, str, str], int] = {}
+_DELETING_SESSION_DIRS: set[str] = set()
 _CLOSED_ACCEPTANCE: set[Path] = set()
 logger = logging.getLogger(__name__)
 # Next-seq to assign per run-journal file path, kept in memory so repeat appends
@@ -90,14 +96,34 @@ def _run_path(session_id: str, run_id: str, session_dir: Path | None = None) -> 
     return root / RUN_JOURNAL_DIR_NAME / sid / f"{rid}.jsonl"
 
 
-def _lock_for(path: Path) -> threading.Lock:
+@contextmanager
+def _lock_for(path: Path):
+    """Lease the path lock across its wait and use, including session deletion.
+
+    Returning a bare lock allowed deletion to evict it while a writer still
+    held or waited on it; the next writer then received an independent lock.
+    """
     key = (str(path.parent), path.name, str(os.getpid()))
-    with _WRITER_LOCKS_GUARD:
+    with _WRITER_LOCKS_COND:
+        while key[0] in _DELETING_SESSION_DIRS:
+            _WRITER_LOCKS_COND.wait()
         lock = _WRITER_LOCKS.get(key)
         if lock is None:
             lock = threading.Lock()
             _WRITER_LOCKS[key] = lock
-        return lock
+        _WRITER_LOCK_USERS[key] = _WRITER_LOCK_USERS.get(key, 0) + 1
+        _WRITER_LOCKS_COND.notify_all()
+    try:
+        with lock:
+            yield lock
+    finally:
+        with _WRITER_LOCKS_COND:
+            remaining = _WRITER_LOCK_USERS[key] - 1
+            if remaining:
+                _WRITER_LOCK_USERS[key] = remaining
+            else:
+                del _WRITER_LOCK_USERS[key]
+                _WRITER_LOCKS_COND.notify_all()
 
 
 def _summary_cache_signature(path: Path) -> tuple[int, int, int, int, int] | None:
@@ -923,43 +949,43 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
         return False
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
     session_journal_dir = root / RUN_JOURNAL_DIR_NAME / sid
-    if not session_journal_dir.exists():
-        return False
-    shutil.rmtree(session_journal_dir, ignore_errors=True)
-    removed = not session_journal_dir.exists()
-    if removed:
-        with _WRITER_LOCKS_GUARD:
-            _CLOSED_ACCEPTANCE.difference_update(
-                path for path in _CLOSED_ACCEPTANCE if path.parent == session_journal_dir
-            )
-    # Evict any writer locks the removed runs left behind. `_lock_for` keys are
-    # ``(str(path.parent), path.name, pid)`` and every run file for this session
-    # lives directly under ``session_journal_dir``, so drop all keys whose parent
-    # dir matches — pid-independent — to keep `_WRITER_LOCKS` from growing forever.
-    # Guard on confirmed removal: `rmtree(ignore_errors=True)` can silently leave
-    # the directory (locked files on Windows, permission transients). If the files
-    # still exist their locks are still live — evicting them would hand a later
-    # `_lock_for` caller a brand-new Lock, breaking mutual exclusion with a writer
-    # still holding the old one.
-    if removed:
-        dir_key = str(session_journal_dir)
-        with _WRITER_LOCKS_GUARD:
-            for key in [k for k in _WRITER_LOCKS if k[0] == dir_key]:
-                del _WRITER_LOCKS[key]
-        # Drop cached next-seq entries for the removed runs too. Every run file
-        # for this session lives directly under ``session_journal_dir``, so its
-        # cache key's parent dir matches. Without this, a run re-created at the
-        # same path would resume the stale cached seq instead of restarting at 1.
-        # Hold ``_SEQ_CACHE_LOCK`` — the SAME mutex ``_reserve_next_seq``/
-        # ``_note_assigned_seq`` take — so a concurrent append on another path
-        # cannot mutate the dict mid-iteration (``dictionary changed size``).
-        with _SEQ_CACHE_LOCK:
-            for cache_key in [entry for entry in _SEQ_CACHE if str(Path(entry).parent) == dir_key]:
-                del _SEQ_CACHE[cache_key]
-        with _SUMMARY_CACHE_LOCK:
-            for cache_key in [entry for entry in _SUMMARY_CACHE if str(Path(entry).parent) == dir_key]:
-                del _SUMMARY_CACHE[cache_key]
-    return removed
+    dir_key = str(session_journal_dir)
+    # Block new same-session leases and drain *all* existing holders and waiters.
+    # Holding only the registry guard while evicting would leave a previously
+    # issued lock usable after a new lock had been installed for the same path.
+    with _WRITER_LOCKS_COND:
+        while dir_key in _DELETING_SESSION_DIRS:
+            _WRITER_LOCKS_COND.wait()
+        _DELETING_SESSION_DIRS.add(dir_key)
+        _WRITER_LOCKS_COND.notify_all()
+        while any(key[0] == dir_key for key in _WRITER_LOCK_USERS):
+            _WRITER_LOCKS_COND.wait()
+    try:
+        if not session_journal_dir.exists():
+            return False
+        shutil.rmtree(session_journal_dir, ignore_errors=True)
+        removed = not session_journal_dir.exists()
+        if removed:
+            # No lease for this session exists or can start before the deletion
+            # marker is released. Registry, acceptance, and caches are therefore
+            # evicted together after the final writer has finished publishing.
+            with _WRITER_LOCKS_COND:
+                _CLOSED_ACCEPTANCE.difference_update(
+                    path for path in _CLOSED_ACCEPTANCE if path.parent == session_journal_dir
+                )
+                for key in [k for k in _WRITER_LOCKS if k[0] == dir_key]:
+                    del _WRITER_LOCKS[key]
+            with _SEQ_CACHE_LOCK:
+                for cache_key in [entry for entry in _SEQ_CACHE if str(Path(entry).parent) == dir_key]:
+                    del _SEQ_CACHE[cache_key]
+            with _SUMMARY_CACHE_LOCK:
+                for cache_key in [entry for entry in _SUMMARY_CACHE if str(Path(entry).parent) == dir_key]:
+                    del _SUMMARY_CACHE[cache_key]
+        return removed
+    finally:
+        with _WRITER_LOCKS_COND:
+            _DELETING_SESSION_DIRS.remove(dir_key)
+            _WRITER_LOCKS_COND.notify_all()
 
 
 def stale_interrupted_event(session_id: str, run_id: str, *, after_seq: int | None = None) -> dict | None:
