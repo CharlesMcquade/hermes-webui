@@ -66,7 +66,9 @@ active run so the run can use it in later processing.
 In the UI, Steer should render like a normal user message. In runtime semantics,
 it is not the next normal user turn. It is mid-run input for the active run.
 
-Steer belongs to the current active run.
+Steer belongs to the current active run. Uploaded archive guidance may refer to
+its extracted directory; the server expands only contained regular member files
+and rejects links or paths outside that session's upload inbox.
 
 ### Stop
 
