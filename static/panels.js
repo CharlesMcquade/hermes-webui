@@ -7132,7 +7132,7 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
-    _invalidateVisionCapabilityFirst();
+    if(typeof _invalidateVisionCapabilityFirst==='function') _invalidateVisionCapabilityFirst();
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
