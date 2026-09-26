@@ -4573,6 +4573,18 @@ def _drain_webui_process_notifications(
                 is_stale = stale_age > stale_completion_max_age
 
         if is_async_delegation:
+            # An explicitly enrolled child belongs to the background assessor.
+            # Do not age-drop or direct-ACK it here, including on a concurrent
+            # parent turn. Agent's ledger admission is the atomic claim boundary.
+            from api.delegation_triage import late_result_disposition
+            disposition = late_result_disposition(session_id, evt_sid)
+            if disposition in ("triage", "claimed"):
+                schedule_async_delegation_claim_retry(evt, completion_queue)
+                continue
+            if disposition == "settled":
+                # A material/uncertain enrolled child settled to wake must not
+                # subsequently be age-dropped before ordinary acceptance.
+                is_stale = False
             try:
                 claim = claim_async_delegation_delivery(evt, "webui-next-turn")
             except Exception:
@@ -12880,8 +12892,9 @@ def _run_agent_streaming(
                     agent = _AIAgent(**_agent_kwargs)
                     _cache_new_agent = True
                     _current_agent[0] = agent
-                    # Lifecycle registration occurs inside _register_agent_if_current,
-                    # on the same stream-lock admission edge as Stop.
+                    # Triage may inspect only this exact profile's agent.
+                    agent._webui_profile_home = _profile_home
+                    # Lifecycle/cache publication stays on the stream-lock admission edge.
 
             if not _register_agent_if_current(agent, _agent_sig if _cache_new_agent else None):
                 with _agent_lock:

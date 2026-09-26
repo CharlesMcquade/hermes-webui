@@ -7,6 +7,7 @@ current durable claim API and bounded compatibility fallbacks.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,14 @@ from api import background_process as bp
 from api import config as cfg
 from api import process_event_utils as peu
 from api import streaming
+
+
+@pytest.fixture(autouse=True)
+def _stub_owner_profile_for_legacy_registry_tests(monkeypatch):
+    # These registry fixtures use fabricated session IDs and no WebUI sidecar.
+    # Real owner/profile scoping is exercised by test_late_delegation_crossrepo.
+    from api import delegation_triage
+    monkeypatch.setattr(delegation_triage, "owned_delegation_ledger", lambda _sid: nullcontext())
 
 
 class _NoopLock:

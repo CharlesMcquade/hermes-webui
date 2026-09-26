@@ -27,6 +27,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
   architecture contract for remote terminal workspaces (SSH/Docker), target-side
   POSIX path preservation against macOS synthetic firmlink expansion, and
   per-profile isolation boundaries.
+- [`docs/architecture/late-delegation-triage.md`](architecture/late-delegation-triage.md):
+  WebUI's opt-in late-child assessment, Agent-ledger admission, session revision
+  fence, and ordinary-delivery fallback.
+
 - [`docs/architecture/live-voice-contract.md`](architecture/live-voice-contract.md):
   Historical Realtime audio/reply gating, tool settlement, reconnect ownership,
   and exact-run result retrieval. This feature is retired in the target overlay;
