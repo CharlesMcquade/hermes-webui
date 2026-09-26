@@ -107,6 +107,7 @@ def test_get_cli_sessions_cold_followers_join_single_rebuild(monkeypatch, tmp_pa
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     models.clear_cli_sessions_cache()
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_WAIT_SECONDS", 3.0)
 
     owner_started = threading.Event()
     owner_block = threading.Event()
@@ -252,6 +253,54 @@ def test_get_cli_sessions_clear_during_rebuild_does_not_restore_stale_rows(monke
         assert cache_key in models._CLI_SESSIONS_CACHE
 
 
+def test_get_cli_sessions_follower_claim_after_peer_publish_reuses_cache(monkeypatch, tmp_path):
+    """A waiter can race publication after its initial cache miss."""
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: str(hermes_home))
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    models.clear_cli_sessions_cache()
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0)
+
+    first_started = threading.Event()
+    release_first = threading.Event()
+    claim_paused = threading.Event()
+    release_claim = threading.Event()
+    loads = []
+    results = {}
+    real_claim = models._cli_sessions_cache_claim_rebuild
+
+    def gated_claim(key):
+        if threading.current_thread().name == "late-follower":
+            claim_paused.set()
+            assert release_claim.wait(3)
+        return real_claim(key)
+
+    def loader(*_args, **_kwargs):
+        loads.append(1)
+        if len(loads) == 1:
+            first_started.set()
+            assert release_first.wait(3)
+        return [{"session_id": "fresh"}]
+
+    monkeypatch.setattr(models, "_cli_sessions_cache_claim_rebuild", gated_claim)
+    monkeypatch.setattr(models, "_load_cli_sessions_uncached", loader)
+    first = threading.Thread(target=lambda: results.setdefault("first", models.get_cli_sessions()), daemon=True)
+    late = threading.Thread(name="late-follower", target=lambda: results.setdefault("late", models.get_cli_sessions()), daemon=True)
+    first.start()
+    assert first_started.wait(3)
+    late.start()
+    assert claim_paused.wait(3)
+    release_first.set()
+    first.join(3)
+    assert not first.is_alive()
+    release_claim.set()
+    late.join(3)
+    assert not late.is_alive()
+    assert results["late"] == results["first"]
+    assert len(loads) == 1
+
+
 def test_get_cli_sessions_clear_during_rebuild_preserves_joiners(monkeypatch, tmp_path):
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir()
@@ -259,6 +308,7 @@ def test_get_cli_sessions_clear_during_rebuild_preserves_joiners(monkeypatch, tm
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
     models.clear_cli_sessions_cache()
     monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_TTL_SECONDS", 60.0, raising=False)
+    monkeypatch.setattr(models, "_CLI_SESSIONS_CACHE_WAIT_SECONDS", 3.0)
 
     owner_started = threading.Event()
     owner_block = threading.Event()
