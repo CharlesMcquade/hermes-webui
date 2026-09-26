@@ -954,7 +954,12 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
         "live reasoning SSE events must update the active Worklog Thinking Card text"
     assert "const liveThinkingText=_liveThinkingText();" in src, \
         "live reasoning SSE events must compute the current segment's Worklog Thinking Card text once"
-    assert "const anchorReasoningFallback={};" in src, \
+    # The fork's journal-identity overlay (73c06197 line) captures the first
+    # journaled SSE event ID in the fallback object so the reasoning row keeps
+    # its identity across a mid-run reload; upstream's older empty-literal
+    # form predates that change.
+    assert ("const anchorReasoningFallback={sseEvent:e};" in src
+            or "const anchorReasoningFallback={};" in src), \
         "live reasoning SSE events must capture the active anchor id for fallback"
     assert "if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback))" in src, \
         "live reasoning SSE events must prefer the anchor renderer before falling back"
