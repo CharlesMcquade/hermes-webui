@@ -105,6 +105,7 @@ const _syncScrollToBottomCue = noop;
 const _isSessionEndlessScrollEnabled = () => false;
 const _setMessageScrollToBottom = noop;
 const i = (name) => !!payload.intents[name];
+const _scrollbarDragActive = i('drag');
 const _recentMessageRenderArtifactWindow = () => false;
 const _recentMessageTouchScrollIntent = () => i('touch');
 const _recentNonMessageScrollIntent = () => i('nonMessage');
@@ -118,6 +119,7 @@ const step = new Function(
   '_isSessionEndlessScrollEnabled','_messagesTruncated','_setMessageScrollToBottom',
   '_recentMessageRenderArtifactWindow','_recentMessageTouchScrollIntent',
   '_recentNonMessageScrollIntent','_recentMessageWheelIntent','_recentMessageKeyScrollIntent',
+  '_scrollbarDragActive',
   payload.body + `
 return {_lastScrollTop,_lastMessageClientHeight,_lastMessageScrollHeight,_nearBottomCount,_scrollPinned,_messageUserUnpinned};
 `);
@@ -129,7 +131,8 @@ for (const s of payload.samples) {
     st._nearBottomCount, st._scrollPinned, st._messageUserUnpinned, false,
     noop, noop, noop, () => false, false, noop,
     _recentMessageRenderArtifactWindow, _recentMessageTouchScrollIntent,
-    _recentNonMessageScrollIntent, _recentMessageWheelIntent, _recentMessageKeyScrollIntent
+    _recentNonMessageScrollIntent, _recentMessageWheelIntent, _recentMessageKeyScrollIntent,
+    _scrollbarDragActive
   );
 }
 console.log(JSON.stringify(st));

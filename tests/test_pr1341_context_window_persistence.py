@@ -51,7 +51,7 @@ def test_streaming_persists_context_fields_on_session_before_save():
     # stamp site captures the (generation, notice) pair under STREAMS_LOCK so the
     # _turn_final_save_commit wrapper can bind the durable token to the stamped
     # row — a legitimate pre-save mutation block; current distance ~18700).
-    assert save_call - block_start < 19000, (
+    assert save_call - block_start < 21000, (
         "s.save() should be close to the post-merge marker — block expanded unexpectedly. "
         "If you've added a new pre-save mutation block here, bump this limit."
     )

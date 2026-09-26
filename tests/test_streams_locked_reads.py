@@ -62,6 +62,11 @@ def test_no_bare_streams_get_outside_config():
         text = path.read_text(encoding="utf-8")
         for lineno, line in enumerate(text.splitlines(), start=1):
             if pattern.search(line):
+                # The steer journal helper deliberately reads under its own
+                # STREAMS_LOCK edge; peek_stream would deadlock on this Lock.
+                if path.name == "streaming.py" and line.strip() == "stream = STREAMS.get(str(stream_id))":
+                    assert text.splitlines()[lineno - 2].strip() == "with STREAMS_LOCK:"
+                    continue
                 offenders.append(
                     f"{path.relative_to(REPO)}:{lineno}: {line.strip()}"
                 )
