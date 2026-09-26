@@ -15812,7 +15812,10 @@ def _accept_and_publish_steer_event(
         outcome["fallback"] = "stream_dead"
         return outcome
     if reason == "fence_closed":
-        outcome["fallback"] = "not_running"
+        # The production caller holds STREAMS_LOCK across its ownership check
+        # and this journal transaction. Only a still-owned stream can report
+        # orderly finalization; a missing stream has already torn down.
+        outcome["fallback"] = "not_running" if stream is not None else "stream_dead"
         return outcome
     if reason == "journal_malformed":
         outcome["fallback"] = "steer_error"
