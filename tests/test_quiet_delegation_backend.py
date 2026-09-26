@@ -46,6 +46,45 @@ def test_delegation_source_survives_eager_recovery_and_merge():
     assert merged[1]["content"] == "Synthesized findings"
 
 
+def test_gateway_duplicate_keeps_verified_delegation_source():
+    """A state-backed duplicate must not erase the tagged Gateway turn."""
+    token = "stream-one:1"
+    text = "ASYNC DELEGATION BATCH COMPLETE\nchild findings"
+    prior = {"role": "user", "content": text, "_active_turn_token": token}
+    result = {**prior, "_source": "delegation_wakeup"}
+    merged = streaming._merge_display_messages_after_agent_result(
+        [prior], [prior], [prior, result, {"role": "assistant", "content": "Handled"}],
+        text, source="delegation_wakeup",
+        verification_nudge_provenance={"active_turn_identity": {"token": token}},
+    )
+    assert len([m for m in merged if m.get("role") == "user"]) == 1
+    assert merged[0]["_source"] == "delegation_wakeup"
+    assert prior.get("_source") is None  # no mutation of the input snapshot
+
+
+def test_gateway_duplicate_never_relabels_a_different_turn():
+    text = "same text"
+    prior = {"role": "user", "content": text, "_active_turn_token": "older:1"}
+    result = {"role": "user", "content": text, "_active_turn_token": "newer:2", "_source": "delegation_wakeup"}
+    merged = streaming._merge_display_messages_after_agent_result(
+        [prior], [prior], [prior, result, {"role": "assistant", "content": "Handled"}],
+        text, source="delegation_wakeup",
+    )
+    assert merged[0].get("_source") is None
+
+
+def test_gateway_duplicate_requires_tagged_result_proof():
+    text = "same text"
+    token = "turn:1"
+    prior = {"role": "user", "content": text, "_active_turn_token": token}
+    merged = streaming._merge_display_messages_after_agent_result(
+        [prior], [prior], [prior, {**prior}, {"role": "assistant", "content": "Handled"}],
+        text, source="delegation_wakeup",
+        verification_nudge_provenance={"active_turn_identity": {"token": token}},
+    )
+    assert merged[0].get("_source") is None
+
+
 def test_delegation_completion_event_has_explicit_kind():
     child = bp._build_payload({"type": "async_delegation", "delegation_id": "deleg-1"}, "sid")
     process = bp._build_payload({"type": "completion", "session_id": "proc-1"}, "sid")
