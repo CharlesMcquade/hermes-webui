@@ -1390,6 +1390,9 @@ def _run_gateway_chat_streaming(
                     s.context_messages,
                     str(msg_text or ""),
                     source=pending_source,
+                    verification_nudge_provenance={
+                        "active_turn_identity": active_turn_identity,
+                    },
                 )
             except Exception:
                 logger.debug("Failed to merge gateway display transcript", exc_info=True)

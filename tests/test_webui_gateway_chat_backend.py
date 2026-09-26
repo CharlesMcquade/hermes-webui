@@ -410,6 +410,57 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert all(len(item) == 3 and item[2] for item in events)
 
 
+def test_gateway_child_wakeup_preserves_source_when_prior_row_is_untagged(tmp_path, monkeypatch):
+    """Persisted Gateway user rows must not erase a matching child wakeup tag."""
+    import api.profiles as profiles_api
+    from api.process_event_utils import build_active_turn_token
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    monkeypatch.setattr(profiles_api, "get_hermes_home_for_profile", lambda _profile: tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "test-key")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"Handled"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda *_args, **_kw: FakeResponse())
+    session = new_session()
+    prompt = "ASYNC DELEGATION BATCH COMPLETE\nchild result"
+    stream_id = "child-stream"
+    session.active_stream_id = stream_id
+    session.pending_user_message = prompt
+    session.pending_user_source = "delegation_wakeup"
+    session.pending_started_at = time.time() - 2
+    token = build_active_turn_token(stream_id, session.pending_started_at)
+    session.messages = [{"role": "user", "content": prompt, "_active_turn_token": token}]
+    session.context_messages = list(session.messages)
+    session.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        session.session_id, prompt, "test-model", str(tmp_path), stream_id, [],
+    )
+    saved = models.get_session(session.session_id)
+    user_rows = [m for m in saved.messages if m.get("role") == "user"]
+    assert len(user_rows) == 1
+    assert user_rows[0]["_source"] == "delegation_wakeup"
+    assert saved.messages[-1]["content"] == "Handled"
+    assert saved.context_messages[-2]["_source"] == "delegation_wakeup"
+    assert json.loads(saved.path.read_text())["messages"][0]["_source"] == "delegation_wakeup"
+
+
 def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp_path, monkeypatch):
     """Gateway terminal errors must survive an empty assistant stream."""
     from unittest.mock import MagicMock

@@ -7998,6 +7998,32 @@ def _merge_display_messages_after_agent_result(
         previous_context,
         _active_turn_identity,
     )
+    # A Gateway state.db row can already occupy the current turn's display
+    # slot, without WebUI's source metadata. Prefix reconciliation below then
+    # removes the tagged result row as a replay. Restore provenance on the
+    # retained row only with a matching stream token AND a tagged result row.
+    turn_token = (
+        _active_turn_identity.get('token')
+        if isinstance(_active_turn_identity, dict) else None
+    )
+    if turn_token and source in ('delegation_wakeup', 'process_wakeup') and any(
+        isinstance(row, dict)
+        and row.get('role') == 'user'
+        and row.get('_active_turn_token') == turn_token
+        and row.get('_source') == source
+        for row in result_messages
+    ):
+        for idx, row in enumerate(previous_display):
+            if (
+                isinstance(row, dict)
+                and row.get('role') == 'user'
+                and row.get('_active_turn_token') == turn_token
+                and row.get('_source') in (None, source)
+            ):
+                retained = copy.deepcopy(row)
+                stamp_message_source(retained, source)
+                previous_display[idx] = retained
+                break
     # Same marker filter for the model-history inputs: the synthetic verify-loop
     # answer/nudge live in the agent's returned messages and prior context, and
     # would otherwise slip into the merged transcript as a real delta. (#5334)
@@ -8254,6 +8280,23 @@ def _merge_display_messages_after_agent_result(
                 and merged[-1].get('id') is None
             ):
                 merged[-1]['id'] = msg['id']
+            # The Gateway can persist its current user row to state.db before
+            # WebUI settles the turn. Reconciliation then keeps that older,
+            # untagged row and discards the tagged result as a duplicate. Carry
+            # the source only when both rows prove the SAME stream-owned turn;
+            # matching text alone must never reclassify a real user message.
+            if (
+                isinstance(msg, dict)
+                and isinstance(merged[-1], dict)
+                and source in ('delegation_wakeup', 'process_wakeup')
+                and msg.get('_source') == source
+                and msg.get('_active_turn_token')
+                and msg.get('_active_turn_token') == merged[-1].get('_active_turn_token')
+                and merged[-1].get('_source') in (None, source)
+            ):
+                retained = copy.deepcopy(merged[-1])
+                stamp_message_source(retained, source)
+                merged[-1] = retained
             continue
         if (
             key is not None
