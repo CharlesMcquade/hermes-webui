@@ -881,6 +881,18 @@ def _relay_gateway_run_events(
             commit()
             sse_event = "message"
             continue
+        if payload_event == "interim_assistant":
+            # Genuine Gateway interim prose: forward across reconnects (worklog
+            # event preservation; the client gates replayed echoes by ID).
+            interim_text = str(payload.get("text") or "")
+            if interim_text:
+                emit("interim_assistant", {
+                    "text": interim_text,
+                    "already_streamed": bool(payload.get("already_streamed")),
+                })
+            commit()
+            sse_event = "message"
+            continue
         if payload_event == "message.delta":
             delta = str(payload.get("delta") or "")
             if delta:

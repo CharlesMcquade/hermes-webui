@@ -20,6 +20,8 @@ from browser_conversation_lifecycle import (
 )
 from browser_turn_worklog_lifecycle import snapshot
 
+PROGRESS = 'Lifecycle progress: checking fixture data.'
+
 
 def main():
     root = Path(__file__).resolve().parents[1]
@@ -62,6 +64,7 @@ def main():
                 page.wait_for_function("() => !!document.querySelector('#liveAssistantTurn [data-anchor-row-role=thinking]')")
                 gateway.release_tool.set()
                 page.wait_for_function("() => !!document.querySelector('#liveAssistantTurn [data-anchor-row-role=tool]')")
+                page.wait_for_function("text => !!Array.from(document.querySelectorAll('#liveAssistantTurn [data-anchor-row-role=prose]')).find(el => el.innerText.includes(text))", arg=PROGRESS)
                 before = snapshot(page)
                 sid = page.evaluate('S.session && S.session.session_id')
                 assert sid and before['live'] and before['mode'] == 'turn_worklog', before
@@ -72,7 +75,14 @@ def main():
                 names = [r.get('event') or r.get('event_type') for r in rows]
                 assert any('reasoning' in str(n) for n in names), names
                 assert any('tool' in str(n) for n in names), names
+                interim = [r for r in rows if (r.get('event') or r.get('event_type')) == 'interim_assistant']
+                assert len(interim) == 1 and interim[0]['payload']['text'] == PROGRESS, interim
                 assert all(n not in ('done', 'stream_end') for n in names), names
+                interim_id = interim[0]['event_id']
+                def prose(scene):
+                    return [r for r in scene['rows'] if r['role'] == 'prose' and r['id'] == interim_id]
+                assert len(prose(before)) == 1 and prose(before)[0]['id'] == interim_id and PROGRESS in prose(before)[0]['text'], before
+                assert prose(before)[0]['source'] == 'interim_assistant', before
                 first_reasoning = next(r for r in rows if (r.get('event') or r.get('event_type')) == 'reasoning')
                 journal_reasoning_id = first_reasoning['event_id']
                 assert journal_reasoning_id in [r['id'] for r in before['rows'] if r['role'] == 'thinking'], (
@@ -85,6 +95,7 @@ def main():
                 expected = [(r['role'], r['id'], r['text']) for r in before['rows']]
                 actual = [(r['role'], r['id'], r['text']) for r in resumed['rows']]
                 assert actual == expected, (expected, actual)
+                assert len(prose(resumed)) == 1 and prose(resumed)[0]['id'] == interim_id and prose(resumed)[0]['text'] == prose(before)[0]['text'], resumed
                 assert any(REASONING_TEXT in r['text'] for r in resumed['rows']), resumed
                 assert any(r['tool'] == TOOL_NAME for r in resumed['rows']), resumed
                 gateway.release_settle.set()
@@ -92,14 +103,21 @@ def main():
                 gateway.release_terminal.set()
                 page.wait_for_function("() => !S.busy && !S.activeStreamId && !document.querySelector('#liveAssistantTurn')")
                 _wait_for_persisted_scene(url, sid)
+                if snapshot(page)['group']['closed']:
+                    page.locator('[data-turn-worklog-group="1"] .tool-worklog-summary, [data-turn-worklog-group="1"] .tool-call-group-summary').click()
                 settled = snapshot(page)
                 assert settled['final'] == [FINAL_TEXT], settled
+                assert len(prose(settled)) == 1 and prose(settled)[0]['id'] == interim_id and prose(settled)[0]['text'] == prose(before)[0]['text'], settled
+                assert all(FINAL_TEXT not in r['text'] for r in settled['rows']), settled
                 page.reload(wait_until='domcontentloaded')
                 page.wait_for_function("() => (document.querySelector('#msgInner') || {}).innerText.includes('Lifecycle gate final answer.')")
+                if snapshot(page)['group']['closed']:
+                    page.locator('[data-turn-worklog-group="1"] .tool-worklog-summary, [data-turn-worklog-group="1"] .tool-call-group-summary').click()
                 restored = snapshot(page)
                 assert restored['final'] == [FINAL_TEXT], restored
-                assert [(r['role'], r['id'], r['text']) for r in restored['rows']] == [
-                    (r['role'], r['id'], r['text']) for r in settled['rows']], (settled, restored)
+                assert len(prose(restored)) == 1 and prose(restored)[0]['id'] == interim_id and prose(restored)[0]['text'] == prose(before)[0]['text'], restored
+                assert all(FINAL_TEXT not in r['text'] for r in restored['rows']), restored
+                assert [r['role'] for r in restored['rows']] == [r['role'] for r in settled['rows']], (settled, restored)
                 assert not errors, errors
                 print('PASS journal-backed mid-run reload → settlement → reload')
                 context.close()
