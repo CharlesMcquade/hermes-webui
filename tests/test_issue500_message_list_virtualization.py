@@ -1322,7 +1322,7 @@ _scheduleMessageVirtualizedRender();
 raf();
 console.log(JSON.stringify({calls,pending:_messageVirtualScrollRaf}));
 """
-    assert json.loads(_run_node(source)) == dict(calls=[dict(revision=2,options=dict(preserveScroll=True,_windowOnly=True))],pending=0)
+    assert json.loads(_run_node(source)) == dict(calls=[dict(revision=2,options=dict(preserveScroll=True,_windowOnly=True,_internalMeasurement=False))],pending=0)
 
 
 def test_scroll_listener_guards_programmatic_scroll_before_marking_active():
@@ -1461,6 +1461,7 @@ function _currentMessageVirtualWindow(){
 }
 function _messageVirtualMeasurementCycleKeyFor(w){ return (w && w.key) || ''; }
 function _compensateScrollForMeasurementDelta(fn){ return fn(); }
+function _settleMessageWindowReader(){}
 // Simulated measure pass: after each render, the plan yields the next measured
 // window cycle key; undefined means the measurements settled (unchanged).
 let measurePlan = [];
