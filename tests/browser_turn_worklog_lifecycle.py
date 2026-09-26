@@ -182,6 +182,9 @@ def main(origin='turn_worklog', scenario='turn-worklog'):
                 errors = _capture_page_errors(page)
                 page.goto('/', wait_until='domcontentloaded')
                 page.wait_for_selector('#msg', state='visible')
+                # The composer can be visible before the async settings load
+                # assigns the mode. Choosing now lets boot overwrite the choice.
+                page.wait_for_function("() => typeof window._chatActivityDisplayMode === 'string'")
                 page.evaluate("mode => _pickChatActivityDisplayMode(mode)", origin)
                 page.wait_for_function("mode => window._chatActivityDisplayMode === mode", arg=origin)
                 if origin == 'turn_worklog' and scenario == 'turn-worklog':
