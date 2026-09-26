@@ -141,7 +141,7 @@ def test_embed_eventsource_shim_replaces_native():
     assert "window.EventSource=EmbedEventSource" in EMBED_JS
     assert "function EmbedEventSource(url,cfg)" in EMBED_JS
     # open/message/error/close semantics
-    fn = _extract_fn(EMBED_JS, "EmbedEventSource")
+    _extract_fn(EMBED_JS, "EmbedEventSource")
     assert "_markOpen" in EMBED_JS
     assert "_onServerEvent" in EMBED_JS
     assert "_onServerEnd" in EMBED_JS

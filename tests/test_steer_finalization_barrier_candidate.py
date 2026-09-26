@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from api import config, streaming
 from tests.test_real_steer import _captured_response, _make_handler
-from tests.test_steer_worker_boundaries import worker_scene
+from tests.test_steer_worker_boundaries import worker_scene as worker_scene  # noqa: F401
 
 
 def _steer():
