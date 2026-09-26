@@ -11,7 +11,8 @@ from api import run_journal
 
 
 @pytest.fixture
-def isolated_steer_state():
+def isolated_steer_state(monkeypatch):
+    from api import config
     from api.config import (
         AGENT_INSTANCES,
         SESSION_AGENT_CACHE,
@@ -28,6 +29,8 @@ def isolated_steer_state():
         STREAMS.clear()
         agents_snapshot = dict(AGENT_INSTANCES)
         AGENT_INSTANCES.clear()
+    monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {})
+    monkeypatch.setattr(config, "ACTIVE_RUNS", {})
     try:
         yield SESSION_AGENT_CACHE, STREAMS, AGENT_INSTANCES
     finally:
@@ -71,6 +74,9 @@ def test_accepted_steer_uses_one_journal_identity_for_live_broadcast(
     with STREAMS_LOCK:
         streams[stream_id] = stream
         agents[stream_id] = agent
+    from api import config
+    config.STREAM_SESSION_OWNERS[stream_id] = sid
+    config.ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": streaming.WEBUI_LOCAL_CHAT_BACKEND, "phase": "running"}
 
     session = MagicMock(active_stream_id=stream_id)
     journal_event = {
@@ -152,6 +158,9 @@ def test_rejected_steer_does_not_create_a_delivery_event(isolated_steer_state):
     with STREAMS_LOCK:
         streams[stream_id] = stream
         agents[stream_id] = agent
+    from api import config
+    config.STREAM_SESSION_OWNERS[stream_id] = sid
+    config.ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": streaming.WEBUI_LOCAL_CHAT_BACKEND, "phase": "running"}
 
     def reject(_writer, _event_name, _payload, accept, *, publish=None):
         assert accept() is False
@@ -195,6 +204,9 @@ def test_journal_failure_does_not_turn_runtime_acceptance_into_http_failure(
     with STREAMS_LOCK:
         streams[stream_id] = stream
         agents[stream_id] = agent
+    from api import config
+    config.STREAM_SESSION_OWNERS[stream_id] = sid
+    config.ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": streaming.WEBUI_LOCAL_CHAT_BACKEND, "phase": "running"}
 
     persistence_error = OSError("disk unavailable")
 
@@ -262,6 +274,9 @@ def test_publication_failure_keeps_durable_event_in_http_response(isolated_steer
     with STREAMS_LOCK:
         streams[stream_id] = stream
         agents[stream_id] = agent
+    from api import config
+    config.STREAM_SESSION_OWNERS[stream_id] = sid
+    config.ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": streaming.WEBUI_LOCAL_CHAT_BACKEND, "phase": "running"}
 
     journal_event = {
         "version": 1,
@@ -325,6 +340,9 @@ def test_terminal_journal_wins_race_without_late_delivery_event(
     with STREAMS_LOCK:
         streams[stream_id] = stream
         agents[stream_id] = agent
+    from api import config
+    config.STREAM_SESSION_OWNERS[stream_id] = sid
+    config.ACTIVE_RUNS[stream_id] = {"session_id": sid, "backend": streaming.WEBUI_LOCAL_CHAT_BACKEND, "phase": "running"}
 
     def test_writer(session_id, run_id):
         return run_journal.RunJournalWriter(

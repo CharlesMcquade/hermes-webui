@@ -76,7 +76,7 @@ def test_structured_steer_paths_must_be_real_session_uploads(tmp_path, monkeypat
 
 
 def test_accepted_steer_is_journaled_and_broadcast_with_one_event_identity(monkeypatch):
-    from api import streaming
+    from api import streaming, config
     from api.config import (
         AGENT_INSTANCES,
         SESSION_AGENT_CACHE,
@@ -103,6 +103,8 @@ def test_accepted_steer_is_journaled_and_broadcast_with_one_event_identity(monke
         old_agents = dict(AGENT_INSTANCES)
         AGENT_INSTANCES.clear()
         AGENT_INSTANCES[stream_id] = agent
+    monkeypatch.setattr(config, "STREAM_SESSION_OWNERS", {stream_id: sid})
+    monkeypatch.setattr(config, "ACTIVE_RUNS", {stream_id: {"session_id": sid, "backend": streaming.WEBUI_LOCAL_CHAT_BACKEND, "phase": "running"}})
 
     journal_event = {
         "event_id": f"{stream_id}:7",
