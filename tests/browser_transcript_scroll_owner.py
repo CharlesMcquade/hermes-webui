@@ -313,6 +313,11 @@ def position(page):
       const candidates=Array.from(document.querySelectorAll('#msgInner [data-msg-idx]'));
       const row=candidates.find(n=>n.getBoundingClientRect().height>10000);
       if(!row)return null;
+      // Direct positioning is fixture setup, not a reader gesture. Give the
+      // synthetic mid-history reader explicit ownership before layout observers
+      // or stale tail-follow state can undo the setup on narrow viewports.
+      _messageUserUnpinned=true;
+      _scrollPinned=false;
       c.scrollTop+=row.getBoundingClientRect().top-c.getBoundingClientRect().top+3500;
       return {id:S.messages[Number(row.dataset.msgIdx)]._test_id,height:row.getBoundingClientRect().height};
     }""")
@@ -427,6 +432,34 @@ def identity_case(page, transport, evidence):
     assert_frames(frames,-1)
     memberships={tuple(r['id'] for r in f['rows']) for f in frames}
     assert len(memberships)>1, 'identity gate did not cross a mounted window boundary'
+
+
+def stale_follow_takeover_case(page, transport, evidence):
+    """Trusted down-scroll away from the tail must override stale follow state."""
+    position(page)
+    before=snapshot(page)
+    assert before['max']-before['top']>before['height']*3, 'not inside history'
+    box=page.locator('#messages').bounding_box()
+    page.mouse.move(box['x']+box['width']*.55,box['y']+box['height']*.5)
+    # Sample and install the stale state together immediately before input;
+    # a separate positioning/snapshot round trip lets mobile tail-follow snap
+    # before any wheel event and tests a different situation.
+    page.evaluate("""() => {
+      const c=document.querySelector('#messages');
+      ownerStart();
+      _lastScrollTop=c.scrollTop;
+      _scrollPinned=true;
+      _messageUserUnpinned=false;
+    }""")
+    for _ in range(3):
+        page.mouse.wheel(0,600)
+        page.wait_for_timeout(35)
+    page.wait_for_timeout(120)
+    frames=page.evaluate('ownerStop()')
+    evidence.update(before=before,frames=frames)
+    assert_frames(frames,1)
+    assert frames[-1]['max']-frames[-1]['top']>frames[-1]['height']*2, 'reader jumped to the tail'
+    idle(page)
 
 
 def cold_case(page, transport, evidence):
@@ -658,6 +691,7 @@ def main():
                                     elif case in ('prepend','input','switch'):prepend_case(page,transport,evidence,case)
                                     elif case=='image':image_case(page,transport,evidence)
                                     elif case=='identity':identity_case(page,transport,evidence)
+                                    elif case=='stale-follow':stale_follow_takeover_case(page,transport,evidence)
                                     elif case=='cold':cold_case(page,transport,evidence)
                                     elif case=='stream':stream_case(page,transport,evidence)
                                     elif case=='natural':natural_case(page,transport,evidence)

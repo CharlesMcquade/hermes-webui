@@ -7491,6 +7491,17 @@ if(typeof window!=='undefined'){
       }
       const _prevScrollTopForLog=_lastScrollTop;
       _lastScrollTop=top;
+      // A real downward gesture well inside history takes ownership from a
+      // stale follow pin (for example after restoring a reader position). Do
+      // not snap that reader to the tail just because the viewport moved down.
+      // Catching the previous tail is still an explicit re-pin below.
+      if(movedDown&&!nearBottom&&!caughtPrevTail
+        &&typeof _recentMessageScrollIntent==='function'&&_recentMessageScrollIntent()){
+        _cancelBottomSettle();
+        _scrollPinned=false;
+        _messageUserUnpinned=true;
+        _nearBottomCount=0;
+      }
       if(movedUp&&bottomDistance>1){
         // Only a real scroll-away unpins. A true-bottom geometry clamp keeps
         // bottomDistance <= 1; even gentle reader input leaves that boundary.
