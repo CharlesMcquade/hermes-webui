@@ -718,7 +718,11 @@ def main():
                                 transport=Transport(temp)
                                 transport.streaming = case == 'stream'
                                 if case=='activity':
-                                    m=next(m for m in reversed(transport.data) if m.get('role')=='assistant' and m.get('tool_calls'))
+                                    # A non-final activity burst with visible prose
+                                    # folds into the Worklog; plain answer prose does not.
+                                    tool_steps=[m for m in transport.data if m.get('role')=='assistant' and m.get('tool_calls')]
+                                    m=tool_steps[-2]
+                                    m['_activityBurstId']=42
                                     m['content']='\n\n'.join(f'Activity landmark {n}: public synthetic research reasoning.' for n in range(350))
                                 if case=='disclosure':
                                     m=next(m for m in reversed(transport.data) if m.get('role')=='assistant')
