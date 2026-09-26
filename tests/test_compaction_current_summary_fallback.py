@@ -54,6 +54,8 @@ _REAL_FUNCTIONS = (
     # evaluated with it. The shim's createElement() returns no template `content`, so the
     # helper takes its insertAdjacentHTML fallback here, exactly as before.
     "_insertSegmentBlock",
+    "_reconcilePreservedLiveTurn",
+    "_initializeMessageWindowOwnership",
     "renderMessages",
 )
 
@@ -129,6 +131,11 @@ class FakeElement {
     this._pendingHtml = this._innerHTML ? this._innerHTML : null;
   }
   get innerHTML() { return this._innerHTML; }
+  get outerHTML() {
+    const attrs = Object.entries(this.attributes).map(([key, value]) =>
+      ` ${key}="${String(value).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"`).join('');
+    return `<${this.tagName.toLowerCase()}${attrs}>${this._innerHTML || this.children.map(child => child.outerHTML).join('')}</${this.tagName.toLowerCase()}>`;
+  }
   get firstElementChild() {
     if (this._pendingHtml !== null) {
       const html = this._pendingHtml;
@@ -482,7 +489,9 @@ def _scenario_script() -> str:
     evals = "\n".join(
         f"eval({json.dumps(_function_source(js, name))});" for name in _REAL_FUNCTIONS
     )
-    return textwrap.dedent(_DOM_SHIM) + "\n" + evals + "\n" + textwrap.dedent(_SCENARIO)
+    return (textwrap.dedent(_DOM_SHIM) + "\nlet _messageWindowRevision=0;\n"
+            + "function _rememberMessageWindowReader(){}\n" + evals + "\n"
+            + textwrap.dedent(_SCENARIO))
 
 
 def test_stale_markers_do_not_suppress_current_summary_and_task_owner_is_unique():
