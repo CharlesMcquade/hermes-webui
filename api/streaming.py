@@ -3180,11 +3180,18 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
                     existing_checkpoint[key] = copy.deepcopy(checkpoint[key])
             if checkpoint.get('attachments'):
                 existing_checkpoint['attachments'] = copy.deepcopy(checkpoint['attachments'])
-            stamp_message_source(
-                existing_checkpoint,
-                identity.get('source') or source or 'webui',
-                active_turn_token=identity.get('token'),
-            )
+        # Stamp the source on the retained result row even when the identity
+        # carried no checkpoint dict (deferred save mode): the Agent result row
+        # already carries durable provenance (_row_id/api_content) and only the
+        # token was stamped, so a delegation_wakeup/process_wakeup turn
+        # materialized here rendered as a visible user row (#quiet-delegation).
+        # stamp_message_source is a no-op for the default 'webui' source, so
+        # ordinary turns keep the "_source omitted" contract.
+        stamp_message_source(
+            existing_checkpoint,
+            identity.get('source') or source or 'webui',
+            active_turn_token=identity.get('token'),
+        )
         return result_messages
     previous_context = list(previous_context or [])
     if _messages_have_prefix(result_messages, previous_context):
