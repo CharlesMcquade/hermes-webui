@@ -7133,6 +7133,12 @@ async function switchToProfile(name) {
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
     if(typeof _invalidateVisionCapabilityFirst==='function') _invalidateVisionCapabilityFirst();
+    // #7503 review: a switch while the Settings panel is open disabled the
+    // vision checkbox and left it dead — nothing reloaded the new profile's
+    // value until Settings was closed and reopened. Reload it in place; the
+    // loader is profile/token-owned so a stale reply from the outgoing profile
+    // cannot paint the incoming one's control.
+    if(typeof _currentPanel==='string' && _currentPanel==='settings' && typeof _loadVisionCapabilityFirst==='function') _loadVisionCapabilityFirst();
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
