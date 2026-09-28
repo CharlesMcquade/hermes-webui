@@ -194,6 +194,14 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
             raw.pop('regeneration_revision', None)
     except Exception:
         raw.pop('regeneration_revision', None)
+    # Terminal SSE payloads are display surfaces. The embedded transcript can
+    # predate settlement's #7600 scrub (and the Agent's embedded steer copy can
+    # lose its display_kind typing), so unwrap consumed OOB steer wrappers here
+    # to match what persistence will settle to. Non-mutating; never raises.
+    try:
+        raw['messages'] = _scrub_oob_wrapped_user_rows_for_payload(raw['messages'])
+    except Exception:
+        logger.debug("OOB payload scrub failed; leaving messages unmodified", exc_info=True)
     return raw
 
 
@@ -6930,6 +6938,41 @@ def _strip_oob_markers_from_messages(messages):
     for message in messages or []:
         _unwrap_steer_row_oob_marker(message)
     return messages
+
+
+def _scrub_oob_wrapped_user_rows_for_payload(messages):
+    """Return SSE-payload messages with consumed OOB steer wrappers unwrapped.
+
+    The terminal ``done``/``apperror`` session payload embeds the live
+    conversation BEFORE settlement runs, and the Agent's embedded copy of a
+    mid-turn steer row can arrive without its ``display_kind: 'steer'`` typing
+    (e.g. the Codex backend replays the raw ``steer_user_row`` content). The
+    #7600 typed-row unwrap then skips it and the settled transcript renders the
+    raw ``[OUT-OF-BAND USER MESSAGE …]`` control wrapper to the user.
+
+    This scrubs any UNTYPED user row whose ENTIRE content is exactly one
+    complete, well-formed OOB frame — the same conservative shape
+    ``_unwrap_single_oob_frame`` already validates — so quoted/prose usages
+    survive byte-for-byte. Typed steer rows (``display_kind == 'steer'``) are
+    left for settlement's #7600 unwrap, which owns them in place. Rows are
+    copied, never mutated: the live session rows remain owned by settlement.
+    """
+    scrubbed = []
+    for message in messages or []:
+        if (
+            isinstance(message, dict)
+            and message.get('role') == 'user'
+            and message.get('display_kind') != 'steer'
+            and isinstance(message.get('content'), str)
+        ):
+            unwrapped = _unwrap_single_oob_frame(message['content'])
+            if unwrapped is not None:
+                row = dict(message)
+                row['content'] = unwrapped
+                scrubbed.append(row)
+                continue
+        scrubbed.append(message)
+    return scrubbed
 
 
 def _content_has_reasoning_only_parts(content) -> bool:
