@@ -239,8 +239,38 @@ was suppressed; the import-time conftest ephemeral loopback port reservation was
 allowed and immediately closed. An initial runner-only failure overblocked that
 reservation; only the parent guard changed before rerunning. Actual-main tests
 still use fake HTTP and stub startup dependencies. Whole-file Ruff retained
-**24 baseline / 24 final findings, with no additions**. Focused source re-review,
-controller publishing, full startup and live same-session restart remain open.
+**24 baseline / 24 final findings, with no additions**. The final combined gate
+on committed repair `fb41e6625dddf9d023724f21dccd25d3720032b5` passed **157 tests,
+5 deliberately deselected** on Python 3.11.16. Controller publishing, full startup
+and live same-session restart remain open.
+
+## Focused repair review closure
+
+Both source-only reviewers in `deleg_419f8eb7` found no concrete supported-scope
+blocker. The parent independently inspected the cited cleanup, cancellation
+registration/retirement, earliest goal admission, owner claim/close and actual-main
+teardown paths. The executable and test bytes match the frozen reviewed snapshot,
+prior parent test receipt and committed repair `fb41e6625dddf9d023724f21dccd25d3720032b5`.
+The frozen documentation predates only the parent verification section above; its
+supported contract is unchanged. Together with the retained five old failures and
+157-test repaired gate, this closes the three original findings **offline**, within
+the single-owner, settled-session, explicit-local legacy scope.
+
+Cleanup-before-Stop-registration is supported by the shared-lock source
+interleaving, not a dedicated new barrier test. Neighboring successor tests cover
+canonical/stale-object preservation, not a fully concurrent successor launch.
+Actual-main tests invoke captured signal callbacks with fake HTTP and stubbed
+startup; they do not prove native signal delivery or pre-`serve_forever()` behavior
+of the real HTTP server. If startup raises before serving after a shutdown helper
+has started, that daemon helper can remain blocked in `httpd.shutdown()`. The main
+finalizer still closes/joins the consumer before teardown, so this observation
+does not reopen the consumer-admission race; helper termination remains a separate
+full-startup verification limit. Cooperative Store/session completion is required.
+
+A previously claimed worker may enter after consumer join and HTTP teardown. Join
+settles claim/launch, not worker entry or model completion. Missing entry evidence
+never licenses replay. This documentation-only closeout adds no test execution or
+live restart/deployment evidence and does not satisfy cutover readiness.
 
 ## Earlier independent verification checkpoint
 
