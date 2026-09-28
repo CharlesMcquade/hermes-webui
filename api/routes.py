@@ -24181,11 +24181,16 @@ def _prepare_chat_start_session_for_stream(
 
 
 def _cleanup_chat_start_launch_failure(session, stream_id: str) -> None:
-    """Release state registered before a worker thread successfully starts."""
+    """Release a launch that cannot enter the worker, including receipt failure."""
+    from api.streaming import _retire_worker_cancelled_state_locked
+
     clear_session_writeback_owner_if_owned(session.session_id, stream_id)
     unregister_stream_owner(stream_id)
     with STREAMS_LOCK:
         STREAMS.pop(stream_id, None)
+        # Stop treats a published stream as a worker participant. Detach and
+        # retire on the same edge so Stop cannot register a phantom afterward.
+        _retire_worker_cancelled_state_locked(stream_id)
     STREAM_GOAL_RELATED.pop(stream_id, None)
     # The session-field reset needs the same concurrency discipline as the
     # registry half: hold the per-session lock and re-resolve the canonical
@@ -25002,11 +25007,11 @@ def _start_run(
     )
 
 
-def consume_post_restart_continuation(deployment):
+def consume_post_restart_continuation(deployment, owner=None):
     """Private owning-process entrypoint; never exposed as an HTTP route."""
     import sys
     from api.post_restart_continuation import consume
-    return consume(sys.modules[__name__], deployment)
+    return consume(sys.modules[__name__], deployment, owner=owner)
 
 
 def _process_wakeup_revalidation_provider(model, provider) -> str:
@@ -25462,6 +25467,7 @@ def _handle_session_compression_recovery_start(handler, body):
     )
 
 
+@_serialized_start("goal")
 def _handle_goal_command(handler, body):
     """Handle WebUI /goal command controls and optional kickoff stream."""
     try:

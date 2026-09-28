@@ -425,7 +425,7 @@ def _shutdown_log_value(value, *, default: str = "unknown", max_len: int = 160) 
     return text
 
 
-def _start_post_restart_continuation_consumer(stop=None):
+def _start_post_restart_continuation_consumer(stop=None, owner=None):
     from api.post_restart_continuation import release_binding, start_consumer
     from api.routes import consume_post_restart_continuation
     import os
@@ -435,7 +435,10 @@ def _start_post_restart_continuation_consumer(stop=None):
         deployment = release_binding()
     except (OSError, ValueError):
         return None  # Unsupported release must not block HTTP health/startup.
-    return start_consumer(lambda: consume_post_restart_continuation(deployment), stop)
+    return start_consumer(
+        lambda: consume_post_restart_continuation(deployment, owner=owner),
+        owner.stop if owner is not None else stop,
+    )
 
 
 def _log_shutdown_audit(reason: str = "serve_forever_exit") -> None:
@@ -598,10 +601,6 @@ def main() -> None:
     except Exception as e:
         print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
 
-    # Private continuation consumer waits asynchronously for controller terminal
-    # proof, which is published after HTTP health; never gate serve_forever.
-    _start_post_restart_continuation_consumer()
-
     try:
         from api.background_process import start_drain_thread
         if start_drain_thread():
@@ -657,14 +656,29 @@ def main() -> None:
     # called from the thread running serve_forever() (it would deadlock), so we
     # dispatch it from a short-lived helper thread. The handler is idempotent
     # and guards against double-shutdown (e.g. repeated SIGTERM/SIGINT).
-    _shutdown_requested = threading.Event()
+    from api.post_restart_continuation import ConsumerOwner
+    continuation_owner = ConsumerOwner()
+    continuation_thread = None
+    _shutdown_requested = False
+
+    def _stop_continuation():
+        continuation_owner.close()
+        if continuation_thread is not None:
+            continuation_thread.join()
+
+    def _shutdown_owned_server():
+        _stop_continuation()
+        httpd.shutdown()
 
     def _request_shutdown(signum, _frame):
-        if _shutdown_requested.is_set():
+        nonlocal _shutdown_requested
+        if _shutdown_requested:
             return
-        _shutdown_requested.set()
+        # No ownership locks or joins in a signal handler: it can interrupt
+        # the main thread while it owns a resource the consumer needs.
+        _shutdown_requested = True
         threading.Thread(
-            target=httpd.shutdown,
+            target=_shutdown_owned_server,
             name="webui-sigterm-shutdown",
             daemon=True,
         ).start()
@@ -676,8 +690,12 @@ def main() -> None:
         logger.debug("Could not install shutdown signal handlers", exc_info=True)
 
     try:
+        # Start only inside the owning teardown scope, after HTTP construction
+        # and handler installation. Proof may arrive after health is served.
+        continuation_thread = _start_post_restart_continuation_consumer(owner=continuation_owner)
         httpd.serve_forever()
     finally:
+        _stop_continuation()
         httpd.server_close()
         _log_shutdown_audit()
         try:

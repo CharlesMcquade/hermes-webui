@@ -465,3 +465,367 @@ def test_postclaim_crash_never_replays(armed, monkeypatch):
     assert a.consume()["status"] == "already_claimed"
     assert not a.calls
     assert not a.session.pending_user_message
+
+
+@pytest.mark.parametrize("worker_first", [False, True])
+def test_receipt_failure_after_real_stop_retires_both_participants(armed, monkeypatch, worker_first):
+    from api import streaming, config
+    a = armed
+    receipt_waiting, fail_receipt, cleaned = (threading.Event() for _ in range(3))
+    cancel_waiting, finish_cancel = threading.Event(), threading.Event()
+    write = a.resume.Store.write
+    cleanup = a.routes._cleanup_chat_start_launch_failure
+    lock = streaming._get_session_agent_lock
+
+    def blocked_write(store, name, value):
+        if name.endswith(".entered.json"):
+            receipt_waiting.set()
+            assert fail_receipt.wait(5)
+            raise OSError("deterministic entry failure after Stop admission")
+        return write(store, name, value)
+
+    def observed_cleanup(*args):
+        try:
+            return cleanup(*args)
+        finally:
+            cleaned.set()
+
+    def cancel_lock(sid):
+        if threading.current_thread().name == "test-stop":
+            cancel_waiting.set()
+            assert finish_cancel.wait(5)
+        return lock(sid)
+
+    monkeypatch.setattr(a.resume.Store, "write", blocked_write)
+    monkeypatch.setattr(a.routes, "_cleanup_chat_start_launch_failure", observed_cleanup)
+    monkeypatch.setattr(streaming, "_get_session_agent_lock", cancel_lock)
+    monkeypatch.setattr(streaming, "get_session", lambda sid: a.session)
+    result = a.consume()
+    sid = result["result"]["stream_id"]
+    assert receipt_waiting.wait(3)
+    outcomes = []
+    stop = threading.Thread(target=lambda: outcomes.append(streaming.cancel_stream(sid)), name="test-stop")
+    stop.start()
+    try:
+        assert cancel_waiting.wait(3)
+        assert streaming._STREAM_SETTLEMENT_PARTICIPANTS[sid] == {"cancel", "worker"}
+        if worker_first:
+            fail_receipt.set()
+            assert cleaned.wait(3)
+            # The real worker retirement occurs on receipt failure, not in this test.
+        finish_cancel.set()
+        stop.join(3)
+        assert not stop.is_alive()
+        fail_receipt.set()
+        assert cleaned.wait(3)
+        assert outcomes[0]["cancelled"]
+        assert not a.calls
+        assert sid not in streaming._STREAM_SETTLEMENT_PARTICIPANTS
+        assert sid not in streaming._STREAM_SETTLEMENT_TERMINAL
+        assert sid not in streaming._STREAM_SETTLEMENT_COMPLETED
+        assert sid not in streaming._STREAM_CANCEL_CLAIMED
+        assert sid not in config.STREAMS
+        assert streaming.stream_owner_session_id(sid) is None
+        assert a.session.session_id not in config.SESSION_WRITEBACK_OWNERS
+        assert not a.session.pending_user_message
+        assert not a.session.active_stream_id
+        assert a.consume()["status"] == "already_claimed"
+    finally:
+        fail_receipt.set()
+        finish_cancel.set()
+        stop.join(3)
+
+
+@pytest.mark.parametrize("goal_first", [False, True])
+def test_goal_and_continuation_share_earliest_admission(armed, monkeypatch, goal_first):
+    from api import goals, profiles, compression_continuation
+    a = armed
+    mutations, launched = [], []
+    waiting, release, blocked = threading.Event(), threading.Event(), threading.Event()
+
+    class ObservedLock:
+        def __init__(self):
+            self.lock = threading.RLock()
+        def __enter__(self):
+            if not self.lock.acquire(blocking=False):
+                blocked.set()
+                self.lock.acquire()
+            return self
+        def __exit__(self, *exc):
+            self.lock.release()
+
+    monkeypatch.setitem(a.resume._LOCKS, a.session.session_id, ObservedLock())
+    monkeypatch.setattr(a.routes, "j", lambda h, value, status=200: dict(value, _status=status))
+    monkeypatch.setattr(a.routes, "_session_is_subagent_view_only", lambda sid: False)
+    monkeypatch.setattr(a.routes, "_session_visible_to_active_profile", lambda *args: True)
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda p: a.private)
+    monkeypatch.setattr(compression_continuation, "durable_compression_continuation", lambda s: (False, None))
+    monkeypatch.setattr(a.routes, "resolve_trusted_workspace", lambda *args, **kw: a.session.workspace)
+    monkeypatch.setattr(a.routes, "_read_profile_model_config", lambda *args: (None, None, {}))
+    monkeypatch.setattr(a.routes, "_resolve_compatible_session_model_state", lambda *args, **kw: ("goal-model", "goal-provider", False))
+    monkeypatch.setattr(a.routes, "webui_gateway_chat_enabled", lambda c: False)
+    monkeypatch.setattr(a.routes, "get_config", lambda: {})
+    monkeypatch.setattr(goals, "goal_state_snapshot", lambda *args, **kw: {})
+
+    def update(*args, **kw):
+        mutations.append("goal")
+        waiting.set()
+        assert release.wait(5)
+        return {"ok": True, "kickoff_prompt": "Goal kickoff"}
+
+    monkeypatch.setattr(goals, "goal_command_payload", update)
+    original_worker = a.routes._run_agent_streaming
+    def worker(*args, **kw):
+        if args[1] == "Goal kickoff":
+            launched.append(args)
+            a.entered.set()
+        else:
+            original_worker(*args, **kw)
+    monkeypatch.setattr(a.routes, "_run_agent_streaming", worker)
+    body = {"session_id": a.session.session_id, "args": "A new goal", "model": "goal-model", "model_provider": "goal-provider", "profile": "other", "explicit_model_pick": True}
+    results = {}
+    def goal():
+        results["goal"] = a.routes._handle_goal_command(object(), body)
+    if not goal_first:
+        release.set()
+        assert a.consume()["status"] == "claimed"
+        assert a.entered.wait(3)
+        before = dict(vars(a.session))
+        goal()
+        assert results["goal"]["_status"] == 409
+        assert not mutations, "losing goal mutated durable goal before busy admission"
+        assert vars(a.session) == before
+        assert len(a.calls) == 1 and not launched
+    else:
+        first = threading.Thread(target=goal)
+        second = threading.Thread(target=lambda: results.update(continuation=a.consume()))
+        first.start()
+        assert waiting.wait(3)
+        before = dict(vars(a.session))
+        second.start()
+        try:
+            assert blocked.wait(3), "goal did not hold shared admission before goal mutation"
+            assert not list(a.private.glob("*.claim.json"))
+        finally:
+            release.set()
+            first.join(3)
+            second.join(3)
+        assert not first.is_alive() and not second.is_alive()
+        assert a.entered.wait(3)
+        assert results["goal"]["_status"] == 200
+        assert results["continuation"]["status"] == "busy"
+        assert len(launched) == 1 and not a.calls
+        assert a.session.profile == before["profile"] == "other"
+        assert a.session.model == "goal-model"
+        assert a.session.pending_user_message == "Goal kickoff"
+        assert not list(a.private.glob("*.claim.json"))
+
+
+@pytest.fixture
+def offline_server(armed, monkeypatch):
+    """Import actual server/main; replace every startup side effect, not main."""
+    import builtins
+    import sys
+    from types import ModuleType
+    from api import config, models, auth, test_network_guard
+    monkeypatch.setattr(test_network_guard, "install_test_network_block", lambda: None)
+    import server
+    for name in ("_ignore_sigpipe", "install_crash_visibility", "fix_credential_permissions", "_log_shutdown_audit"):
+        monkeypatch.setattr(server, name, lambda: None)
+    monkeypatch.setattr(server, "_raise_fd_soft_limit", lambda: {})
+    monkeypatch.setattr(server, "_abort_if_already_serving", lambda *a: None)
+    monkeypatch.setattr(server, "auto_install_agent_deps", lambda: pytest.fail("unexpected install"))
+    monkeypatch.setattr(server, "HOST", "127.0.0.1")
+    monkeypatch.setattr(config, "print_startup_config", lambda: None)
+    monkeypatch.setattr(config, "verify_hermes_imports", lambda: (True, [], {}))
+    monkeypatch.setattr(config, "TLS_ENABLED", False)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: armed.dbpath)
+    monkeypatch.setattr(auth, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth, "get_oidc_startup_warning", lambda: None)
+    for module, names in {
+        "api.session_recovery": ["recover_all_sessions_on_startup"],
+        "api.gateway_watcher": ["start_watcher", "stop_watcher"],
+        "api.background_process": ["start_drain_thread", "stop_drain_thread", "start_session_channel_reaper", "stop_session_channel_reaper"],
+        "api.plugins": ["load_plugins"],
+        "api.gateway_chat": ["resume_gateway_runs_after_restart"],
+        "api.session_lifecycle": ["drain_all_on_shutdown"],
+    }.items():
+        stub = ModuleType(module)
+        if module == "api.gateway_chat":
+            stub.__dict__["WEBUI_LOCAL_CHAT_BACKEND"] = "legacy"
+        for name in names:
+            setattr(stub, name, lambda *a, **kw: {})
+        monkeypatch.setitem(sys.modules, module, stub)
+    for name in ("STATE_DIR", "SESSION_DIR", "DEFAULT_WORKSPACE"):
+        monkeypatch.setattr(server, name, armed.private / name)
+    original_open = builtins.open
+    def safe_open(path, *a, **kw):
+        if path == "/.within_container":
+            raise FileNotFoundError(path)
+        return original_open(path, *a, **kw)
+    monkeypatch.setattr(builtins, "open", safe_open)
+    handlers = {}
+    monkeypatch.setattr(server.signal, "signal", lambda sig, handler: handlers.setdefault(sig, handler))
+    return server, handlers
+
+
+def test_actual_main_shutdown_joins_waiting_consumer_before_teardown(armed, offline_server, monkeypatch):
+    a = armed
+    server, handlers = offline_server
+    (a.private / "terminal.json").unlink()
+    waiting = threading.Event()
+    consume = a.routes.consume_post_restart_continuation
+    threads = []
+    start = server._start_post_restart_continuation_consumer
+    def observed_consume(*args, **kwargs):
+        result = consume(*args, **kwargs)
+        if result["status"] == "waiting":
+            waiting.set()
+        return result
+    def observed_start(*args, **kwargs):
+        thread = start(*args, **kwargs)
+        threads.append(thread)
+        return thread
+    monkeypatch.setattr(a.routes, "consume_post_restart_continuation", observed_consume)
+    monkeypatch.setattr(server, "_start_post_restart_continuation_consumer", observed_start)
+    shutdown = threading.Event()
+    closed = []
+    class HTTP:
+        def __init__(self, *args):
+            pass
+        def serve_forever(self):
+            assert waiting.wait(3)
+            handlers[server.signal.SIGTERM](server.signal.SIGTERM, None)
+            assert shutdown.wait(3)
+        def shutdown(self):
+            shutdown.set()
+        def server_close(self):
+            closed.append(not threads[0].is_alive())
+    monkeypatch.setattr(server, "QuietHTTPServer", HTTP)
+    try:
+        server.main()
+        assert closed == [True], "server teardown preceded consumer stop/join"
+        a.publish()
+        assert not threads[0].is_alive()
+        assert not list(a.private.glob("*.claim.json"))
+        assert not a.calls
+    finally:
+        # Baseline daemon has no owner stop handle: supply proof to let it exit,
+        # then join before fixture disposal. This is cleanup, never the assertion.
+        a.publish()
+        for thread in threads:
+            thread.join(3)
+
+
+@pytest.mark.parametrize("claim_first", [False, True])
+def test_actual_main_shutdown_fences_validated_claim(armed, offline_server, monkeypatch, claim_first):
+    a = armed
+    server, handlers = offline_server
+    reached, release = threading.Event(), threading.Event()
+    closing, closed, shutdown = (threading.Event() for _ in range(3))
+    close_blocked = threading.Event()
+    owner_class = a.resume.ConsumerOwner
+    class ObservedLock:
+        def __init__(self):
+            self.lock = threading.Lock()
+        def __enter__(self):
+            if not self.lock.acquire(blocking=False):
+                close_blocked.set()
+                self.lock.acquire()
+        def __exit__(self, *exc):
+            self.lock.release()
+    class ObservedOwner(owner_class):
+        def __init__(self):
+            super().__init__()
+            self._lock = ObservedLock()
+        def close(self):
+            closing.set()
+            super().close()
+            closed.set()
+    monkeypatch.setattr(a.resume, "ConsumerOwner", ObservedOwner)
+    write = a.resume.Store.write
+    def paused_write(store, name, value):
+        if claim_first and name.endswith(".claim.json"):
+            reached.set()
+            assert release.wait(5)
+        return write(store, name, value)
+    monkeypatch.setattr(a.resume.Store, "write", paused_write)
+    def validated(**kw):
+        if not claim_first and not reached.is_set():
+            reached.set()
+            assert release.wait(5)
+        return None
+    monkeypatch.setattr(a.routes, "_agent_runtime_barrier_response", validated)
+    threads = []
+    start = server._start_post_restart_continuation_consumer
+    def observed_start(*args, **kwargs):
+        thread = start(*args, **kwargs)
+        threads.append(thread)
+        return thread
+    monkeypatch.setattr(server, "_start_post_restart_continuation_consumer", observed_start)
+    before = dict(vars(a.session))
+    class HTTP:
+        def __init__(self, *args):
+            pass
+        def serve_forever(self):
+            assert reached.wait(3)
+            try:
+                # Main thread must return from the signal callback before it
+                # can release the resource needed by the paused consumer.
+                handlers[server.signal.SIGTERM](server.signal.SIGTERM, None)
+                assert closing.wait(3)
+                if claim_first:
+                    assert close_blocked.wait(3), "shutdown did not share irrevocable claim edge"
+                    assert not closed.is_set(), "shutdown crossed an admitted claim transaction"
+                else:
+                    assert closed.wait(3), "validated request must not hold the claim edge yet"
+                assert not shutdown.is_set(), "HTTP shutdown did not join consumer"
+            finally:
+                release.set()
+            assert shutdown.wait(3)
+        def shutdown(self):
+            assert not threads[0].is_alive()
+            shutdown.set()
+        def server_close(self):
+            assert not threads[0].is_alive()
+    monkeypatch.setattr(server, "QuietHTTPServer", HTTP)
+    try:
+        server.main()
+    finally:
+        release.set()
+        for thread in threads:
+            thread.join(3)
+    if claim_first:
+        assert a.entered.wait(3)
+        assert len(a.calls) == 1
+        assert a.consume()["status"] == "already_claimed"
+    else:
+        assert vars(a.session) == before
+        assert not list(a.private.glob("*.claim.json"))
+        assert not a.calls
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("action", ["", "status", "pause", "resume", "clear", "stop", "done"])
+def test_goal_controls_preserve_active_run_semantics(armed, monkeypatch, enabled, action):
+    from api import goals, profiles
+    a = armed
+    monkeypatch.setattr(a.routes, "_session_is_subagent_view_only", lambda sid: False)
+    monkeypatch.setattr(a.routes, "_session_visible_to_active_profile", lambda *a: True)
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda p: a.private)
+    monkeypatch.setattr(a.routes, "j", lambda h, value, status=200: dict(value, _status=status))
+    assert a.consume()["status"] == "claimed"
+    assert a.entered.wait(3)
+    if not enabled:
+        monkeypatch.delenv("HERMES_WEBUI_CONTINUATION_DIR")
+    seen = []
+    def control(sid, text, **kw):
+        seen.append((sid, text, kw["stream_running"]))
+        return {"ok": True, "control": text}
+    monkeypatch.setattr(goals, "goal_command_payload", control)
+    before = dict(vars(a.session))
+    result = a.routes._handle_goal_command(object(), {"session_id": a.session.session_id, "args": action})
+    assert result["_status"] == 200
+    assert seen == [(a.session.session_id, action, True)]
+    assert vars(a.session) == before
+    assert len(a.calls) == 1
