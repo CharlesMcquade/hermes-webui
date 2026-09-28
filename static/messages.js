@@ -6963,8 +6963,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
       }
+      // Capture load ownership at cancel-event arrival, before any await: the
+      // settlement below must only commit while the pane still shows THIS
+      // session AND no newer load generation has begun (A→B switch must never
+      // be overwritten by a stale cancellation settlement — gate review
+      // e43234ad, final round).
+      const _cancelLoadGeneration=_loadSessionGeneration;
       const _applyCancelSessionPayload=(sessionPayload)=>{
-        if(!sessionPayload||typeof sessionPayload!=='object'||!S.session||S.session.session_id!==activeSid) return false;
+        if(!sessionPayload||typeof sessionPayload!=='object') return false;
+        // Generation + pane fence FIRST, before any state mutation: a session
+        // switch (A→B) that began while this stream was live must never have
+        // its successor transcript clobbered by this settlement — embedded
+        // snapshot or fallback GET alike. The embedded path previously checked
+        // only session_id, so a cancel fallback GET resolving during an A→B
+        // switch could commit stale A over freshly installed B.
+        if(_loadSessionGeneration!==_cancelLoadGeneration) return false;
+        if(!S.session||S.session.session_id!==activeSid) return false;
         // Belt-and-suspenders: the embedded cancel snapshot must be for THIS session.
         // The GET path guarantees it via the URL; the embedded path via the stream→session
         // binding — but reject a mismatched id so a stray payload can't overwrite the view.
@@ -6983,9 +6997,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(typeof _preserveLoadedMessageWindow==='function'){
           sessionPayload=_preserveLoadedMessageWindow(sessionPayload,_captureLoadedMessageWindow(activeSid));
         }
-        S.session=sessionPayload;
+        // Canonical install (same fence every destructive-rewrite path uses):
+        // retires the stale artifact projection and rebuilds it only from a
+        // provably complete snapshot, so Artifacts can never claim authority
+        // over pre-boundary rows a bounded settlement did not deliver.
+        if(typeof _installCanonicalSession==='function'){
+          if(!_installCanonicalSession(sessionPayload)) return false;
+        }else{
+          S.session=sessionPayload;
+          if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(sessionPayload);
+        }
         const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
-        if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(sessionPayload);
         // A bounded cancel-recovery reload returns a tail window: keep the
         // Load-earlier paging gate honest, and refresh _oldestIdx BEFORE
         // persisting the projected scene (#7310/#7625/#7628).
@@ -6998,6 +7020,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _markSessionViewed(activeSid, sessionPayload.message_count ?? S.messages.length);
         renderMessages({preserveScroll:true});
         if(_wasFollowingAtCancel && typeof scrollToBottom==='function') scrollToBottom();
+        // Bounded sources (embedded partial snapshot, msg_limit=30 fallback GET)
+        // install without a projection: hydrate the complete one fail-closed so
+        // pre-boundary mutations still appear in Artifacts (gate review
+        // e43234ad, final round). Complete snapshots already own one.
+        if(!S.session._artifactProjection&&typeof _hydrateSessionArtifactProjection==='function'){
+          const _hydrGen=_cancelLoadGeneration;
+          _hydrateSessionArtifactProjection(S.session,()=>_loadSessionGeneration===_hydrGen)
+            .then(projection=>{
+              if(_loadSessionGeneration!==_hydrGen||!S.session||
+                 S.session.session_id!==activeSid||!projection) return;
+              S.session._artifactProjection=projection;
+              if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+            })
+            .catch(()=>{}); // Artifact enrichment must not break cancel settlement.
+        }
         return true;
       };
       // Prefer the canonical session snapshot embedded in the terminal cancel event.

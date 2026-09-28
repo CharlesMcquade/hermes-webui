@@ -368,3 +368,305 @@ def test_deferred_destructive_response_cannot_restore_session_a_into_b(operation
     assert out["content"] == "B"
     assert out["sends"] == 0
     assert out["inFlight"] is False
+
+
+# ── Gate review e43234ad (final round): cancellation settlement ──────────────
+# The terminal cancel handler's _applyCancelSessionPayload must go through the
+# same generation-fenced canonical install as every destructive-rewrite path.
+# The cancel listener lives inside attachLiveStream, so the tests drive the
+# listener by attaching a synthetic SSE source and firing 'cancel'.
+
+_MESSAGES_SOURCE = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+
+
+def _extract_cancel_listener() -> str:
+    """Extract the terminal 'cancel' listener CALLBACK body from attachLiveStream.
+
+    Returns the body inside ``source.addEventListener('cancel',e=>{ ... })`` so
+    the harness can re-home it on a fake source under a callable name.
+    """
+    marker = "source.addEventListener('cancel',e=>{"
+    start = _MESSAGES_SOURCE.index(marker)
+    body_start = start + len(marker)
+    depth = 1
+    for end in range(body_start, len(_MESSAGES_SOURCE)):
+        ch = _MESSAGES_SOURCE[end]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return _MESSAGES_SOURCE[body_start:end]
+    pytest.fail("Could not extract cancel listener body")
+
+
+def _attach_stream_harness(extra=""):
+    """Node harness exposing the terminal cancel listener via a fake EventSource."""
+    cancel_listener = _extract_cancel_listener()
+    return "\n".join(
+        [
+            _HARNESS,
+            "let _loadSessionGeneration = 1;",
+            "let _messageUserUnpinned = false;",
+            "const _isMessagePaneNearBottom = () => true;",
+            "const _isMessageReaderUnpinned = () => false;",
+            "const scrollToBottom = () => {};",
+            "const removeThinking = () => {};",
+            "const assistantDisplayName = () => 'Hermes';",
+            "const _markSessionViewed = () => {};",
+            "const _attachProjectedAnchorSceneToLastAssistant = () => {};",
+            "const _carryForwardEphemeralTurnFields = (p, n) => n;",
+            "const _hydrateTodosFromSession = () => {};",
+            "const _dispatchExtensionTurnLifecycle = () => {};",
+            "const renderSessionList = () => {};",
+            "const _setActivePaneIdleIfOwner = () => {};",
+            "const _scheduleAnchorRegistryCleanup = () => {};",
+            "const _clearStreamEndRecovery = () => {};",
+            "const _cancelThrottledSnapshotTimer = () => {};",
+            "const _clearAnchorProseIncrementalNode = () => {};",
+            "const _cancelAnimationFramePendingStreamRender = () => {};",
+            "const _streamFadeCleanupReduceMotionListener = () => {};",
+            "const _smdEndParser = () => {};",
+            "const finalizeThinkingCard = () => {};",
+            "const _clearStreamHidden = () => {};",
+            "const _clearStreamNotificationBackground = () => {};",
+            "const _deferStreamErrorIfPageHidden = () => false;",
+            "const _flushReasoningToAnchor = () => {};",
+            "const _applyToAnchor = () => {};",
+            "const _closeSource = () => {};",
+            "const _bailOutOfTerminalEventsFromStaleStream = () => false;",
+            "const _clearOwnerInflightState = () => {};",
+            "const _clearApprovalForOwner = () => {};",
+            "const _clearClarifyForOwner = () => {};",
+            "let assistantText = '';",
+            "let _persistTimer = null;",
+            "let _streamFinalized = false;",
+            "let _terminalStateReached = false;",
+            # install + projection helpers (same production sources)
+            _NORMALIZE,
+            *_projection_helpers(),
+            _MUTATION_TOOLS,
+            "const _adoptRegenerationRevision = " +
+            _extract_from([_SESSIONS_SOURCE], "_adoptRegenerationRevision") + ";",
+            "const _installCanonicalSession = " +
+            _extract_from([_SESSIONS_SOURCE], "_installCanonicalSession") + ";",
+            "const _captureLoadedMessageWindow = " +
+            _extract_from([_SESSIONS_SOURCE], "_captureLoadedMessageWindow") + ";",
+            "const _loadedMessageBoundarySignature = " +
+            _extract_from([_SESSIONS_SOURCE], "_loadedMessageBoundarySignature") + ";",
+            "const _preserveLoadedMessageWindow = " +
+            _extract_from([_SESSIONS_SOURCE], "_preserveLoadedMessageWindow") + ";",
+            "const attachLiveStream = (activeSid, streamId, uploaded, options) => { source.addEventListener('cancel', e => { "
+            + cancel_listener
+            + " }); };",
+            extra,
+            # Fake EventSource: record listeners; fire() dispatches synchronously.
+            """
+            const listeners = {};
+            class FakeSource {
+              constructor() { this.readyState = 1; }
+              addEventListener(name, fn) { (listeners[name] = listeners[name] || []).push(fn); }
+              fire(name, data) { for (const fn of (listeners[name] || [])) fn({ data }); }
+              close() { this.readyState = 2; }
+            }
+            const source = new FakeSource();
+            attachLiveStream('sess-a', 'run-1', []);
+            """,
+        ]
+    )
+
+
+def test_cancel_fallback_get_resolving_during_session_switch_is_ignored():
+    """A cancel fallback GET resolving while an A→B switch is IN FLIGHT must
+    not commit stale A over the switch (gate review e43234ad final round).
+
+    Race shape: session A's stream fires 'cancel'; no embedded snapshot, so
+    the bounded fallback GET starts. While it is pending the user switches to
+    B: loadSession(B) bumps _loadSessionGeneration synchronously and clears
+    _loadingSessionId=null→'sess-b', but B's own fetch has not resolved — the
+    pane still shows A. The old session_id check passes in exactly that
+    window (S.session is still A) and would render stale A; the generation
+    fence must reject the settlement instead.
+    """
+    cancel_listener = _extract_cancel_listener()
+    out = _run_node(
+        "\n".join(
+            [
+                _attach_stream_harness(),
+                """
+(async()=>{
+  let releaseA;
+  const gateA = new Promise(r => { releaseA = r; });
+  routes['/api/session?session_id=sess-a&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1'] =
+    () => gateA.then(() => ({ session: { session_id: 'sess-a', profile: 'default',
+      regeneration_revision: 9, _messages_truncated: false, _messages_offset: 0,
+      messages: [{ role: 'user', content: 'stale A tail' }] } }));
+  routes['/api/session?session_id=sess-b&messages=1&resolve_model=0'] =
+    () => ({ session: { session_id: 'sess-b', profile: 'default',
+      regeneration_revision: 4, _messages_truncated: false, _messages_offset: 0,
+      messages: [{ role: 'user', content: 'B transcript' }] } });
+
+  S.session = { session_id: 'sess-a', profile: 'default', messages: [{ role: 'user', content: 'A live' }] };
+  S.messages = S.session.messages;
+  S.activeStreamId = 'run-1';
+
+  // Cancel A: no embedded snapshot → fallback GET starts and parks on gateA.
+  source.fire('cancel', JSON.stringify({ status: 'cancelled' }));
+  // While it is pending: the user switches to B. loadSession(B) has started
+  // (generation bumped, pane target moved) but B has NOT installed yet — the
+  // pane still shows A. This is the exact window the session_id check misses.
+  const generationAtCancel = _loadSessionGeneration;
+  _loadSessionGeneration += 1;
+
+  // Stale A settlement resolves while B is still loading.
+  releaseA();
+  await new Promise(r => setTimeout(r, 0));
+  const staleCommitted = S.messages.length === 1 && S.messages[0].content === 'stale A tail';
+
+  // B's load resolves and installs.
+  const b = { session_id: 'sess-b', profile: 'default', regeneration_revision: 4,
+    _messages_truncated: false, _messages_offset: 0,
+    messages: [{ role: 'user', content: 'B transcript' }] };
+  S.session = b; S.messages = b.messages;
+
+  console.log(JSON.stringify({
+    generationAdvanced: _loadSessionGeneration === generationAtCancel + 1,
+    staleCommitted,
+    sessionStillB: S.session === b,
+    transcriptStillB: S.messages.length === 1 && S.messages[0].content === 'B transcript',
+  }));
+})().catch(e=>{console.error(e);process.exit(1)});
+""",
+            ]
+        )
+    )
+    assert out["generationAdvanced"] is True
+    assert out["staleCommitted"] is False
+    assert out["sessionStillB"] is True
+    assert out["transcriptStillB"] is True
+
+
+def test_cancel_fallback_get_rejected_after_switch_does_not_touch_b():
+    """Symmetric check on the embedded-snapshot path: a stale embedded cancel
+    snapshot for A arriving after the A→B switch must be rejected too."""
+    cancel_listener = _extract_cancel_listener()
+    out = _run_node(
+        "\n".join(
+            [
+                _attach_stream_harness(),
+                """
+(async()=>{
+  routes['/api/session?session_id=sess-a&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1'] =
+    () => { throw new Error('fallback GET must not run for an embedded rejection'); };
+  S.session = { session_id: 'sess-a', profile: 'default', messages: [{ role: 'user', content: 'A live' }] };
+  S.messages = S.session.messages;
+  S.activeStreamId = 'run-1';
+
+  // Switch to B first.
+  _loadSessionGeneration += 1;
+  const b = { session_id: 'sess-b', profile: 'default',
+    messages: [{ role: 'user', content: 'B transcript' }] };
+  S.session = b; S.messages = b.messages;
+
+  // NOW the stale stream's cancel event fires with an embedded A snapshot.
+  source.fire('cancel', JSON.stringify({ status: 'cancelled', session: {
+    session_id: 'sess-a', profile: 'default',
+    messages: [{ role: 'user', content: 'stale embedded A' }] } }));
+  await new Promise(r => setTimeout(r, 0));
+
+  console.log(JSON.stringify({
+    sessionStillB: S.session === b,
+    transcriptStillB: S.messages.length === 1 && S.messages[0].content === 'B transcript',
+  }));
+})().catch(e=>{console.error(e);process.exit(1)});
+""",
+            ]
+        )
+    )
+    assert out["sessionStillB"] is True
+    assert out["transcriptStillB"] is True
+
+
+def test_bounded_cancel_settlement_hydrates_preboundary_artifacts():
+    """A bounded (msg_limit=30) cancel fallback GET must not leave Artifacts
+    claiming authority over pre-boundary mutations (gate review e43234ad final
+    round): the settlement installs the bounded tail without a projection and
+    hydrates the complete one asynchronously — OLD_* mutation before the
+    boundary plus NEW_* inside it must BOTH be listed exactly once, while the
+    visible transcript stays at the reader's bounded boundary."""
+    cancel_listener = _extract_cancel_listener()
+    out = _run_node(
+        "\n".join(
+            [
+                _attach_stream_harness(
+                    # Async hydration: production _hydrateSessionArtifactProjection
+                    # does a full-history GET for bounded sources. Drive it with a
+                    # recorded fetch so the test can assert the fence holds.
+                    """
+                    const _hydrateSessionArtifactProjection = async (session, ownsLoad) => {
+                      const data = await api('/api/session?session_id=' + session.session_id + '&messages=1&resolve_model=0');
+                      // The generation fence arrives via ownsLoad (same contract
+                      // as the production call in loadSession).
+                      if (!ownsLoad()) return null;
+                      const full = data.session;
+                      return _artifactProjectionForSnapshot(full);
+                    };
+                    """
+                ),
+                """
+(async()=>{
+  routes['/api/session?session_id=sess-a&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1'] =
+    () => ({ session: { session_id: 'sess-a', profile: 'default', regeneration_revision: 5,
+      _messages_truncated: true, _messages_offset: 40, message_count: 60,
+      messages: [{ role: 'user', content: 'bounded tail', tool_calls: [
+        { name: 'write_file', arguments: JSON.stringify({ path: '/workspace/NEW_in_window.md' }) }] }] } });
+  // Complete-history source the hydration step uses.
+  routes['/api/session?session_id=sess-a&messages=1&resolve_model=0'] =
+    () => ({ session: { session_id: 'sess-a', profile: 'default', regeneration_revision: 5,
+      _messages_truncated: false, _messages_offset: 0,
+      messages: [
+        { role: 'user', content: 'old turn', tool_calls: [
+          { name: 'write_file', arguments: JSON.stringify({ path: '/workspace/OLD_preboundary.md' }) }],
+          tool_call_id: 'tc-old' },
+        { role: 'assistant', content: 'did the old thing' },
+        { role: 'user', content: 'bounded tail', tool_calls: [
+          { name: 'write_file', arguments: JSON.stringify({ path: '/workspace/NEW_in_window.md' }) }],
+          tool_call_id: 'tc-new' },
+        { role: 'assistant', content: 'cancelled mid-run' },
+      ] } });
+
+  S.session = { session_id: 'sess-a', profile: 'default', messages: [{ role: 'user', content: 'A live' }] };
+  S.messages = S.session.messages;
+  S.activeStreamId = 'run-1';
+
+  // No embedded snapshot → bounded fallback GET (msg_limit=30).
+  source.fire('cancel', JSON.stringify({ status: 'cancelled' }));
+  // Give the hydration promise a tick.
+  await new Promise(r => setTimeout(r, 0));
+
+  const proj = S.session._artifactProjection;
+  const paths = proj ? proj.items.map(i => i.path).sort() : [];
+  console.log(JSON.stringify({
+    transcriptBounded: S.messages.length === 1 && S.messages[0].content === 'bounded tail',
+    truncatedFlag: _messagesTruncated === true,
+    offset: _oldestIdx,
+    hydrateFetchedFull: calls.some(c => c.url === '/api/session?session_id=sess-a&messages=1&resolve_model=0'),
+    hasProjection: !!proj,
+    projGeneration: proj ? proj.generation : null,
+    paths,
+    oldCount: paths.filter(p => p.includes('OLD_preboundary')).length,
+    newCount: paths.filter(p => p.includes('NEW_in_window')).length,
+  }));
+})().catch(e=>{console.error(e);process.exit(1)});
+""",
+            ]
+        )
+    )
+    assert out["transcriptBounded"] is True
+    assert out["truncatedFlag"] is True
+    assert out["offset"] == 40
+    assert out["hydrateFetchedFull"] is True
+    assert out["hasProjection"] is True
+    assert out["projGeneration"] == 1
+    assert out["oldCount"] == 1  # pre-boundary mutation recovered exactly once
+    assert out["newCount"] == 1  # in-window mutation listed exactly once
