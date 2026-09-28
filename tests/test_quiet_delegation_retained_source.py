@@ -9,8 +9,6 @@ the delegation_wakeup row then rendered as a visible user turn instead of
 being hidden by the ``_source`` filter.
 """
 
-import pytest
-
 from api import streaming
 
 
