@@ -425,6 +425,19 @@ def _shutdown_log_value(value, *, default: str = "unknown", max_len: int = 160) 
     return text
 
 
+def _start_post_restart_continuation_consumer(stop=None):
+    from api.post_restart_continuation import release_binding, start_consumer
+    from api.routes import consume_post_restart_continuation
+    import os
+    if not os.environ.get("HERMES_WEBUI_CONTINUATION_DIR"):
+        return None
+    try:
+        deployment = release_binding()
+    except (OSError, ValueError):
+        return None  # Unsupported release must not block HTTP health/startup.
+    return start_consumer(lambda: consume_post_restart_continuation(deployment), stop)
+
+
 def _log_shutdown_audit(reason: str = "serve_forever_exit") -> None:
     """Log runtime context when the WebUI server is exiting."""
     global _SHUTDOWN_AUDIT_LOGGED
@@ -584,6 +597,10 @@ def main() -> None:
             print('[tip] Gateway watcher still initializing (non-blocking)', flush=True)
     except Exception as e:
         print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
+
+    # Private continuation consumer waits asynchronously for controller terminal
+    # proof, which is published after HTTP health; never gate serve_forever.
+    _start_post_restart_continuation_consumer()
 
     try:
         from api.background_process import start_drain_thread

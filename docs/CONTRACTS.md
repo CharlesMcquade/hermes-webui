@@ -23,6 +23,10 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+- [`docs/architecture/post-restart-continuation.md`](architecture/post-restart-continuation.md):
+  opt-in private local continuation, settled-session binding, supervisor proof,
+  durable admission receipts, ambiguity policy, and single-owner scope.
+
 - [`docs/remote-workspaces.md`](remote-workspaces.md):
   architecture contract for remote terminal workspaces (SSH/Docker), target-side
   POSIX path preservation against macOS synthetic firmlink expansion, and
