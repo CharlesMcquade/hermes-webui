@@ -28107,6 +28107,10 @@ def _agent_runtime_barrier_response(
     return None
 
 
+from api.post_restart_continuation import serialized_start as _serialized_start
+
+
+@_serialized_start("object")
 def _start_chat_stream_for_session(
     s,
     *,
@@ -28127,6 +28131,7 @@ def _start_chat_stream_for_session(
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
+    continuation_receipt=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn.
 
@@ -28331,6 +28336,14 @@ def _start_chat_stream_for_session(
                         STREAM_GOAL_RELATED[stream_id] = True
                     diag.stage("worker_thread_start") if diag else None
                     worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
+                    if continuation_receipt is not None:
+                        worker_target = continuation_receipt.wrap(
+                            worker_target,
+                            lambda: _cleanup_chat_start_launch_failure(
+                                s, stream_id, snapshot,
+                                backup_provenance=backup_provenance,
+                            ),
+                        )
                     if backend_is_gateway:
                         worker_kwargs = {
                             "model_provider": model_provider,
@@ -28571,6 +28584,7 @@ def _external_model_alias_lane_response(alias_route, *, external_owned: bool) ->
     }
 
 
+@_serialized_start("object")
 def _start_run(
     s,
     *,
@@ -28590,6 +28604,7 @@ def _start_run(
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
+    continuation_receipt=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -28677,6 +28692,7 @@ def _start_run(
                 process_id=process_id,
                 retry_attempt=retry_attempt,
                 rearm_deferred_wakeup=rearm_deferred_wakeup,
+                **({"continuation_receipt": continuation_receipt} if continuation_receipt else {}),
             )
 
         def _legacy_adapter_factory():
@@ -28728,7 +28744,15 @@ def _start_run(
         process_id=process_id,
         retry_attempt=retry_attempt,
         rearm_deferred_wakeup=rearm_deferred_wakeup,
+        **({"continuation_receipt": continuation_receipt} if continuation_receipt else {}),
     )
+
+
+def consume_post_restart_continuation(deployment):
+    """Private owning-process entrypoint; never exposed as an HTTP route."""
+    import sys
+    from api.post_restart_continuation import consume
+    return consume(sys.modules[__name__], deployment)
 
 
 def _process_wakeup_revalidation_provider(model, provider) -> str:
@@ -28782,6 +28806,7 @@ def _refresh_process_wakeup_pause_credential_fingerprint(session) -> bool:
     return True
 
 
+@_serialized_start("session")
 def start_session_turn(
     session_id: str,
     message: str,
@@ -29505,6 +29530,7 @@ def _save_chat_start_compression_recovery(session):
     return None
 
 
+@_serialized_start("http")
 def _handle_chat_start(handler, body, diag=None):
     try:
         diag.stage("validate_session_id") if diag else None
