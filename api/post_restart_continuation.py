@@ -37,7 +37,7 @@ def serialized_start(kind):
             if not os.environ.get(_ENV):
                 return fn(*args, **kwargs)
             handler, body = None, {}
-            if kind == "http":
+            if kind in ("http", "goal"):
                 handler = args[0] if args else kwargs["handler"]
                 body = args[1] if len(args) > 1 else kwargs["body"]
                 sid = body.get("session_id")
@@ -46,7 +46,7 @@ def serialized_start(kind):
             else:
                 sid = (args[0] if args else kwargs["s"]).session_id
             with admission(sid):
-                if kind in ("http", "session"):
+                if kind in ("http", "session", "goal"):
                     # Ordinary starts must also reject a winning continuation
                     # before workspace/model/materialization can mutate state.
                     from api import routes
@@ -56,10 +56,16 @@ def serialized_start(kind):
                     if not stream and current and routes._active_stream_blocks_chat_start(cached, current):
                         stream = current
                     message = body.get("message") if kind == "http" else (args[1] if len(args) > 1 else kwargs.get("message"))
-                    visible = kind != "http" or (cached is not None and routes._session_visible_to_active_profile(getattr(cached, "profile", None), handler))
+                    if kind == "goal":
+                        message = body.get("args") or body.get("text") or ""
+                        # Controls still work on active runs; only new-goal
+                        # kickoff text is an admission, not pause/resume/status.
+                        if str(message).strip().lower() in ("", "status", "pause", "resume", "clear", "stop", "done"):
+                            return fn(*args, **kwargs)
+                    visible = kind not in ("http", "goal") or (cached is not None and routes._session_visible_to_active_profile(getattr(cached, "profile", None), handler))
                     if stream and visible and not routes._is_silent_control_message(message):
                         result = {"error": "session already has an active stream", "active_stream_id": stream, "_status": 409}
-                        if kind == "http":
+                        if kind in ("http", "goal"):
                             return routes.j(handler, result, status=409)
                         return result
                 return fn(*args, **kwargs)
@@ -281,10 +287,34 @@ class WorkerReceipt:
         return entered
 
 
-def consume(routes, deployment):
+class ConsumerOwner:
+    """Graceful shutdown and irrevocable launch share one linearization edge.
+
+    close() runs in normal control flow, never directly in a signal handler.
+    Admission which wins this edge finishes its claim/launch transaction before
+    close returns. Otherwise even a fully validated request remains unclaimed.
+    """
+    def __init__(self):
+        self.stop = threading.Event()
+        self._lock = threading.Lock()
+        self._closed = False
+
+    @contextmanager
+    def admission(self):
+        with self._lock:
+            yield not self._closed
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+            self.stop.set()
+
+
+def consume(routes, deployment, owner=None):
     path = os.environ.get(_ENV)
     if not path:
         return {"status": "disabled"}
+    owner = owner or ConsumerOwner()
     identity = {}
     try:
         with Store(path) as store, store.locked():
@@ -340,22 +370,25 @@ def consume(routes, deployment):
                     raise Refused("release changed since startup")
                 if routes._agent_runtime_barrier_response(runner_local_owned=True) is not None:
                     raise Refused("runtime not ready")
-                store.write(op + ".claim.json", {**identity, "request_digest": digest(request), "status": "claimed"})
-                # All subsequent failures are terminal ambiguity, never replay.
-                session = routes.get_session(sid)
-                if any(getattr(session, key, None) != binding[key] for key in
-                        ("session_id", "profile", "workspace", "model", "model_provider")):
-                    raise Refused("resolved session changed binding")
-                if inspect_binding(sid, binding["profile"], binding["workspace"]) != binding:
-                    raise Refused("session recovery changed revision")
-                receipt = WorkerReceipt(path, op)
-                result = routes._start_run(session, msg=msg, attachments=[], workspace=binding["workspace"],
-                    model=binding["model"], model_provider=binding["model_provider"], normalized_model=False,
-                    source="webui", route="post_restart_continuation", gateway_chat_enabled=False,
-                    continuation_receipt=receipt)
-                result = {**result, **identity}
-                store.write(op + ".result.json", result)
-                return {**identity, "status": "claimed", "result": result}
+                with owner.admission() as allowed:
+                    if not allowed:
+                        return {**identity, "status": "stopped"}
+                    store.write(op + ".claim.json", {**identity, "request_digest": digest(request), "status": "claimed"})
+                    # All subsequent failures are terminal ambiguity, never replay.
+                    session = routes.get_session(sid)
+                    if any(getattr(session, key, None) != binding[key] for key in
+                            ("session_id", "profile", "workspace", "model", "model_provider")):
+                        raise Refused("resolved session changed binding")
+                    if inspect_binding(sid, binding["profile"], binding["workspace"]) != binding:
+                        raise Refused("session recovery changed revision")
+                    receipt = WorkerReceipt(path, op)
+                    result = routes._start_run(session, msg=msg, attachments=[], workspace=binding["workspace"],
+                        model=binding["model"], model_provider=binding["model_provider"], normalized_model=False,
+                        source="webui", route="post_restart_continuation", gateway_chat_enabled=False,
+                        continuation_receipt=receipt)
+                    result = {**result, **identity}
+                    store.write(op + ".result.json", result)
+                    return {**identity, "status": "claimed", "result": result}
     except Exception as exc:
         # No prompt/path data in diagnostics. Partial/corrupt claim files remain
         # on disk and fail closed on all later attempts.

@@ -103,7 +103,7 @@ is no assumption that an existing controller already emits these records.
    attestation from an untrusted caller. The consumer checks all bindings; it
    cannot independently prove a supervisor's claimed terminal workflow. Never
    synthesize terminal proof merely because a server responds to health.
-5. `server.py` starts a daemon consumer without blocking the HTTP accept loop.
+5. `server.py` retains an owned daemon consumer without blocking the HTTP accept loop.
    It waits for missing proof/request and retries live busy admission. A refused
    request stops this startup consumer; it does not repair/rewrite the request.
    In-process `consume_post_restart_continuation(deployment)` is the same private
@@ -111,16 +111,21 @@ is no assumption that an existing controller already emits these records.
 
 ## Admission, receipts and ambiguity
 
-With this feature enabled, ordinary `_handle_chat_start`, `start_session_turn`,
-`_start_run` and legacy stream starts participate in one per-session reentrant
+With this feature enabled, ordinary `_handle_chat_start`, `_handle_goal_command`,
+`start_session_turn`, `_start_run` and legacy stream starts participate in one per-session reentrant
 outer admission edge. It precedes workspace/model/pending mutation. The consumer
 holds the same edge through binding revalidation, durable claim and launch.
 Ordinary HTTP access/profile checks are not bypassed. An already-busy session is
 rejected before ordinary starts can modify its workspace/model. Without the
 continuation environment variable, ordinary calls use the unchanged path.
 
+New-goal kickoff text acquires that edge before profile retagging, model
+resolution, explicit-pick signature stamping, or goal updates. Active-run
+status/pause/resume/clear/stop/done controls retain their normal semantics; they
+are serialized but not rejected as new kickoffs.
+
 Lock order: private store flock (consumer only), outer session admission,
-existing session/stream registry locks. Never acquire the outer edge from inside
+consumer-owner claim edge (consumer only), existing session/stream registry locks. Never acquire the outer edge from inside
 an existing session/stream lock. The worker receipt uses only the private store
 lock; it does not call back into admission. HTTP response writes are not under
 stream/runtime registry locks. Admission lock identities live for the process
@@ -138,7 +143,11 @@ The normal accepted path calls the existing `_start_run` adapter selection and
 legacy stream start, not a separate worker launcher. The actual executing
 thread writes `<id>.entered.json` before calling the Agent worker. If that
 receipt fails, the worker is not invoked and the existing launch-failure cleanup
-retires its stream/pending state. `<id>.result.json` records the owning route's
+retires its stream/pending state. Detachment and worker-participant retirement
+share `STREAMS_LOCK`, using the existing cancellation settlement helper. If
+Stop has registered cancel and worker participants, each retires only its own
+participation; neither retirement order leaves a phantom worker or fence.
+`<id>.result.json` records the owning route's
 result with the same ID. A returned route result is not worker-entry proof;
 `entered.json` is not proof of model completion or an exactly-once tool effect.
 
@@ -148,7 +157,92 @@ must inspect the session and decide on a new action. This provides a reliable
 normal launch and conservative no-duplicate behavior, **not eventual exactly-once
 execution across arbitrary crashes**.
 
-## Independent verification checkpoint
+## Graceful owner shutdown
+
+The startup consumer is created inside the HTTP server's teardown scope, after
+construction and signal-handler installation. `server.main()` retains both a
+`ConsumerOwner` and the consumer thread. Shutdown closes the owner claim edge,
+wakes a waiting consumer, and joins it before HTTP server teardown. A signal
+callback only dispatches the normal shutdown helper; it does not acquire the
+owner edge or join the consumer on an interrupted main-thread stack.
+
+Validation is not admission. Immediately before the irrevocable claim write,
+the consumer takes the owner edge and holds it through claim, route launch and
+result recording. If owner closure wins, even a previously validated request
+returns `stopped` without a claim or session mutation. If admission wins,
+shutdown waits for that transaction and joins the consumer. That accepted run
+then has the **existing worker shutdown semantics**: joining the consumer is
+not waiting for model completion, provider/tool execution, or the worker-entry
+receipt thread. An accepted/ambiguous claim is never replayed. A hung disk or
+nonparticipating private-store lock holder can delay graceful joining; forced
+termination still has the documented ambiguity semantics.
+
+The optional owner argument on the private synchronous entrypoint supports
+trusted embedding. Such callers must share their lifecycle owner and close/join
+it in their own teardown; a standalone call without an owner is not a managed
+startup consumer. This is not a new public endpoint or controller protocol.
+
+## Reviewed-blocker repair evidence
+
+The repair adds deterministic receipt/Stop barriers through **real
+`cancel_stream`**, tests both cancel/worker retirement orderings, and tests goal
+and continuation winners through the real route admission and stream launcher
+with fixture workers. Losing starts leave model/profile/signature/goal/pending
+state untouched. Goal controls are checked with the feature both on and off.
+
+Actual imported `server.main()` is exercised with all startup dependencies
+stubbed and a fake HTTP server (no socket). Tests cover waiting proof followed
+by shutdown and later proof, validated-before-claim losing to shutdown, and
+claim-admission winning before shutdown. These prove the Python lifecycle
+wiring, not full dependency startup, native signal delivery, live HTTP health,
+a supervisor rollout, or live resumption.
+
+Before repair, the two Stop cases failed with a remaining `{'worker'}`
+participant, goal cases failed at mutation-before-admission / missing shared
+admission, and actual-main shutdown failed because teardown saw a live
+consumer. The guarded offline verification commands are the five-file gate
+below plus `tests/test_goal_silent_ingress_suppression.py`, and a separate
+`tests/test_goal_command_webui.py -k 'not profile_goal'` gate. The latter excludes
+five native-Agent integration cases deliberately, not as claimed passes.
+
+Caller audit: chat HTTP (including regeneration), server wakeups, and adapter
+legacy delegates reach the serialized same-session entries. `/goal` was the
+same-session kickoff caller missing the earlier guard. `/btw` and `/background`
+launch distinct new hidden session IDs rather than restarting the bound parent;
+they are not same-session admission participants. `/btw`'s pre-existing stale
+parent-stream cleanup and concurrent session administration are not expanded
+into a general session-write fencing protocol here. External Agent/CLI writers,
+Gateway/runner launches and live worker goal continuation remain outside this
+settled-session/local-legacy contract.
+
+## Independent repair verification checkpoint
+
+The parent independently reran the expanded gate on Python **3.11.16** through
+`./scripts/test.sh`: **148 passed, 5 deliberately deselected** native-Agent goal
+cases. A separate neighboring gate covering
+`tests/test_issue6869_gateway_launch_failure.py` and
+`tests/test_stale_reaper_settlement.py` passed **9 tests**, including successor
+ownership and deleted-session preservation. Source hashes matched the delivered
+repair and frozen review snapshot; `api/streaming.py` is unchanged.
+
+A parent regression replay compiled the exact pre-repair consumer, routes and
+server blobs from `f7fd6ed7dc7f0faf45fa1c7e66363009a19e609d` at their original
+module paths using a test-only import loader. The new tests then reproduced
+**five expected failures**: both Stop retirement orders retained `worker`, both
+goal admission tests failed, and actual-main teardown observed a live consumer.
+This source-code replay does not verify a baseline deployment or release identity.
+No product files were replaced for the replay.
+
+The parent guard blocked native loading, Agent imports, unexpected subprocesses,
+outbound connections and listening sockets. The unrelated autouse HTTP server
+was suppressed; the import-time conftest ephemeral loopback port reservation was
+allowed and immediately closed. An initial runner-only failure overblocked that
+reservation; only the parent guard changed before rerunning. Actual-main tests
+still use fake HTTP and stub startup dependencies. Whole-file Ruff retained
+**24 baseline / 24 final findings, with no additions**. Focused source re-review,
+controller publishing, full startup and live same-session restart remain open.
+
+## Earlier independent verification checkpoint
 
 The parent independently ran the focused and neighboring files below with
 Python 3.11.16 through `./scripts/test.sh`: **101 passed**. The tested source
@@ -188,8 +282,9 @@ a change to the browser's stale-compression no-auto-replay contract.
 
 `tests/test_post_restart_continuation.py` exercises disposable SQLite/sidecars,
 real route/adaptor/stream-start helpers with a fake Agent worker, the exact
-source-extracted server startup helper (without importing a production server),
-both ordinary HTTP/server admission orderings, competing consumers, independent
+source-extracted startup helper plus actual imported `server.main()` with
+stubbed dependencies and fake HTTP ownership, both ordinary HTTP/server
+admission orderings, competing consumers, independent
 process file claims, fresh-process receipt reads, unsafe inputs, binding changes,
 receipt failures and lost/ambiguous postclaim responses. Source-extracted startup
 coverage is not proof of a live supervisor rollout or full HTTP server startup.

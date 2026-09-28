@@ -27521,6 +27521,9 @@ def _cleanup_chat_start_launch_failure(
             # alive whatever the pending age -- so a stale claim would block every
             # later chat/start for this stream id (re-gate finding 3).
             retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
+            from api.streaming import _retire_worker_cancelled_state_locked
+
+            _retire_worker_cancelled_state_locked(stream_id)
         STREAM_GOAL_RELATED.pop(stream_id, None)
     except Exception:
         logger.debug(
@@ -28748,11 +28751,11 @@ def _start_run(
     )
 
 
-def consume_post_restart_continuation(deployment):
+def consume_post_restart_continuation(deployment, owner=None):
     """Private owning-process entrypoint; never exposed as an HTTP route."""
     import sys
     from api.post_restart_continuation import consume
-    return consume(sys.modules[__name__], deployment)
+    return consume(sys.modules[__name__], deployment, owner=owner)
 
 
 def _process_wakeup_revalidation_provider(model, provider) -> str:
@@ -29216,6 +29219,7 @@ def _handle_session_compression_recovery_start(handler, body):
     )
 
 
+@_serialized_start("goal")
 def _handle_goal_command(handler, body):
     """Handle WebUI /goal command controls and optional kickoff stream."""
     try:
