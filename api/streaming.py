@@ -5483,13 +5483,59 @@ def _title_exchange_input_text(content) -> str:
     return _strip_title_input_metadata(str(content or '').strip())
 
 
-def _looks_like_current_user_turn(msg, msg_text) -> bool:
+TODO_INJECTION_HEADER = "[Your active task list was preserved across context compression]"
+
+
+def _todo_injection_tail_matches(text: str, expected_text: str) -> bool:
+    """True when *text* is the prompt exactly + one synthetic todo-injection tail.
+
+    When a wakeup turn crosses a context-compression boundary, the Agent appends
+    the post-compaction task-list injection (``TODO_INJECTION_HEADER``) to its
+    copy of the turn input. The Gateway's durable wake row holds the clean
+    prompt, so the two rows differ by exactly that trailing block; the display
+    merge then failed to recognize the Agent copy as the current turn and
+    rendered it as a duplicate flagless user bubble (#delegation-wakeup-todo-injection).
+
+    Conservative by construction: the candidate must start with the full
+    prompt, the remainder must start with the exact compression header, and
+    the header must be followed only by list/task bullets — a real user
+    message that merely mentions the header mid-prose does not match.
+    """
+    if not isinstance(text, str) or not isinstance(expected_text, str):
+        return False
+    if not expected_text or not text.startswith(expected_text):
+        return False
+    tail = text[len(expected_text):]
+    if not tail.strip():
+        return False
+    normalized = " ".join(tail.split())
+    header = " ".join(TODO_INJECTION_HEADER.split())
+    if not normalized.startswith(header):
+        return False
+    after_header = normalized[len(header):].lstrip()
+    # The injection body is a flat bullet/task block: no prose paragraphs after
+    # the header. Require every following segment to be a list/task bullet.
+    if not after_header:
+        return True
+    return all(
+        segment.strip() == "" or segment.strip().startswith(("-", "[", "*", "•"))
+        for segment in after_header.split("- ")
+    )
+
+
+def _looks_like_current_user_turn(msg, msg_text, *, allow_wakeup_todo_tail=False) -> bool:
     """Match the current human turn even if an internal workspace tag leaked mid-text.
 
     Normal model-facing messages start with the workspace sentinel. A failed
     retry/merge path can also return an optimistic draft followed by the
     sentinel and the real prompt. Only treat that shape as the current turn
     when the text after the sentinel exactly matches the submitted prompt.
+
+    ``allow_wakeup_todo_tail`` additionally accepts the wakeup turn that crossed
+    a compression boundary: the Agent's copy carries the synthetic post-compaction
+    task-list injection appended after the exact prompt. Only the display-merge
+    loop passes this for wakeup-sourced turns; a real user message that merely
+    mentions the header mid-prose still does not match.
     """
     if not isinstance(msg, dict) or msg.get('role') != 'user':
         return False
@@ -5501,7 +5547,17 @@ def _looks_like_current_user_turn(msg, msg_text) -> bool:
     for pattern in (_WORKSPACE_PREFIX_ANY_RE, _LEGACY_WORKSPACE_PREFIX_ANY_RE):
         for match in pattern.finditer(text):
             candidates.append(text[match.end():])
-    return any(" ".join(str(candidate or '').split()) == needle for candidate in candidates)
+    if any(" ".join(str(candidate or '').split()) == needle for candidate in candidates):
+        return True
+    return bool(
+        allow_wakeup_todo_tail
+        and any(
+            _todo_injection_tail_matches(
+                " ".join(str(candidate or '').split()), needle
+            )
+            for candidate in candidates
+        )
+    )
 
 
 def _first_exchange_snippets(messages, *, scan_past_consecutive_users: bool = False):
@@ -9235,7 +9291,13 @@ def _merge_display_messages_after_agent_result(
                 continue
             msg = display_row
         key = _message_identity(msg)
-        is_current_user_turn = _looks_like_current_user_turn(msg, msg_text)
+        is_current_user_turn = _looks_like_current_user_turn(
+            msg,
+            msg_text,
+            allow_wakeup_todo_tail=(
+                source in ('delegation_wakeup', 'process_wakeup')
+            ),
+        )
         if (
             not is_active_image_row
             and ((key is not None and key == current_user_key) or is_current_user_turn)
