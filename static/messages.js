@@ -6969,6 +6969,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // be overwritten by a stale cancellation settlement — gate review
       // e43234ad, final round).
       const _cancelLoadGeneration=_loadSessionGeneration;
+      // One captured owner predicate for EVERY post-cancel state/DOM mutation
+      // (gate review a43ee902 round 2): generation + pane/session. The fallback
+      // catch below must satisfy the same fence as the payload install path —
+      // loadSession(B) bumps the generation while S.session can still be A, so
+      // a rejected A fallback GET resolving in that window would otherwise
+      // append the cancellation row to stale session A.
+      const _cancelOwnerStillCurrent=()=>{
+        if(_loadSessionGeneration!==_cancelLoadGeneration) return false;
+        return (typeof _isSessionCurrentPane==='function')
+          ? _isSessionCurrentPane(activeSid)
+          : !!(S.session&&S.session.session_id===activeSid);
+      };
       const _applyCancelSessionPayload=(sessionPayload)=>{
         if(!sessionPayload||typeof sessionPayload!=='object') return false;
         // Generation + pane fence FIRST, before any state mutation: a session
@@ -6977,8 +6989,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // snapshot or fallback GET alike. The embedded path previously checked
         // only session_id, so a cancel fallback GET resolving during an A→B
         // switch could commit stale A over freshly installed B.
-        if(_loadSessionGeneration!==_cancelLoadGeneration) return false;
-        if(!S.session||S.session.session_id!==activeSid) return false;
+        if(!_cancelOwnerStillCurrent()) return false;
         // Belt-and-suspenders: the embedded cancel snapshot must be for THIS session.
         // The GET path guarantees it via the URL; the embedded path via the stream→session
         // binding — but reject a mismatched id so a stray payload can't overwrite the view.
@@ -7026,14 +7037,33 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // e43234ad, final round). Complete snapshots already own one.
         if(!S.session._artifactProjection&&typeof _hydrateSessionArtifactProjection==='function'){
           const _hydrGen=_cancelLoadGeneration;
-          _hydrateSessionArtifactProjection(S.session,()=>_loadSessionGeneration===_hydrGen)
+          // Hydration is fenced by generation, pane/session ownership, and the
+          // EXACT installed snapshot object — a later canonical install replaces
+          // S.session, and a late projection must never re-attach to it (gate
+          // review a43ee902 round 2 #2).
+          const _installedSnapshot=S.session;
+          const _ownsHydration=()=>_loadSessionGeneration===_hydrGen&&
+            S.session===_installedSnapshot&&(typeof _isSessionCurrentPane!=='function'||_isSessionCurrentPane(activeSid));
+          // Repaint IMMEDIATELY after install so a bounded source shows the
+          // fail-closed "Artifacts unavailable" state while the complete
+          // projection loads, instead of keeping the previous session's stale
+          // artifact DOM visible.
+          if(typeof projectSessionArtifactsForOwner==='function') projectSessionArtifactsForOwner(activeSid);
+          _hydrateSessionArtifactProjection(_installedSnapshot,_ownsHydration)
             .then(projection=>{
-              if(_loadSessionGeneration!==_hydrGen||!S.session||
-                 S.session.session_id!==activeSid||!projection) return;
-              S.session._artifactProjection=projection;
+              if(!_ownsHydration()||!projection) return;
+              _installedSnapshot._artifactProjection=projection;
               if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
             })
-            .catch(()=>{}); // Artifact enrichment must not break cancel settlement.
+            .catch(()=>{ // Fail closed on hydration failure too: repaint through
+              // the owner-gated helper so the UI shows "Artifacts unavailable"
+              // rather than silently keeping stale DOM (a43ee902 round 2 #2).
+              if(_ownsHydration()&&typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+            }); // Artifact enrichment must not break cancel settlement.
+        }else if(typeof projectSessionArtifactsForOwner==='function'){
+          // Complete embedded snapshot path: repaint at once so the freshly
+          // installed projection (or its deliberate absence) is what renders.
+          projectSessionArtifactsForOwner(activeSid);
         }
         return true;
       };
@@ -7055,8 +7085,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);
           if(data&&data.session) _applyCancelSessionPayload(data.session);
         }catch(_){
-          // Fallback to local cancel message if API fails
-          if(S.session&&S.session.session_id===activeSid){
+          // Fallback to local cancel message if API fails — but only while this
+          // cancel settlement still owns the pane. The same A→B window the
+          // install fence covers applies here: loadSession(B) bumps the
+          // generation before B installs, and this catch must never append the
+          // local cancellation row to stale session A, render it, or mark it
+          // viewed during that transition (gate review a43ee902 round 2 #1).
+          if(_cancelOwnerStillCurrent()){
             const _wasFollowingAtCancelFb=((typeof _isMessagePaneNearBottom==='function')
                 ? _isMessagePaneNearBottom(1200)
                 : true)

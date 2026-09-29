@@ -437,6 +437,18 @@ def _attach_stream_harness(extra=""):
             "const _bailOutOfTerminalEventsFromStaleStream = () => false;",
             "const _clearOwnerInflightState = () => {};",
             "const _clearApprovalForOwner = () => {};",
+            # Artifact repaint instrumentation (gate review a43ee902 round 2):
+            # record every owner-gated paint so tests can assert fail-closed
+            # ordering. projectSessionArtifactsForOwner mirrors the production
+            # owner gate (session identity + current pane).
+            "const artifactPaints = [];",
+            "const renderSessionArtifacts = () => { artifactPaints.push('render'); };",
+            "const projectSessionArtifactsForOwner = (sid) => {"
+            " artifactPaints.push(sid);"
+            " return !!(sid && S.session && S.session.session_id === sid); };",
+            "let _loadingSessionId = null;",
+            "const _isSessionCurrentPane = " +
+            _extract_from([_MESSAGES_SOURCE], "_isSessionCurrentPane") + ";",
             "const _clearClarifyForOwner = () => {};",
             "let assistantText = '';",
             "let _persistTimer = null;",
@@ -488,7 +500,7 @@ def test_cancel_fallback_get_resolving_during_session_switch_is_ignored():
     window (S.session is still A) and would render stale A; the generation
     fence must reject the settlement instead.
     """
-    cancel_listener = _extract_cancel_listener()
+
     out = _run_node(
         "\n".join(
             [
@@ -549,7 +561,7 @@ def test_cancel_fallback_get_resolving_during_session_switch_is_ignored():
 def test_cancel_fallback_get_rejected_after_switch_does_not_touch_b():
     """Symmetric check on the embedded-snapshot path: a stale embedded cancel
     snapshot for A arriving after the A→B switch must be rejected too."""
-    cancel_listener = _extract_cancel_listener()
+
     out = _run_node(
         "\n".join(
             [
@@ -594,7 +606,7 @@ def test_bounded_cancel_settlement_hydrates_preboundary_artifacts():
     hydrates the complete one asynchronously — OLD_* mutation before the
     boundary plus NEW_* inside it must BOTH be listed exactly once, while the
     visible transcript stays at the reader's bounded boundary."""
-    cancel_listener = _extract_cancel_listener()
+
     out = _run_node(
         "\n".join(
             [
@@ -670,3 +682,284 @@ def test_bounded_cancel_settlement_hydrates_preboundary_artifacts():
     assert out["projGeneration"] == 1
     assert out["oldCount"] == 1  # pre-boundary mutation recovered exactly once
     assert out["newCount"] == 1  # in-window mutation listed exactly once
+
+
+# ── Gate review a43ee902 (round 2): rejected fallback GET + fail-closed
+# artifact lifecycle. The fallback catch and the hydration callback must both
+# satisfy one captured owner predicate, and Artifacts must visibly fail closed
+# for bounded/failed hydration and repaint for complete embedded snapshots.
+
+
+def _rejecting_get_harness():
+    """Harness whose bounded fallback GET REJECTS (network failure path)."""
+    cancel_listener = _extract_cancel_listener()
+    return "\n".join(
+        [
+            _attach_stream_harness(),
+            """
+(async()=>{
+  routes['/api/session?session_id=sess-a&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1'] =
+    () => { throw new Error('network failure'); };
+
+  S.session = { session_id: 'sess-a', profile: 'default', messages: [{ role: 'user', content: 'A live' }] };
+  S.messages = S.session.messages;
+  S.activeStreamId = 'run-1';
+
+  // Cancel A: no embedded snapshot → fallback GET starts and then rejects.
+  source.fire('cancel', JSON.stringify({ status: 'cancelled' }));
+  // loadSession(B) begins while the GET is in flight: generation bumps and
+  // the pane target moves BEFORE B installs — S.session is still A here,
+  // which is exactly the window the old session_id-only catch check missed.
+  const generationAtCancel = _loadSessionGeneration;
+  _loadSessionGeneration += 1;
+  _loadingSessionId = 'sess-b';
+
+  // The rejected GET's catch runs while B owns the in-flight transition.
+  await new Promise(r => setTimeout(r, 0));
+
+  console.log(JSON.stringify({
+    generationAdvanced: _loadSessionGeneration === generationAtCancel + 1,
+    sessionStillA: S.session.session_id === 'sess-a',
+    transcriptUnchanged: S.messages.length === 1 && S.messages[0].content === 'A live',
+    localCancelRowAppended: S.messages.some(m => m && m._error && String(m.content||'').includes('Task cancelled')),
+    renderCalls,
+  }));
+})().catch(e=>{console.error(e);process.exit(1)});
+""",
+        ]
+    )
+
+
+def test_rejected_cancel_fallback_get_during_inflight_switch_never_touches_stale_a():
+    """The fallback catch must satisfy the same captured owner predicate as the
+    install path. A rejected A GET resolving during the loadSession(B) window
+    (generation bumped, S.session still A) must not append the local
+    cancellation row to A, render it, or mark it viewed."""
+    out = _run_node(_rejecting_get_harness())
+    assert out["generationAdvanced"] is True
+    assert out["transcriptUnchanged"] is True
+    assert out["localCancelRowAppended"] is False
+
+
+def test_rejected_cancel_fallback_get_still_settles_when_owner_holds():
+    """Symmetric guard: with NO session switch, the same rejected-GET path must
+    still settle normally (append the local cancellation row) — the new fence
+    must not break the ordinary failure recovery."""
+    cancel_listener = _extract_cancel_listener()
+    out = _run_node(
+        "\n".join(
+            [
+                _attach_stream_harness(),
+                """
+(async()=>{
+  routes['/api/session?session_id=sess-a&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1'] =
+    () => { throw new Error('network failure'); };
+
+  S.session = { session_id: 'sess-a', profile: 'default', messages: [{ role: 'user', content: 'A live' }] };
+  S.messages = S.session.messages;
+  S.activeStreamId = 'run-1';
+
+  source.fire('cancel', JSON.stringify({ status: 'cancelled' }));
+  await new Promise(r => setTimeout(r, 0));
+
+  console.log(JSON.stringify({
+    cancelRowAppended: S.messages.some(m => m && m._error && String(m.content||'').includes('Task cancelled')),
+    stillA: S.session.session_id === 'sess-a',
+  }));
+})().catch(e=>{console.error(e);process.exit(1)});
+""",
+            ]
+        )
+    )
+    assert out["cancelRowAppended"] is True
+    assert out["stillA"] is True
+
+
+def test_bounded_cancel_snapshot_paints_unavailable_then_fails_closed_on_hydration_error():
+    """A bounded embedded cancel snapshot must repaint Artifacts IMMEDIATELY
+    (fail-closed 'unavailable' state instead of stale DOM), and a REJECTED
+    hydration must repaint the unavailable state through the owner-gated
+    helper rather than being silently swallowed."""
+    cancel_listener = _extract_cancel_listener()
+    out = _run_node(
+        "\n".join(
+            [
+                _attach_stream_harness(
+                    # Production-shaped hydration: bounded source → full-history
+                    # GET, which REJECTS here (the failure branch under test).
+                    """
+                    const _hydrateSessionArtifactProjection = async (session, ownsLoad) => {
+                      if (session._messages_truncated || session._messages_offset > 0) {
+                        const data = await api('/api/session?session_id=' + session.session_id + '&messages=1&resolve_model=0');
+                        if (!ownsLoad()) return null;
+                        return _artifactProjectionForSnapshot(data.session);
+                      }
+                      return _artifactProjectionForSnapshot(session);
+                    };
+                    """
+                ),
+                """
+(async()=>{
+  // Stale artifact DOM from a PREVIOUS session view is what must not survive.
+  artifactPaints.push('pre-existing-stale-paint');
+
+  routes['/api/session?session_id=sess-a&messages=1&resolve_model=0'] =
+    () => { throw new Error('full-history GET failed'); };
+
+  S.session = { session_id: 'sess-a', profile: 'default', messages: [{ role: 'user', content: 'A live' }] };
+  S.messages = S.session.messages;
+  S.activeStreamId = 'run-1';
+
+  // Embedded BOUNDED snapshot (no embedded projection): install must repaint
+  // Artifacts immediately, then hydrate; hydration rejects → repaint again.
+  source.fire('cancel', JSON.stringify({ status: 'cancelled', session: {
+    session_id: 'sess-a', profile: 'default', regeneration_revision: 3,
+    _messages_truncated: true, _messages_offset: 30, message_count: 50,
+    messages: [{ role: 'user', content: 'bounded tail' }] } }));
+  await new Promise(r => setTimeout(r, 0));
+  const paintsAfterInstall = artifactPaints.filter(p => p === 'sess-a').length;
+
+  await new Promise(r => setTimeout(r, 10));
+
+  console.log(JSON.stringify({
+    paintsAfterInstall,
+    // 'render' pushes can only originate from the hydration .catch repaint —
+    // the install paint goes through projectSessionArtifactsForOwner instead.
+    repaintAfterHydrationFailure: artifactPaints.includes('render'),
+    noProjection: !S.session._artifactProjection,
+    snapshotStillInstalled: S.session.session_id === 'sess-a',
+  }));
+})().catch(e=>{console.error(e);process.exit(1)});
+""",
+            ]
+        )
+    )
+    assert out["paintsAfterInstall"] == 1  # immediate fail-closed paint on install
+    assert out["repaintAfterHydrationFailure"] is True  # failure is not swallowed
+    assert out["noProjection"] is True
+    assert out["snapshotStillInstalled"] is True
+
+
+def test_complete_embedded_cancel_snapshot_repaints_fresh_projection():
+    """A COMPLETE embedded cancel snapshot installs with its projection and the
+    Artifacts pane repaints through the owner-gated helper right away — no
+    window where the previous session's artifact DOM lingers."""
+    cancel_listener = _extract_cancel_listener()
+    out = _run_node(
+        "\n".join(
+            [
+                _attach_stream_harness(),
+                """
+(async()=>{
+  artifactPaints.push('pre-existing-stale-paint');
+
+  S.session = { session_id: 'sess-a', profile: 'default', messages: [{ role: 'user', content: 'A live' }] };
+  S.messages = S.session.messages;
+  S.activeStreamId = 'run-1';
+
+  // Embedded COMPLETE snapshot with a tool mutation: _installCanonicalSession
+  // derives the projection synchronously; the settlement must repaint at once.
+  source.fire('cancel', JSON.stringify({ status: 'cancelled', session: {
+    session_id: 'sess-a', profile: 'default', regeneration_revision: 2,
+    _messages_truncated: false, _messages_offset: 0,
+    messages: [{ role: 'user', content: 'did a thing', tool_calls: [
+      { name: 'write_file', arguments: JSON.stringify({ path: '/workspace/cancel_artifact.md' }) }] }] } }));
+  await new Promise(r => setTimeout(r, 0));
+
+  const proj = S.session._artifactProjection;
+  console.log(JSON.stringify({
+    immediateRepaint: artifactPaints.filter(p => p === 'sess-a').length === 1,
+    hasProjection: !!proj,
+    artifactListed: proj ? proj.items.some(i => i.path.includes('cancel_artifact')) : false,
+  }));
+})().catch(e=>{console.error(e);process.exit(1)});
+""",
+            ]
+        )
+    )
+    assert out["immediateRepaint"] is True
+    assert out["hasProjection"] is True
+    assert out["artifactListed"] is True
+
+
+def test_late_hydration_after_snapshot_or_session_replacement_is_dropped():
+    """Hydration completing after ANY owner transition — same-session canonical
+    replacement or an A→B switch — must attach to neither the replaced snapshot
+    nor the new session, and must not repaint."""
+    cancel_listener = _extract_cancel_listener()
+    out = _run_node(
+        "\n".join(
+            [
+                _attach_stream_harness(
+                    """
+                    let releaseHydration;
+                    const hydrationGate = new Promise(r => { releaseHydration = r; });
+                    const _hydrateSessionArtifactProjection = async (session, ownsLoad) => {
+                      await hydrationGate;
+                      if (!ownsLoad()) return null;
+                      return _artifactProjectionForSnapshot(session);
+                    };
+                    """
+                ),
+                """
+(async()=>{
+  routes['/api/session?session_id=sess-a&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1'] =
+    () => ({ session: { session_id: 'sess-a', profile: 'default', regeneration_revision: 6,
+      _messages_truncated: true, _messages_offset: 20, message_count: 30,
+      messages: [{ role: 'user', content: 'bounded tail' }] } });
+
+  S.session = { session_id: 'sess-a', profile: 'default', messages: [{ role: 'user', content: 'A live' }] };
+  S.messages = S.session.messages;
+  S.activeStreamId = 'run-1';
+
+  // Cancel → bounded fallback GET installs → hydration starts, parks on gate.
+  source.fire('cancel', JSON.stringify({ status: 'cancelled' }));
+  await new Promise(r => setTimeout(r, 0));
+  const installedSnapshot = S.session;
+
+  // Owner transition WHILE hydration is pending: canonical replacement of the
+  // same session (as undo/retry/edit do).
+  const replacement = { session_id: 'sess-a', profile: 'default',
+    regeneration_revision: 7, _messages_truncated: false, _messages_offset: 0,
+    messages: [{ role: 'user', content: 'canonical replacement' }] };
+  S.session = replacement;
+
+  releaseHydration({ session: { session_id: 'sess-a', profile: 'default',
+    regeneration_revision: 6, _messages_truncated: false, _messages_offset: 0,
+    messages: [{ role: 'user', content: 'stale full history' }] } });
+  await new Promise(r => setTimeout(r, 0));
+  const afterReplacement = {
+    projectionOnReplaced: !!installedSnapshot._artifactProjection,
+    projectionOnCurrent: !!S.session._artifactProjection,
+    repaints: artifactPaints.filter(p => p === 'sess-a').length,
+  };
+
+  // Second round: switch to B while hydration for A is pending.
+  S.session = { session_id: 'sess-a', profile: 'default', messages: [{ role: 'user', content: 'A live' }] };
+  S.messages = S.session.messages;
+  S.activeStreamId = 'run-2';
+  source.fire('cancel', JSON.stringify({ status: 'cancelled' }));
+  await new Promise(r => setTimeout(r, 0));
+  const snapshotA = S.session;
+  const genBefore = _loadSessionGeneration;
+  _loadSessionGeneration += 1;
+  _loadingSessionId = 'sess-b';
+  releaseHydration({ session: { session_id: 'sess-a', profile: 'default',
+    regeneration_revision: 6, _messages_truncated: false, _messages_offset: 0,
+    messages: [{ role: 'user', content: 'late A full history' }] } });
+  await new Promise(r => setTimeout(r, 0));
+
+  console.log(JSON.stringify({
+    projectionOnReplaced: afterReplacement.projectionOnReplaced,
+    projectionOnCurrent: afterReplacement.projectionOnCurrent,
+    repaintsAfterReplacement: afterReplacement.repaints,
+    noLateAttachAfterSwitch: !snapshotA._artifactProjection,
+  }));
+})().catch(e=>{console.error(e);process.exit(1)});
+""",
+            ]
+        )
+    )
+    assert out["projectionOnReplaced"] is False
+    assert out["projectionOnCurrent"] is False
+    assert out["noLateAttachAfterSwitch"] is False
