@@ -87,10 +87,11 @@ def normalize_dashboard_browser_url(raw_url: str | None) -> str:
     import posixpath as _posixpath
 
     if path and path not in ("", "/"):
+        had_trailing_slash = path.endswith("/")
         norm = _posixpath.normpath(path)
         if norm != path.rstrip("/"):
             raise ValueError("invalid dashboard URL path")
-        path = norm
+        path = f"{norm}/" if had_trailing_slash else norm
     else:
         path = ""
     try:
