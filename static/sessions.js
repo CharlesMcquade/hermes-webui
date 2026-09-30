@@ -8977,9 +8977,14 @@ function renderSessionListFromCache(){
     if(density==='detailed'){
       const metaBits=[];
       const msgCount=typeof s.message_count==='number'?s.message_count:0;
+      // #quiet-delegation: prefer the visible count (hidden internal rows
+      // excluded); fall back to the raw count when absent (legacy servers).
+      const _visibleCount=typeof s.visible_message_count==='number'&&s.visible_message_count>=0
+        ? s.visible_message_count
+        : msgCount;
       const msgLabel=(typeof t==='function')
-        ? t('session_meta_messages', msgCount)
-        : `${msgCount} msg${msgCount===1?'':'s'}`;
+        ? t('session_meta_messages', _visibleCount)
+        : `${_visibleCount} msg${_visibleCount===1?'':'s'}`;
       metaBits.push(msgLabel);
       if(childCount>0) metaBits.push(t('session_meta_children', childCount));
       const modelMeta=_formatSessionModelWithGateway(s);

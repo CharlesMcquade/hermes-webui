@@ -20,6 +20,7 @@ from typing import Any
 from api.config import LOCK, _get_session_agent_lock
 from api.models import get_session, SESSIONS
 from api.agent_sessions import normalize_agent_session_source
+from api.process_event_utils import is_hidden_transcript_row
 
 logger = logging.getLogger(__name__)
 
@@ -983,6 +984,12 @@ def retry_last(session_id: str) -> dict[str, Any]:
             last_user_idx = None
             for i in range(len(history) - 1, -1, -1):
                 if history[i].get('role') == 'user':
+                    # Hidden internal rows (delegation_wakeup) are not user
+                    # turns: retrying "past" one would resubmit the internal
+                    # handoff prompt as an ordinary human turn
+                    # (#quiet-delegation gate review).
+                    if is_hidden_transcript_row(history[i]):
+                        continue
                     last_user_idx = i
                     break
             if last_user_idx is None:
