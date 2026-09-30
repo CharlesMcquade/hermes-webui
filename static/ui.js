@@ -12333,6 +12333,11 @@ function getPendingSessionMessage(session, messagesOverride=null){
   };
   const _adoptExistingRow=(row)=>{
     if(attachments.length&&!row.attachments?.length) row.attachments=attachments;
+    // #quiet-delegation: a state.db copy adopted on reload may predate the
+    // _source stamp (deferred save). Carry the pending turn's provenance so
+    // the hidden-row predicate still applies to the adopted row.
+    const pendingSource=session?.pending_user_source;
+    if(pendingSource&&row&&!row._source) row._source=pendingSource;
     return null;
   };
   const currentTailUser=_pendingCurrentTailUserMessage(messages);
@@ -12393,7 +12398,12 @@ function _topbarLoadedMessageCount(){
 }
 function _topbarMessageMetaText(){
   const loadedCount=_topbarLoadedMessageCount();
-  const totalCount=Number(S.session&&S.session.message_count);
+  // #quiet-delegation: prefer the server's visible count (hidden internal
+  // rows excluded) so "N of M messages" never counts delegation handoffs.
+  // Fall back to the raw count on servers that don't send it yet.
+  const rawTotal=Number(S.session&&S.session.message_count);
+  const visibleTotal=Number(S.session&&S.session.visible_message_count);
+  const totalCount=Number.isFinite(visibleTotal)&&visibleTotal>=0?visibleTotal:rawTotal;
   const hasTotal=Number.isFinite(totalCount)&&totalCount>0;
   const isTruncated=!!(typeof _messagesTruncated!=='undefined'&&_messagesTruncated);
   if(isTruncated&&hasTotal&&totalCount>loadedCount){
