@@ -964,7 +964,11 @@ def test_mobile_sidebar_drawer_uses_transform_instead_of_left():
         "Mobile .sidebar should keep left:0 in the drawer rules"
     assert sidebar_rule.get("transform") == "translateX(-100%)", \
         "Closed mobile .sidebar should use transform:translateX(-100%)"
-    assert sidebar_rule.get("transition") == "transform .25s ease", \
+    # #7866's follow-up added a delayed `visibility 0s linear .25s` step so the
+    # closed drawer stays invisible-to-Tab without cutting the slide-out short, so
+    # assert the transform animation is present rather than pinning the whole
+    # transition string — a future step must not read as a regression.
+    assert "transform .25s ease" in (sidebar_rule.get("transition") or ""), \
         "Mobile .sidebar should transition transform for drawer animation"
     assert sidebar_rule.get("will-change") == "transform", \
         "Mobile .sidebar should promote the transform layer before drawer animation"
@@ -1229,7 +1233,7 @@ def test_mobile_sidebar_opens_as_full_screen_surface_with_panel_rail():
     assert sidebar_rule.get("transform") == "translateX(-100%)", (
         "Closed mobile sidebar should sit fully offscreen"
     )
-    assert sidebar_rule.get("transition") == "transform .25s ease", (
+    assert "transform .25s ease" in (sidebar_rule.get("transition") or ""), (
         "Mobile sidebar should animate with transform"
     )
     assert sidebar_rule.get("will-change") == "transform", (

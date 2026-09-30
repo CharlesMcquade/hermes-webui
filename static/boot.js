@@ -247,6 +247,21 @@ function _hasWorkspacePreviewVisible(){
   return !!(preview&&preview.classList.contains('visible'));
 }
 
+// Park focus somewhere real when an off-canvas panel closes out from under it (#7713).
+// The closed drawer/sidebar is visibility:hidden, so the browser keeps reporting the
+// now-invisible control as document.activeElement: a subsequent Tab restarts from that
+// dead node and focus appears to vanish for a press. Only rescue the focus when it is
+// actually inside the panel being closed — grabbing it unconditionally would yank a
+// user out of the composer mid-sentence on every close. <body> is the neutral landing
+// spot: it holds no tab stop, so the next Tab continues from the document start.
+function _releaseFocusFromClosedPanel(panel){
+  if(!panel)return;
+  const active=document.activeElement;
+  if(!active||active===document.body)return;
+  if(!panel.contains(active))return;
+  try{active.blur();}catch(_){}
+}
+
 function _setWorkspacePanelMode(mode){
   const {layout,panel}= _workspacePanelEls();
   if(!layout||!panel)return;
@@ -260,6 +275,7 @@ function _setWorkspacePanelMode(mode){
   layout.classList.toggle('workspace-panel-collapsed',!open);
   if(_isCompactWorkspaceViewport()){
     panel.classList.toggle('mobile-open',open);
+    if(!open)_releaseFocusFromClosedPanel(panel);
   }else{
     panel.classList.remove('mobile-open');
   }
@@ -422,6 +438,9 @@ function closeMobileSidebar(){
   const overlay=$('mobileOverlay');
   if(sidebar)sidebar.classList.remove('mobile-open','mobile-session-page','mobile-panel-drawer');
   if(overlay)overlay.classList.remove('visible');
+  // The parked sidebar is visibility:hidden (#7713), so rescue the focus if it was
+  // inside — otherwise the next Tab restarts from an invisible control.
+  _releaseFocusFromClosedPanel(sidebar);
 }
 
 const _PWA_SIDEBAR_SWIPE_EDGE=80;
