@@ -320,3 +320,33 @@ def test_new_session_does_not_fallback_to_stale_named_custom_provider():
     assert "!_familyMismatch" in assignment
     assert "!_fallbackIsNamedCustom" in assignment
     assert "_fallbackProvider||null" in assignment
+
+
+def test_load_session_clears_picker_marker_of_the_session_being_loaded():
+    """#7865 round-3: the explicit-pick marker lives in `sessionStorage`, so it
+    SURVIVES a page reload. `loadSession` must clear the marker of the session
+    being LOADED, not only the one being left (`currentSid`) — on a fresh boot
+    `S.session` is null, so `currentSid` is null and the restored session's
+    marker was never cleared, letting a stale pick override the restored
+    session's own provider.
+    """
+    sessions_src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    start = sessions_src.index("async function loadSession(")
+    body = sessions_src[start:]
+
+    # The pre-existing clear of the session being LEFT must stay.
+    assert "_clearExplicitPickerPick(currentSid)" in body
+    # The reload half: the TARGET sid is cleared too. Anchor on the guard's
+    # own shape (`sid!==currentSid`) rather than the comment text, which is
+    # free to be reworded.
+    assert "if(sid&&sid!==currentSid&&typeof _clearExplicitPickerPick==='function')" in body, (
+        "loadSession must clear the explicit-pick marker for the session being "
+        "loaded (target sid), not only currentSid (session being left)"
+    )
+    # The target-sid clear must sit AFTER the same-session no-op guard, so a
+    # no-op reload cannot wipe a marker the user just wrote in this session.
+    guard = body.index("if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid))")
+    target_clear = body.index("if(sid&&sid!==currentSid&&typeof _clearExplicitPickerPick==='function')")
+    assert guard < target_clear, (
+        "target-sid marker clear must come after the same-session no-op guard"
+    )

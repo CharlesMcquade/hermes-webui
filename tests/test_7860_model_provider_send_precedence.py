@@ -284,6 +284,49 @@ class TestRestoredSessionKeepsItsOwnProviderWithoutExplicitPick:
         assert res == "openai"
 
 
+class TestStaleMarkerAfterReloadCannotAuthorizeWrongProvider:
+    """#7865 round-3 (maintainer CORE fix): the explicit-pick marker lives in
+    `sessionStorage`, so it survives a page reload. Two halves must hold:
+
+    1. `_modelProviderForSend` only lets the dropdown override when the
+       pick's recorded provider equals the selected option's provider. A stale
+       marker must not authorize a DIFFERENT provider's identically-valued
+       option (the catalog repaint on restore can leave one selected).
+    2. `loadSession` clears the marker of the session being LOADED, not just
+       the one being left — on a fresh boot `S.session` is null, so
+       `currentSid` is null and the restored session's marker was never
+       cleared (the reload half of the same defect).
+    """
+
+    def test_stale_marker_with_mismatched_provider_does_not_authorize(self):
+        # The marker's provider (openai) does NOT match the provider of the
+        # option now selected (openai-codex), and the session's own provider is
+        # a third one (anthropic). A stale marker must not authorize the
+        # colliding option: the send must fall through to the session's own
+        # provider. This is the exact shape the reviewer described — the same
+        # `gpt-5.5` value offered by two providers, the pick never made for the
+        # one the catalog repaint happened to leave selected.
+        res = _run(_scenario(
+            model="gpt-5.5",
+            session={"session_id": "s1", "model": "gpt-5.5", "model_provider": "anthropic"},
+            dropdown={"value": "gpt-5.5", "dataProvider": "openai-codex"},
+            explicitPick={"value": "gpt-5.5", "model_provider": "openai"},
+        ))
+        assert res == "anthropic"
+
+    def test_matching_marker_provider_still_authorizes_override(self):
+        # Negative control for the test above: when the marker's provider DOES
+        # match the selected option, the #7860 fix must still let the dropdown
+        # win (otherwise round-3 over-closed the real fix).
+        res = _run(_scenario(
+            model="gpt-5.5",
+            session={"session_id": "s1", "model": "gpt-5.5", "model_provider": "anthropic"},
+            dropdown={"value": "gpt-5.5", "dataProvider": "openai-codex"},
+            explicitPick={"value": "gpt-5.5", "model_provider": "openai-codex"},
+        ))
+        assert res == "openai-codex"
+
+
 def test_driver_smoke():
     res = _run(_scenario(model="", session=None, dropdown=None))
     assert res == ""

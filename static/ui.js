@@ -3396,7 +3396,18 @@ function _modelProviderForSend(modelId){
       const dropdownState=_modelStateForSelect(sel,sel.value);
       if(dropdownState&&String(dropdownState.model||'').trim()===model){
         const dropdownProvider=dropdownState.model_provider;
-        if(dropdownProvider) return dropdownProvider;
+        // #7865: the marker is evidence of WHICH option the user picked, not
+        // just that some pick happened. A stale marker (surviving a reload, see
+        // the loadSession target-sid clear) authorizes the dropdown only when
+        // the option now selected is still the very provider that was picked.
+        // If the catalog repaint left a different provider's identically-valued
+        // option selected (gpt-5.5 offered by both openai and openai-codex),
+        // the pick must NOT authorize that wrong provider — fall through to the
+        // session's own provider instead.
+        const pickProvider=pick?String(pick.model_provider||'').trim().toLowerCase():'';
+        const dropdownProviderLc=String(dropdownProvider||'').trim().toLowerCase();
+        const pickAuthorizes=!pick||!!dropdownProviderLc&&!!pickProvider&&pickProvider===dropdownProviderLc;
+        if(dropdownProvider&&pickAuthorizes) return dropdownProvider;
       }
     }catch(_){}
   }

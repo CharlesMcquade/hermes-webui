@@ -2306,6 +2306,14 @@ async function loadSession(sid){
   // catalog repaint leaves another provider's identically-valued option
   // selected (the restore syncs the topbar before the catalog refresh).
   if(currentSid&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(currentSid);
+  // #7865: also drop the marker for the session being LOADED, not just the one
+  // being left. The marker lives in sessionStorage, so it survives a page
+  // reload: on a fresh boot S.session is null, so currentSid above is null and
+  // nothing is cleared for the session the boot is restoring. A stale pick
+  // would then survive into the restored session and let the dropdown override
+  // the provider the session itself holds. Clearing the target sid covers both
+  // the fresh-boot restore and the A->B->A round trip.
+  if(sid&&sid!==currentSid&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(sid);
   // Show loading indicator immediately for responsiveness.
   // Cleared by renderMessages() once full session data arrives.
   // Persist the current composer draft before switching away so it can be
