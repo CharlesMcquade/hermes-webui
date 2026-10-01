@@ -8,6 +8,13 @@ The send path consults `_modelProviderForSend()`, which currently returns the
 stale session provider before even looking at the dropdown the user just
 changed.
 
+Round 2 (#7865, maintainer): the dropdown's provider may only win over a loaded
+session's provider when the picker's session-scoped "explicit pick" evidence
+exists. A bare dropdown match is not evidence — after a session restore the
+catalog repaint can leave another provider's identically-valued option selected
+(e.g. `gpt-5.5` under both OpenAI and OpenAI Codex), which must NOT hijack the
+provider the session record holds.
+
 Drives the ACTUAL function from static/ui.js: the function (and its helpers)
 are extracted via balanced-brace matching, their module-global references
 (`S`, `$`) renamed to dedicated mock hooks, everything written to a temp JS
@@ -48,7 +55,9 @@ function extract(name) {
 }
 
 let funcs = ['_providerFromModelValue', '_getOptionProviderId',
-             '_modelStateForSelect', '_modelProviderForSend']
+             '_modelStateForSelect', '_pickerExplicitPickKey',
+             '_readExplicitPickerPick', '_rememberExplicitPickerPick',
+             '_clearExplicitPickerPick', '_modelProviderForSend']
   .map(extract).join('\n');
 
 // Rename ui.js module globals (S, $) to explicit globalThis hooks so the
@@ -70,9 +79,24 @@ global.localStorage = {
   setItem: (k, v) => { _store.set(k, String(v)); },
   removeItem: k => { _store.delete(k); },
 };
+var _sessionStore = new Map();
+global.sessionStorage = {
+  getItem: k => (_sessionStore.has(k) ? _sessionStore.get(k) : null),
+  setItem: (k, v) => { _sessionStore.set(k, String(v)); },
+  removeItem: k => { _sessionStore.delete(k); },
+};
 global.window = {};
 // ui.js reads S.session.<field> — wrap the scenario session object.
 globalThis.__MOCK_S = { session: cfg.session || null };
+// #7865 round-2: seed the session-scoped explicit-pick evidence exactly like
+// the picker's change handler would (keyed by the ACTIVE session id).
+if (cfg.explicitPick && cfg.session && cfg.session.session_id) {
+  // explicitPickForSession lets a scenario attach the evidence to a DIFFERENT
+  // session id than the active one, to prove the marker never leaks.
+  const _pickSid = cfg.explicitPickForSession || cfg.session.session_id;
+  _rememberExplicitPickerPick(_pickSid,
+    cfg.explicitPick.value, cfg.explicitPick.model_provider);
+}
 globalThis.__MOCK_DOLLAR = () => null;
 globalThis.MODEL_STATE_KEY = 'hermes-webui-model-state';
 if (cfg.dropdown) {
@@ -143,10 +167,14 @@ class TestSelectedModelProviderBeatsStaleSession:
     def test_picked_nondefault_model_uses_its_provider(self):
         res = _run(_scenario(
             model="claude-opus-5-5",
-            session={"model": "gpt-4o", "model_provider": "openai-codex"},
+            session={"session_id": "s1", "model": "gpt-4o", "model_provider": "openai-codex"},
             dropdown={
                 "value": "claude-opus-5-5",
                 "dataProvider": "claude-subscription-directsdk-experimental",
+            },
+            explicitPick={
+                "value": "claude-opus-5-5",
+                "model_provider": "claude-subscription-directsdk-experimental",
             },
         ))
         assert res == "claude-subscription-directsdk-experimental"
@@ -170,7 +198,7 @@ class TestSelectedModelProviderBeatsStaleSession:
         ))
         assert res == "openai-codex"
 
-    def test_no_session_uses_dropdown_provider(self):
+    def test_no_session_uses_dropdown_provider_when_picked(self):
         res = _run(_scenario(
             model="claude-sonnet-5",
             session=None,
@@ -179,11 +207,81 @@ class TestSelectedModelProviderBeatsStaleSession:
                 "dataProvider": "claude-subscription-directsdk-experimental",
             },
         ))
+        # No active session → no session provider to preserve → the dropdown's
+        # provider is the only candidate (master parity for the empty composer).
         assert res == "claude-subscription-directsdk-experimental"
 
     def test_no_dropdown_no_session_returns_empty(self):
         res = _run(_scenario(model="some-model", session=None, dropdown=None))
         assert res == ""
+
+
+class TestRestoredSessionKeepsItsOwnProviderWithoutExplicitPick:
+    """#7865 round-2 (maintainer CORE fix): a matching dropdown option may NOT
+    override a loaded session's provider unless the picker's session-scoped
+    explicit-pick evidence says the user picked AFTER this session loaded.
+
+    The real-world state: two providers offer the same bare id (`gpt-5.5` under
+    both OpenAI and OpenAI Codex). A session restore runs `syncTopbar()` before
+    the catalog refresh (`static/sessions.js` ~2535), so another provider's
+    identically-valued option can be left selected while the session correctly
+    holds `model_provider: "openai"`. Letting the dropdown win there sends the
+    turn to a provider the user never picked.
+    """
+
+    def test_partial_catalog_restore_keeps_session_provider(self):
+        # The exact case the reviewer named: session model gpt-5.5 on openai,
+        # dropdown's selected gpt-5.5 option belongs to openai-codex, no pick.
+        res = _run(_scenario(
+            model="gpt-5.5",
+            session={"session_id": "s1", "model": "gpt-5.5", "model_provider": "openai"},
+            dropdown={"value": "gpt-5.5", "dataProvider": "openai-codex"},
+        ))
+        assert res == "openai"
+
+    def test_explicit_pick_for_this_session_lets_dropdown_win(self):
+        # Same shape, but WITH the picker evidence → dropdown provider wins
+        # (that is the #7860 fix: a real pick must beat a stale session field).
+        res = _run(_scenario(
+            model="gpt-5.5",
+            session={"session_id": "s1", "model": "gpt-5.5", "model_provider": "openai"},
+            dropdown={"value": "gpt-5.5", "dataProvider": "openai-codex"},
+            explicitPick={"value": "gpt-5.5", "model_provider": "openai-codex"},
+        ))
+        assert res == "openai-codex"
+
+    def test_explicit_pick_from_another_session_does_not_authorize_override(self):
+        # Evidence belongs to a different session id than the active one → it
+        # must not leak an override across sessions.
+        res = _run(_scenario(
+            model="gpt-5.5",
+            session={"session_id": "s2", "model": "gpt-5.5", "model_provider": "openai"},
+            dropdown={"value": "gpt-5.5", "dataProvider": "openai-codex"},
+            explicitPickForSession="s1",
+            explicitPick={"value": "gpt-5.5", "model_provider": "openai-codex"},
+        ))
+        assert res == "openai"
+
+    def test_stale_explicit_pick_for_a_different_value_does_not_authorize(self):
+        # A pick recorded for another model value must not authorize an
+        # override for the model actually being sent.
+        res = _run(_scenario(
+            model="gpt-5.5",
+            session={"session_id": "s1", "model": "gpt-5.5", "model_provider": "openai"},
+            dropdown={"value": "gpt-5.5", "dataProvider": "openai-codex"},
+            explicitPick={"value": "gpt-4o", "model_provider": "openai-codex"},
+        ))
+        assert res == "openai"
+
+    def test_qualified_model_branch_unaffected_without_any_pick(self):
+        # The explicit @provider:model branch at the top is authoritative and
+        # needs no picker evidence at all (maintainer: "fine as is").
+        res = _run(_scenario(
+            model="@openai:gpt-5.5",
+            session={"session_id": "s1", "model": "gpt-5.5", "model_provider": "openai-codex"},
+            dropdown={"value": "gpt-5.5", "dataProvider": "openai"},
+        ))
+        assert res == "openai"
 
 
 def test_driver_smoke():

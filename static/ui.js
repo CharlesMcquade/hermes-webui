@@ -3315,20 +3315,83 @@ function _captureModelDropdownSelection(sel){
   }catch(_){}
   return {model:String(sel.value||''),model_provider:null};
 }
+// #7860/#7865: the picker's own "the user picked this here" evidence, kept
+// SEPARATE from the _pendingSessionModel family (that one is consumed by send()
+// and gone after the first turn). The send-path precedence needs the opposite
+// lifetime: a marker that says "the dropdown selection was authored by the user
+// for THIS session, after this session loaded", so a matching dropdown option
+// may override a loaded session's provider. Without it, any selection that the
+// catalog repaint leaves in the box (e.g. session restore runs syncTopbar()
+// before the catalog refresh — sessions.js ~2535 — and another provider's
+// identically-valued option ends up selected) would hijack the provider.
+function _pickerExplicitPickKey(sessionId){
+  return 'hermes-webui-explicit-picker-pick:'+String(sessionId||'');
+}
+function _rememberExplicitPickerPick(sessionId, value, provider){
+  const sid=String(sessionId||'').trim();
+  const val=String(value||'').trim();
+  if(!sid||!val) return;
+  try{
+    sessionStorage.setItem(_pickerExplicitPickKey(sid), JSON.stringify({
+      value:val,
+      model_provider:provider?String(provider):null,
+    }));
+  }catch(_){}
+}
+function _readExplicitPickerPick(sessionId){
+  const sid=String(sessionId||'').trim();
+  if(!sid) return null;
+  try{
+    const raw=sessionStorage.getItem(_pickerExplicitPickKey(sid));
+    if(!raw) return null;
+    const parsed=JSON.parse(raw);
+    const value=String(parsed&&parsed.value||'').trim();
+    if(!value) return null;
+    return {
+      value,
+      model_provider:parsed&&parsed.model_provider?String(parsed.model_provider):null,
+    };
+  }catch(_){
+    return null;
+  }
+}
+function _clearExplicitPickerPick(sessionId){
+  const sid=String(sessionId||'').trim();
+  if(!sid) return;
+  try{sessionStorage.removeItem(_pickerExplicitPickKey(sid));}catch(_){}
+}
 function _modelProviderForSend(modelId){
   const model=String(modelId||'').trim();
   if(!model) return null;
-  // The dropdown is the user's most recent intent. An explicit provider
-  // embedded in a qualified id (@provider:model) is authoritative; else, when
-  // the sent model is the currently selected option, its option-provider wins
-  // over a STALE session provider — the session's model_provider is only
-  // updated on apply/pending paths, not on plain picker changes (#7860).
+  // An explicit provider embedded in a qualified id (@provider:model) is
+  // authoritative. (#7860, unchanged)
   const explicitProvider=typeof _providerFromModelValue==='function'
     ? _providerFromModelValue(model)
     : '';
   if(explicitProvider) return explicitProvider;
+  // The dropdown's option provider may win over a loaded session's provider
+  // ONLY with evidence the user picked in the dropdown for THIS session —
+  // the session-scoped explicit-pick marker written by the picker's change
+  // handler. A bare dropdown match alone is NOT evidence: after a session
+  // restore the catalog repaint can leave another provider's identically-
+  // valued option selected (e.g. gpt-5.5 offered by both OpenAI and OpenAI
+  // Codex), and letting that win routes the turn to a provider the user
+  // never picked (#7865, maintainer-flagged CORE regression). Always scoped
+  // to the ACTIVE session so a marker left over from another session can't
+  // authorize an override here.
   const sel=typeof $==='function' ? $('modelSelect') : null;
-  if(sel&&String(sel.value||'').trim()===model&&typeof _modelStateForSelect==='function'){
+  const activeSid=(S&&S.session&&S.session.session_id)||null;
+  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
+  const pick=(typeof _readExplicitPickerPick==='function')
+    ? _readExplicitPickerPick(activeSid)
+    : null;
+  // The gate only guards the session's own provider: without a loaded session
+  // provider there is nothing to protect, and master's behavior (the dropdown
+  // wins when its option matches the sent model) is preserved for the empty
+  // composer / new-session case.
+  if(sel&&(!sessionProvider||pick)&&String(sel.value||'').trim()===model
+     &&(!pick||String(pick.value||'').trim()===model)
+     &&typeof _modelStateForSelect==='function'){
     try{
       const dropdownState=_modelStateForSelect(sel,sel.value);
       if(dropdownState&&String(dropdownState.model||'').trim()===model){
@@ -3337,7 +3400,6 @@ function _modelProviderForSend(modelId){
       }
     }catch(_){}
   }
-  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
   if(sessionProvider) return sessionProvider;
   if(typeof _readPersistedModelState==='function'){
     try{

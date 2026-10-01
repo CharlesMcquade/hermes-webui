@@ -2050,6 +2050,13 @@ async function newSession(flash, options={}){
         ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
+    // #7865: New Chat replaces S.session without going through loadSession(),
+    // so drop the previous session's explicit-picker evidence here (placed
+    // AFTER the provider fallback assignment on purpose — see the note in
+    // _pickerExplicitPickKey about not disturbing the newSession source-shape
+    // window). The marker must never authorize a provider override for a
+    // different (new) session.
+    if(S.session&&S.session.session_id&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(S.session.session_id);
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
@@ -2291,6 +2298,14 @@ async function loadSession(sid){
   // triggered compression.
   if(typeof clearCompressionUi==='function') clearCompressionUi();
   else window._compressionUi=null;
+  // #7865: drop the explicit-picker evidence for the session being left. The
+  // marker authorizes _modelProviderForSend to let the dropdown override the
+  // loaded session's provider, so it must never outlive the session it was
+  // written for: a restored session's provider comes from the session itself,
+  // and a stale pick from the previous session would hijack it when the
+  // catalog repaint leaves another provider's identically-valued option
+  // selected (session restore runs syncTopbar() before the catalog refresh).
+  if(currentSid&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(currentSid);
   // Show loading indicator immediately for responsiveness.
   // Cleared by renderMessages() once full session data arrives.
   // Persist the current composer draft before switching away so it can be
@@ -2326,6 +2341,13 @@ async function loadSession(sid){
     }
   }
   const _keepStaleUntilLoaded = !!opts.keepStaleUntilLoaded && sameSessionForceReload;
+  // #7865: a force-reload (external refresh / state.db change / boot restore of
+  // the SAME session) is also a session load. Clear this session's explicit
+  // picker evidence so the reloaded session's own provider stays authoritative:
+  // the catalog repaint after a restore can leave another provider's
+  // identically-valued option selected, and a surviving pick would let that
+  // option hijack the provider the session record holds.
+  if(sameSessionForceReload&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(sid);
   if (currentSid !== sid || forceReload) {
     // #3306: When force-reloading the currently-active session (e.g. external
     // poll triggering a refresh), snapshot the existing messages BEFORE we

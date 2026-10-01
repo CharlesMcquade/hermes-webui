@@ -87,6 +87,12 @@ const localStorage = {
   setItem(k, v) { store.set(k, String(v)); },
   removeItem(k) { store.delete(k); },
 };
+const sessionStore = new Map();
+const sessionStorage = {
+  getItem(k) { return sessionStore.has(k) ? sessionStore.get(k) : null; },
+  setItem(k, v) { sessionStore.set(k, String(v)); },
+  removeItem(k) { sessionStore.delete(k); },
+};
 const MODEL_STATE_KEY = 'hermes-webui-model-state';
 
 for (const name of [
@@ -94,6 +100,10 @@ for (const name of [
   '_providerFromModelValue',
   '_modelStateForSelect',
   '_readPersistedModelState',
+  '_pickerExplicitPickKey',
+  '_readExplicitPickerPick',
+  '_rememberExplicitPickerPick',
+  '_clearExplicitPickerPick',
   '_modelProviderForSend',
 ]) {
   eval(extractFunc(name));
@@ -102,7 +112,13 @@ for (const name of [
 const args = JSON.parse(process.argv[3]);
 modelSelect = makeSelect(args.options || [], args.initialValue || '');
 if (args.persisted) localStorage.setItem(MODEL_STATE_KEY, JSON.stringify(args.persisted));
-var S = {session: {model_provider: args.sessionProvider || null}};
+var S = {session: {session_id: args.sessionId || 's1', model_provider: args.sessionProvider || null}};
+// #7865 round-2: seed the picker's session-scoped explicit-pick evidence when
+// the scenario declares one (the gate in _modelProviderForSend requires it).
+if (args.explicitPick) {
+  _rememberExplicitPickerPick(args.sessionId || 's1',
+    args.explicitPick.value, args.explicitPick.model_provider);
+}
 
 if (args.mode === 'modelState') {
   process.stdout.write(JSON.stringify(_modelStateForSelect(modelSelect, args.model)));
@@ -148,7 +164,7 @@ def _run_model_state_helper(driver_path, payload):
 
 @node_test
 def test_model_provider_for_send_prefers_dropdown_over_stale_session_provider(driver_path):
-    """#7860: the dropdown is the user's most recent intent — it outranks a stale session.
+    """#7860: a real picker pick outranks a stale session — with pick evidence.
 
     This case was previously named ``..._preserves_session_provider`` and
     asserted the session provider won even though the dropdown had already
@@ -160,9 +176,31 @@ def test_model_provider_for_send_prefers_dropdown_over_stale_session_provider(dr
     so treating it as authoritative overrode the picker and pinned the session
     to the previous provider's model.
 
-    A session provider still wins when the dropdown says nothing about the
-    model being sent (see ``..._does_not_steal_unrelated_dropdown_provider``
-    and the no-dropdown-at-all case below).
+    Round 2 (#7865): the dropdown only outranks the session when the picker's
+    session-scoped explicit-pick evidence exists — a bare match is not intent,
+    and a catalog repaint after a session restore can leave another provider's
+    identically-valued option selected. See
+    ``test_restored_session_without_pick_keeps_its_own_provider`` for the
+    complement.
+    """
+    provider = _run_helper(driver_path, {
+        "model": "grok-4.3",
+        "sessionProvider": "session-provider",
+        "initialValue": "grok-4.3",
+        "options": [{"provider": "xai-oauth", "value": "grok-4.3"}],
+        "explicitPick": {"value": "grok-4.3", "model_provider": "xai-oauth"},
+    })
+
+    assert provider == "xai-oauth"
+
+
+@node_test
+def test_restored_session_without_pick_keeps_its_own_provider(driver_path):
+    """#7865: WITHOUT pick evidence the session's provider stays authoritative.
+
+    The matching dropdown option is not evidence of intent: after a restore the
+    catalog repaint can leave another provider's identically-valued option
+    selected while the session record holds the correct provider.
     """
     provider = _run_helper(driver_path, {
         "model": "grok-4.3",
@@ -171,7 +209,7 @@ def test_model_provider_for_send_prefers_dropdown_over_stale_session_provider(dr
         "options": [{"provider": "xai-oauth", "value": "grok-4.3"}],
     })
 
-    assert provider == "xai-oauth"
+    assert provider == "session-provider"
 
 
 @node_test
