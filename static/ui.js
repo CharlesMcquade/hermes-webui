@@ -3321,7 +3321,7 @@ function _captureModelDropdownSelection(sel){
 // lifetime: a marker that says "the dropdown selection was authored by the user
 // for THIS session, after this session loaded", so a matching dropdown option
 // may override a loaded session's provider. Without it, any selection that the
-// catalog repaint leaves in the box (e.g. session restore runs syncTopbar()
+// catalog repaint leaves in the box (e.g. session restore syncs the topbar
 // before the catalog refresh — sessions.js ~2535 — and another provider's
 // identically-valued option ends up selected) would hijack the provider.
 function _pickerExplicitPickKey(sessionId){

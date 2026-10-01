@@ -2304,7 +2304,7 @@ async function loadSession(sid){
   // written for: a restored session's provider comes from the session itself,
   // and a stale pick from the previous session would hijack it when the
   // catalog repaint leaves another provider's identically-valued option
-  // selected (session restore runs syncTopbar() before the catalog refresh).
+  // selected (the restore syncs the topbar before the catalog refresh).
   if(currentSid&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(currentSid);
   // Show loading indicator immediately for responsiveness.
   // Cleared by renderMessages() once full session data arrives.
