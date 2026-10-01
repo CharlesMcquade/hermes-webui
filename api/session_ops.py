@@ -598,6 +598,12 @@ def _truncate_at_last_user(messages):
     last_user_idx = None
     for i in range(len(history) - 1, -1, -1):
         if isinstance(history[i], dict) and history[i].get('role') == 'user':
+            # Hidden internal rows (delegation_wakeup) are not user turns: the
+            # context cut must land on the same visible human turn the display
+            # history was truncated at, or the model sees the turn twice
+            # (#quiet-delegation gate review).
+            if is_hidden_transcript_row(history[i]):
+                continue
             last_user_idx = i
             break
     if last_user_idx is None:
@@ -1037,6 +1043,12 @@ def undo_last(session_id: str) -> dict[str, Any]:
             last_user_idx = None
             for i in range(len(history) - 1, -1, -1):
                 if history[i].get('role') == 'user':
+                    # Hidden internal rows (delegation_wakeup) are not user
+                    # turns: undo must remove the last VISIBLE human turn and
+                    # everything after it, not the internal handoff
+                    # (#quiet-delegation gate review).
+                    if is_hidden_transcript_row(history[i]):
+                        continue
                     last_user_idx = i
                     break
             if last_user_idx is None:
@@ -1087,6 +1099,13 @@ def session_status(session_id: str) -> dict[str, Any]:
         'workspace': s.workspace,
         'personality': s.personality,
         'message_count': len(s.messages or []),
+        # #quiet-delegation: /status "messages" must not count hidden internal
+        # rows (delegation_wakeup handoffs). The client (static/commands.js)
+        # prefers this visible count and falls back to message_count.
+        'visible_message_count': sum(
+            1 for m in (s.messages or [])
+            if not is_hidden_transcript_row(m)
+        ),
         'created_at': s.created_at,
         'updated_at': s.updated_at,
         'agent_running': bool(getattr(s, 'active_stream_id', None)),

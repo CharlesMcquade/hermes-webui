@@ -2137,9 +2137,9 @@ class Session:
             session._metadata_message_count = max(known_counts) if known_counts else None
             # Note: visible_message_count rides the same modern-prefix contract
             # and is picked up by __init__ from the parsed kwargs; legacy
-            # sidecars omit it, and compact() then walks messages instead
-            # (metadata-only stubs carry [], matching pre-PR raw-count
-            # behaviour).
+            # sidecars omit it. compact() consumes the metadata value ONLY on
+            # this metadata-only stub (messages=[]); full loads re-walk the
+            # live array so an appended turn can never report a stale count.
             # Mark this session as a metadata-only stub. save() refuses to write
             # such a session because doing so would atomically replace the
             # on-disk JSON with messages=[], wiping the conversation. Any
@@ -2206,7 +2206,14 @@ class Session:
         # #quiet-delegation: labels that count "messages" for humans must not
         # count hidden internal rows. Raw message_count stays the paging /
         # reconnect authority; visible_message_count feeds topbar + sidebar.
-        _meta_visible = getattr(self, '_metadata_visible_message_count', None)
+        # The metadata-prefix value is trusted ONLY for metadata-only stubs
+        # (messages=[]); a full session re-walks the live array so a
+        # save → load → append → save sequence cannot report a stale count
+        # (gate review finding 3: visible 1 for 2 persisted messages).
+        if getattr(self, '_loaded_metadata_only', False):
+            _meta_visible = getattr(self, '_metadata_visible_message_count', None)
+        else:
+            _meta_visible = None
         visible_message_count = max(
             0,
             _meta_visible
@@ -7119,6 +7126,7 @@ def _refresh_index_rows_from_sidecar_metadata(
             'profile', 'pre_compression_snapshot', 'parent_session_id', 'source_tag',
             'raw_source', 'session_source', 'source_label', 'active_stream_id',
             'has_pending_user_message', 'pending_user_message', 'pending_started_at',
+            'visible_message_count',
         ):
             value = compact.get(key)
             if value is not None:

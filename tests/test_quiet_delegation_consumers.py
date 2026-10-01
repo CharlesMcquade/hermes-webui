@@ -319,6 +319,138 @@ def test_sidecar_prefix_writes_visible_message_count(tmp_path):
     assert stub.compact()["visible_message_count"] == 1
 
 
+def test_compact_visible_count_refreshes_after_growth(tmp_path, monkeypatch):
+    """A full session must re-walk its live array, not trust the count it was
+    loaded with: save → load → append → save previously reported the stale
+    load-time visible count (gate review finding 3)."""
+    import api.models as models_mod
+    from api.models import Session
+
+    session = Session(
+        session_id="grow7882",
+        messages=[{"role": "user", "content": "q"}],
+    )
+    monkeypatch.setattr(models_mod.SESSIONS, "get", lambda sid, default=None: None)
+    session.save(skip_index=True)
+
+    reloaded = Session.load("grow7882")
+    # Sanity: the metadata prefix carries the load-time snapshot.
+    assert reloaded._metadata_visible_message_count == 1
+    # The session grows; the visible count must reflect the live array.
+    reloaded.messages.append({"role": "user", "content": "q2"})
+    compact = reloaded.compact()
+    assert compact["visible_message_count"] == 2
+
+
+# ── 8. /undo and /status ───────────────────────────────────────────────────
+
+
+def test_undo_targets_visible_turn_and_removes_hidden_suffix(monkeypatch, tmp_path):
+    """/undo must remove the last VISIBLE human turn (and the hidden handoff
+    after it), not select the hidden handoff as the undo target (finding 2)."""
+    import contextlib
+
+    import api.session_ops as session_ops
+    from api.models import Session
+
+    session = Session(
+        session_id="undo7882",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "real question"},
+            {"role": "assistant", "content": "delegating..."},
+            _hidden_row(),
+            {"role": "assistant", "content": "child result summary"},
+        ],
+        context_messages=[
+            {"role": "user", "content": "real question"},
+            {"role": "assistant", "content": "delegating..."},
+            _hidden_row(),
+            {"role": "assistant", "content": "child result summary"},
+        ],
+    )
+    saved = []
+    session.save = lambda *args, **kwargs: saved.append(True)
+    monkeypatch.setattr(session_ops, "get_session", lambda sid: session)
+    monkeypatch.setattr(session_ops, "SESSIONS", {session.session_id: session})
+    monkeypatch.setattr(
+        session_ops, "_get_session_agent_lock", lambda sid: contextlib.nullcontext()
+    )
+
+    result = session_ops.undo_last(session.session_id)
+
+    assert result["removed_count"] == 4
+    assert "real question" in result["removed_preview"]
+    assert [m["content"] for m in session.messages] == []
+    # The context cut lands on the same visible turn as the display cut.
+    assert [m["content"] for m in session.context_messages] == []
+    assert saved
+
+
+def test_retry_truncates_context_at_the_same_visible_turn(monkeypatch, tmp_path):
+    """The model context must be cut at the selected visible human turn, not
+    at the hidden handoff — otherwise the model sees the turn twice
+    (finding 1)."""
+    import contextlib
+
+    import api.session_ops as session_ops
+    from api.models import Session
+
+    session = Session(
+        session_id="retryctx7882",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "real question"},
+            {"role": "assistant", "content": "delegating..."},
+            _hidden_row(),
+            {"role": "assistant", "content": "child result summary"},
+        ],
+        context_messages=[
+            {"role": "user", "content": "real question"},
+            {"role": "assistant", "content": "delegating..."},
+            _hidden_row(),
+            {"role": "assistant", "content": "child result summary"},
+        ],
+    )
+    saved = []
+    session.save = lambda *args, **kwargs: saved.append(True)
+    monkeypatch.setattr(session_ops, "get_session", lambda sid: session)
+    monkeypatch.setattr(session_ops, "SESSIONS", {session.session_id: session})
+    monkeypatch.setattr(
+        session_ops, "_get_session_agent_lock", lambda sid: contextlib.nullcontext()
+    )
+
+    session_ops.retry_last(session.session_id)
+
+    # Both histories cut at the SAME visible turn: no duplicate of the
+    # resubmitted prompt (or its reply) survives in the model context.
+    assert [m["content"] for m in session.context_messages] == []
+    assert [m["content"] for m in session.messages] == []
+    assert saved
+
+
+def test_session_status_reports_visible_message_count(monkeypatch):
+    """/status must not count hidden internal rows in its messages total
+    (finding 4)."""
+    import api.session_ops as session_ops
+    from api.models import Session
+
+    session = Session(
+        session_id="status7882",
+        messages=[
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            _hidden_row(),
+        ],
+    )
+    monkeypatch.setattr(session_ops, "get_session", lambda sid: session)
+
+    status = session_ops.session_status(session.session_id)
+
+    assert status["message_count"] == 3
+    assert status["visible_message_count"] == 2
+
+
 # ── Shared predicate contract ──────────────────────────────────────────────
 
 
