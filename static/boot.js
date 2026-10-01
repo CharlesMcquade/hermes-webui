@@ -252,17 +252,43 @@ function _hasWorkspacePreviewVisible(){
 // now-invisible control as document.activeElement: a subsequent Tab restarts from that
 // dead node and focus appears to vanish for a press. Only rescue the focus when it is
 // actually inside the panel being closed — grabbing it unconditionally would yank a
-// user out of the composer mid-sentence on every close. <body> is the neutral landing
-// spot: it holds no tab stop, so the next Tab continues from the document start.
-function _releaseFocusFromClosedPanel(panel){
+// user out of the composer mid-sentence on every close.
+//
+// `fallback` is the control that opened the panel, for the explicit-dismiss paths (the
+// "Close menu" X, the overlay, the drawer's collapse button). Handing focus back to the
+// invoker is the common drawer pattern (WAI-ARIA dialog, Bootstrap Offcanvas, Radix
+// Sheet, Material nav drawer): the next Tab then continues from where the user was,
+// instead of restarting at the top of the document. Content-selection closes leave it
+// undefined — they already move focus to the composer, and stealing it back to a
+// toolbar button would undo that.
+function _releaseFocusFromClosedPanel(panel, fallback){
   if(!panel)return;
   const active=document.activeElement;
   if(!active||active===document.body)return;
   if(!panel.contains(active))return;
+  if(fallback&&_isFocusableControl(fallback)){
+    try{fallback.focus();}catch(_){}
+    return;
+  }
+  // <body> is the neutral landing spot: it holds no tab stop, so the next Tab
+  // continues from the document start.
   try{active.blur();}catch(_){}
 }
 
-function _setWorkspacePanelMode(mode){
+// A fallback is only worth focusing if it is actually reachable right now: the panel
+// closing may be about to reveal it, or a concurrent close may have hidden it. A hidden
+// control would take focus and immediately strand it, which is the bug we just fixed.
+function _isFocusableControl(el){
+  if(!el||!el.isConnected)return false;
+  if(el.disabled)return false;
+  // offsetParent is null for display:none subtrees; getComputedStyle catches
+  // visibility:hidden, which still lays the element out.
+  if(!el.offsetParent&&getComputedStyle(el).position!=='fixed')return false;
+  if(getComputedStyle(el).visibility==='hidden')return false;
+  return true;
+}
+
+function _setWorkspacePanelMode(mode, returnFocusTo){
   const {layout,panel}= _workspacePanelEls();
   if(!layout||!panel)return;
   _workspacePanelMode=(mode==='browse'||mode==='preview')?mode:'closed';
@@ -275,7 +301,10 @@ function _setWorkspacePanelMode(mode){
   layout.classList.toggle('workspace-panel-collapsed',!open);
   if(_isCompactWorkspaceViewport()){
     panel.classList.toggle('mobile-open',open);
-    if(!open)_releaseFocusFromClosedPanel(panel);
+    // returnFocusTo is set only by the explicit-dismiss path (tapping outside the
+    // drawer), so focus returns to the edge toggle; automatic mode syncs leave it
+    // undefined and keep the plain <body> landing.
+    if(!open)_releaseFocusFromClosedPanel(panel, returnFocusTo);
   }else{
     panel.classList.remove('mobile-open');
   }
@@ -310,8 +339,8 @@ function openWorkspacePanel(mode='browse'){
   _setWorkspacePanelMode(mode);
 }
 
-function closeWorkspacePanel(){
-  _setWorkspacePanelMode('closed');
+function closeWorkspacePanel(returnFocusTo){
+  _setWorkspacePanelMode('closed', returnFocusTo);
 }
 
 function ensureWorkspacePreviewVisible(){
@@ -433,7 +462,7 @@ function toggleMobileSidebar(){
     sidebar.classList.remove('mobile-session-page');sidebar.classList.add('mobile-panel-drawer','mobile-open');
   }
 }
-function closeMobileSidebar(){
+function closeMobileSidebar(returnFocusTo){
   const sidebar=document.querySelector('.sidebar');
   const overlay=$('mobileOverlay');
   if(sidebar)sidebar.classList.remove('mobile-open','mobile-session-page','mobile-panel-drawer');
@@ -443,7 +472,15 @@ function closeMobileSidebar(){
   // phone-width band where the sidebar actually hides: this function also runs on
   // desktop (opening a session calls it unconditionally), where the sidebar stays
   // visible and blurring would dump keyboard focus onto <body> on every session open.
-  if(_isPhoneWidthViewport())_releaseFocusFromClosedPanel(sidebar);
+  // `returnFocusTo` is set only by the explicit-dismiss paths (the "Close menu" X and
+  // the overlay) so focus lands back on the hamburger; the many content-selection
+  // callers leave it undefined and keep the plain <body> landing.
+  if(_isPhoneWidthViewport())_releaseFocusFromClosedPanel(sidebar, returnFocusTo);
+}
+// Explicit dismiss (X / overlay) hands focus back to the hamburger that opened the
+// drawer. The default closeMobileSidebar() stays the content-selection behaviour.
+function dismissMobileSidebar(){
+  closeMobileSidebar($('btnHamburger'));
 }
 
 const _PWA_SIDEBAR_SWIPE_EDGE=80;
@@ -685,7 +722,10 @@ function closeMobileWorkspacePanelFromChat(e){
     ? e.target.closest('#btnWorkspacePanelToggle, #btnWorkspacePanelEdgeToggle, .workspace-toggle-btn, .mobile-files-btn')
     : null;
   if(t) return;
-  closeWorkspacePanel();
+  // Tapping outside the drawer is an explicit dismiss, so hand focus back to the
+  // edge toggle that opened it (#7713 follow-up: a plain <body> landing would restart
+  // the next Tab at the top of the document).
+  closeWorkspacePanel($('btnWorkspacePanelEdgeToggle'));
 }
 function toggleWorkspacePanel(force){
   const {panel}= _workspacePanelEls();

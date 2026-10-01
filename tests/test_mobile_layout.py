@@ -1457,8 +1457,22 @@ def test_mobile_session_page_close_button_is_mobile_scoped():
     assert 'class="panel-head-btn mobile-sidebar-close' in HTML, (
         "Sidebar needs a close button for the full-screen mobile session page"
     )
-    assert 'onclick="closeMobileSidebar()"' in HTML, (
+    assert (
+        'onclick="dismissMobileSidebar()"' in HTML
+        and 'data-tooltip="Close menu"' in HTML
+    ), (
         "Mobile session page close button should close the sidebar"
+    )
+    # The X is an EXPLICIT dismiss, so it routes through dismissMobileSidebar() to hand
+    # focus back to the hamburger (#7713 follow-up). That must still be a real close,
+    # not a new stub: pin that it delegates to closeMobileSidebar with the hamburger.
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    dismiss_start = boot_js.find("function dismissMobileSidebar(")
+    assert dismiss_start != -1, "boot.js must expose dismissMobileSidebar()"
+    dismiss_body = boot_js[dismiss_start : boot_js.find("\n}", dismiss_start) + 2]
+    assert "closeMobileSidebar($('btnHamburger'))" in dismiss_body, (
+        f"dismissMobileSidebar() must close the sidebar and return focus to the "
+        f"hamburger; got {dismiss_body!r}"
     )
     assert "mobile-sidebar-close{display:none" in CSS.replace(" ", ""), (
         "Mobile sidebar close button should be hidden by default"

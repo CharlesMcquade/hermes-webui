@@ -27,6 +27,7 @@ band uses display:none (its off-canvas geometry is #6952's open scope) and alrea
 keeps its subtree out of the tab order.
 """
 from pathlib import Path
+import re
 
 import pytest
 
@@ -263,32 +264,111 @@ def test_closing_a_panel_releases_focus_from_inside_it():
     # and the left sidebar (via closeMobileSidebar).
     mode_start = BOOT_JS.find("function _setWorkspacePanelMode(")
     mode_body = BOOT_JS[mode_start : BOOT_JS.find("\n}", mode_start) + 2]
-    assert "_releaseFocusFromClosedPanel(panel)" in mode_body, (
-        "_setWorkspacePanelMode() must release focus when it closes the drawer; "
-        f"got {mode_body!r}"
+    assert "_releaseFocusFromClosedPanel(panel, returnFocusTo)" in mode_body, (
+        "_setWorkspacePanelMode() must release focus when it closes the drawer, "
+        f"passing the explicit-dismiss fallback through; got {mode_body!r}"
     )
     # Only on the close leg: opening must never steal focus.
-    assert "if(!open)_releaseFocusFromClosedPanel(panel);" in mode_body, (
+    assert "if(!open)_releaseFocusFromClosedPanel(panel, returnFocusTo);" in mode_body, (
         "the focus release must be guarded on the close leg so opening the panel "
         f"leaves the user's focus alone; got {mode_body!r}"
     )
 
     close_start = BOOT_JS.find("function closeMobileSidebar(")
     close_body = BOOT_JS[close_start : BOOT_JS.find("\n}", close_start) + 2]
-    assert "_releaseFocusFromClosedPanel(sidebar)" in close_body, (
-        "closeMobileSidebar() must release focus from the parked sidebar; "
+    assert "_releaseFocusFromClosedPanel(sidebar, returnFocusTo)" in close_body, (
+        "closeMobileSidebar() must release focus from the parked sidebar, passing "
+        f"the explicit-dismiss fallback through; got {close_body!r}"
+    )
+    # The fallback is opt-in: every content-selection caller (there are dozens) calls
+    # closeMobileSidebar() bare and must keep landing on <body>, because those paths
+    # already move focus to the composer.
+    assert "if(_isPhoneWidthViewport())" in close_body, (
+        "the focus rescue must stay guarded to the phone-width band; "
         f"got {close_body!r}"
     )
 
 
-def test_release_helper_lands_focus_on_a_node_with_no_tab_stop():
-    """Blur parks focus on <body>; assert the helper never targets anything that
-    would re-introduce a focus stop of its own."""
+def test_explicit_dismiss_hands_focus_back_to_the_invoking_control():
+    """UX follow-up: an explicit dismiss (the "Close menu" X, the overlay, tapping
+    outside the workspace drawer) must return focus to the control that opened the
+    panel, so the next Tab continues from where the user was instead of restarting at
+    the top of the document.
+
+    The fallback is opt-in, threaded from the dismiss path only. This pins both ends:
+    a dismiss function that passes the invoker, and a default close that does not."""
+    # The sidebar's explicit-dismiss entry point passes the hamburger...
+    assert "function dismissMobileSidebar(" in BOOT_JS, (
+        "boot.js must expose an explicit-dismiss sidebar closer"
+    )
+    dismiss_start = BOOT_JS.find("function dismissMobileSidebar(")
+    dismiss_body = BOOT_JS[dismiss_start : BOOT_JS.find("\n}", dismiss_start) + 2]
+    assert "closeMobileSidebar($('btnHamburger'))" in dismiss_body, (
+        "the sidebar's explicit dismiss must hand focus back to the hamburger that "
+        f"opened the drawer; got {dismiss_body!r}"
+    )
+
+    # ...and both markup paths use it, while the plain close stays available.
+    assert 'onclick="dismissMobileSidebar()" data-tooltip="Close menu"' in INDEX_HTML, (
+        'the "Close menu" X must use the explicit-dismiss path'
+    )
+    assert (
+        '<div class="mobile-overlay" id="mobileOverlay" onclick="dismissMobileSidebar()">'
+        in INDEX_HTML
+    ), "the mobile overlay must use the explicit-dismiss path"
+    # The content-selection contract is unchanged: the default takes no fallback, so
+    # _releaseFocusFromClosedPanel blurs onto <body> exactly as #7866 left it.
+    assert "function closeMobileSidebar(returnFocusTo){" in BOOT_JS, (
+        "closeMobileSidebar() must keep taking the fallback as an OPTIONAL argument, "
+        "so its many content-selection callers are unaffected"
+    )
+
+    # The workspace drawer's dismiss path (tapping outside it) returns to the edge
+    # toggle, which stays reachable after the drawer collapses.
+    chat_start = BOOT_JS.find("function closeMobileWorkspacePanelFromChat(")
+    assert chat_start != -1, "the workspace drawer's outside-tap closer is missing"
+    chat_body = BOOT_JS[chat_start : BOOT_JS.find("\n}", chat_start) + 2]
+    assert "closeWorkspacePanel($('btnWorkspacePanelEdgeToggle'))" in chat_body, (
+        "tapping outside the drawer is an explicit dismiss and must hand focus back "
+        f"to the edge toggle; got {chat_body!r}"
+    )
+
+
+def test_release_helper_only_focuses_an_explicit_visible_fallback():
+    """The helper may move focus ONLY to a caller-supplied fallback that is actually
+    reachable. It must never invent a landing spot, and it must never focus a hidden
+    control — that would strand focus on an invisible node, which is the very bug
+    #7866's follow-up fixed. With no fallback (or an unreachable one) it still blurs
+    onto <body>."""
     start = BOOT_JS.find("function _releaseFocusFromClosedPanel(")
     helper = BOOT_JS[start : BOOT_JS.find("\n}", start) + 2]
-    assert ".focus(" not in helper, (
-        "the helper must blur rather than move focus to a specific control — "
-        f"inventing a landing spot re-creates the problem; got {helper!r}"
+    assert "fallback&&_isFocusableControl(fallback)" in helper, (
+        "the fallback must be gated on _isFocusableControl() before being focused, or "
+        f"a hidden invoker re-creates the invisible-focus bug; got {helper!r}"
+    )
+    # The neutral landing survives as the fallback-of-last-resort.
+    assert "blur()" in helper, (
+        f"the helper must still blur when there is no usable fallback; got {helper!r}"
+    )
+
+    # The guard itself must reject the two ways a control can be unreachable.
+    # Pin the exact code tokens, NOT the bare word: the guard's comments legitimately
+    # mention "visibility:hidden" and "display:none", and a substring match on those
+    # words stays green even with the checks deleted.
+    guard_start = BOOT_JS.find("function _isFocusableControl(")
+    assert guard_start != -1, "_isFocusableControl() is missing from boot.js"
+    guard = BOOT_JS[guard_start : BOOT_JS.find("\n}", guard_start) + 2]
+    # Strip comments so a word in prose can never satisfy the assertion.
+    guard_code = re.sub(r"//[^\n]*", "", guard)
+    assert "el.isConnected" in guard_code, (
+        f"the guard must reject detached controls; got {guard_code!r}"
+    )
+    assert "getComputedStyle(el).visibility" in guard_code, (
+        "the guard must reject visibility:hidden controls — a fallback that is itself "
+        f"hidden would take focus and immediately strand it; got {guard_code!r}"
+    )
+    assert "el.offsetParent" in guard_code, (
+        f"the guard must reject display:none controls; got {guard_code!r}"
     )
 
 
@@ -305,8 +385,10 @@ def _boot_functions_source() -> str:
     source: list[str] = []
     for name in (
         "function _isPhoneWidthViewport(",
+        "function _isFocusableControl(",
         "function _releaseFocusFromClosedPanel(",
         "function closeMobileSidebar(",
+        "function dismissMobileSidebar(",
     ):
         start = BOOT_JS.find(name)
         assert start != -1, f"{name} is missing from boot.js"
@@ -359,3 +441,145 @@ def test_closed_sidebar_focus_rescue_is_guarded_to_the_phone_band(band, expects_
             f"at {band['width']}px the sidebar stays visible, so closeMobileSidebar() "
             f"must not steal focus from a focused control (got {focused!r})"
         )
+
+
+def _dismiss_page_html() -> str:
+    """The markup the real walk needs: the hamburger that opens the drawer, the
+    sidebar with its "Close menu" X, and the composer control a content-selection
+    close would target instead."""
+    return f"""<!doctype html><html><head><style>{STYLE_CSS}</style></head>
+<body>
+  <button id="btnHamburger">Menu</button>
+  <div class="mobile-overlay" id="mobileOverlay"></div>
+  <aside class="sidebar" id="sidebar">
+    <button id="btnCloseMenu" onclick="dismissMobileSidebar()">Close menu</button>
+    <button id="btnNewChat">New</button>
+  </aside>
+  <main class="chat-shell"><textarea id="msg"></textarea></main>
+  <script>$ = (id) => document.getElementById(id);</script>
+  <script>{_boot_functions_source()}</script>
+  <script>
+    // No inline visibility: the production stylesheet already parks the closed
+    // sidebar at visibility:hidden and only .mobile-open lifts it, so adding a
+    // style attribute here would shadow the very rule under test.
+    window.__openSidebar = () => {{
+      document.querySelector('.sidebar').classList.add('mobile-open');
+    }};
+    window.__activeId = () => document.activeElement && document.activeElement.id;
+  </script>
+</body></html>"""
+
+
+def test_tab_to_close_menu_then_enter_lands_focus_on_the_hamburger():
+    """The UX review's ask, as the walk a user actually takes: focus the hamburger,
+    open the drawer, Tab onto the "Close menu" X, press Enter, and the next Tab must
+    continue from the hamburger rather than restarting at the top of the document.
+
+    A computed-style or el.tabIndex assertion cannot see this: Chrome still honours a
+    programmatic .focus() under visibility:hidden, so the failure mode is invisible to
+    anything that does not drive the real key events."""
+    playwright, browser = _chromium()
+    page = browser.new_page()
+    try:
+        page.set_viewport_size({"width": 390, "height": 780})
+        page.set_content(_dismiss_page_html())
+        page.evaluate("window.__openSidebar()")
+
+        # Tab onto the X from inside the drawer, then dismiss it with the keyboard.
+        page.evaluate("document.getElementById('btnCloseMenu').focus()")
+        page.keyboard.press("Enter")
+        after_dismiss = page.evaluate("window.__activeId()")
+        # The close transition delays the visibility flip past the 250ms slide-out
+        # (transition: transform .25s ease, visibility 0s linear .25s), so the panel
+        # is still hit-testable while it animates. Wait it out — that is the window a
+        # real user acts in, and it is when the parked sidebar must be inert.
+        page.wait_for_timeout(400)
+        assert page.evaluate(
+            "getComputedStyle(document.querySelector('.sidebar')).visibility"
+        ) == "hidden", "the sidebar must be invisible once its close animation ends"
+        page.keyboard.press("Tab")
+        after_tab = page.evaluate("window.__activeId()")
+    finally:
+        browser.close()
+        playwright.stop()
+
+    assert after_dismiss == "btnHamburger", (
+        "an explicit dismiss must hand focus to the hamburger that opened the drawer, "
+        f"not strand it on <body> (focus went to {after_dismiss!r})"
+    )
+    # The walk must resume from the hamburger and SKIP the whole parked sidebar —
+    # landing on msg (the composer, next in DOM order after the aside) is exactly
+    # right. Landing on btnNewChat or btnCloseMenu would mean the closed sidebar is
+    # back in the tab order, which is the bug this PR exists to fix.
+    assert after_tab == "msg", (
+        "the next Tab must continue from the hamburger, skipping the closed sidebar "
+        f"entirely and landing on the composer (expected msg, got {after_tab!r})"
+    )
+
+
+def test_a_content_selection_close_still_lands_on_body():
+    """The other half of the contract: picking a session or a panel item already moves
+    focus to the composer, so the plain close must NOT pull it back to the hamburger.
+    Guarding the fallback to the explicit-dismiss path is what keeps #7866's behaviour
+    intact for the dozens of content-selection callers."""
+    playwright, browser = _chromium()
+    page = browser.new_page()
+    try:
+        page.set_viewport_size({"width": 390, "height": 780})
+        page.set_content(_dismiss_page_html())
+        page.evaluate("window.__openSidebar()")
+        # A session button has focus, then the content-selection path runs and focuses
+        # the composer — the real sequence in _openSidebarSession().
+        page.evaluate("document.getElementById('btnNewChat').focus()")
+        page.evaluate("closeMobileSidebar(); $('msg').focus();")
+        after_close = page.evaluate("window.__activeId()")
+    finally:
+        browser.close()
+        playwright.stop()
+
+    assert after_close == "msg", (
+        "closeMobileSidebar() called bare is the content-selection path and must not "
+        f"steal focus back to the hamburger (focus went to {after_close!r})"
+    )
+
+
+def test_an_unreachable_fallback_is_never_focused():
+    """Why _isFocusableControl() exists, stated as a measured browser fact.
+
+    The guard is defensive rather than load-bearing in current Chrome: focusing a
+    visibility:hidden control is already a no-op, so the helper's blur-fallback and
+    the guard's rejection of the hidden fallback are indistinguishable from the
+    outside. The test documents that fact instead of pretending to prove the guard —
+    the guard itself is pinned by test_release_helper_only_focuses_an_explicit_visible_fallback,
+    which fails when the check is deleted.
+
+    Keeping the measurement here matters for the next reader: it stops anyone from
+    'simplifying' the guard away on the assumption that the hidden case is load-bearing,
+    and it records that a focus stranded on a hidden node can only come from the panel
+    hiding under focus (the #7866 bug), never from focusing a hidden control."""
+    playwright, browser = _chromium()
+    page = browser.new_page()
+    try:
+        page.set_viewport_size({"width": 390, "height": 780})
+        page.set_content(_dismiss_page_html())
+        page.evaluate("window.__openSidebar()")
+        page.evaluate(
+            "document.getElementById('btnHamburger').style.visibility = 'hidden'"
+        )
+        assert page.evaluate(
+            "getComputedStyle(document.getElementById('btnHamburger')).visibility"
+        ) == "hidden", "the probe must actually have hidden the fallback"
+        # Chrome refuses focus on an invisible control outright.
+        page.evaluate("document.getElementById('btnHamburger').focus()")
+        refused = not page.evaluate(
+            "() => document.activeElement === document.getElementById('btnHamburger')"
+        )
+    finally:
+        browser.close()
+        playwright.stop()
+
+    assert refused, (
+        "this browser DOES honour focus() on a visibility:hidden control — the guard in "
+        "_isFocusableControl() is then load-bearing, and this test must be rewritten to "
+        "assert the helper's behaviour instead of documenting a no-op"
+    )
