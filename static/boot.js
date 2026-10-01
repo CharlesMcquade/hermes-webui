@@ -439,8 +439,11 @@ function closeMobileSidebar(){
   if(sidebar)sidebar.classList.remove('mobile-open','mobile-session-page','mobile-panel-drawer');
   if(overlay)overlay.classList.remove('visible');
   // The parked sidebar is visibility:hidden (#7713), so rescue the focus if it was
-  // inside — otherwise the next Tab restarts from an invisible control.
-  _releaseFocusFromClosedPanel(sidebar);
+  // inside — otherwise the next Tab restarts from an invisible control. Guard on the
+  // phone-width band where the sidebar actually hides: this function also runs on
+  // desktop (opening a session calls it unconditionally), where the sidebar stays
+  // visible and blurring would dump keyboard focus onto <body> on every session open.
+  if(_isPhoneWidthViewport())_releaseFocusFromClosedPanel(sidebar);
 }
 
 const _PWA_SIDEBAR_SWIPE_EDGE=80;

@@ -290,3 +290,72 @@ def test_release_helper_lands_focus_on_a_node_with_no_tab_stop():
         "the helper must blur rather than move focus to a specific control — "
         f"inventing a landing spot re-creates the problem; got {helper!r}"
     )
+
+
+# A desktop-width viewport: the band where closeMobileSidebar() runs but the
+# sidebar stays laid out and visible.
+_DESKTOP_BAND = {"width": 1280, "height": 800}
+
+
+def _boot_functions_source() -> str:
+    """The real production helpers under test: the phone-width predicate, the focus
+    rescue and closeMobileSidebar(), lifted verbatim from boot.js. Sourcing them
+    (rather than restating them) keeps the probe honest — it fails if boot.js
+    changes its mind, instead of testing a copy that drifted away from it."""
+    source: list[str] = []
+    for name in (
+        "function _isPhoneWidthViewport(",
+        "function _releaseFocusFromClosedPanel(",
+        "function closeMobileSidebar(",
+    ):
+        start = BOOT_JS.find(name)
+        assert start != -1, f"{name} is missing from boot.js"
+        source.append(BOOT_JS[start : BOOT_JS.find("\n}", start) + 2])
+    return "\n".join(source)
+
+
+@pytest.mark.parametrize(
+    ("band", "expects_rescue"),
+    [(_DESKTOP_BAND, False), ({"width": 390, "height": 780}, True)],
+    ids=["1280px", "390px"],
+)
+def test_closed_sidebar_focus_rescue_is_guarded_to_the_phone_band(band, expects_rescue):
+    """maintainer regression: closeMobileSidebar() runs on desktop too — opening a
+    session calls it unconditionally — and at desktop width the sidebar is still
+    laid out and visible, so releasing focus there would dump keyboard users on
+    <body> on every session open. The rescue must fire only in the ≤640px band
+    where the sidebar actually hides; a focused control elsewhere on the page
+    (the session button) keeps its focus at desktop width."""
+    playwright, browser = _chromium()
+    page = browser.new_page()
+    try:
+        page.set_viewport_size(band)
+        page.set_content(
+            f"""<!doctype html><html><head><style>{STYLE_CSS}</style></head>
+<body>
+  <button id="openSessionBtn">Session</button>
+  <div class="mobile-overlay" id="mobileOverlay"></div>
+  <aside class="sidebar" id="sidebar"><button id="btnNewChat">New</button></aside>
+  <script>$ = (id) => document.getElementById(id);</script>
+  <script>{_boot_functions_source()}</script>
+</body></html>"""
+        )
+        # Park focus directly on the sidebar's own control — the real scenario:
+        # the button that was in focus when the panel got closed.
+        page.evaluate("document.getElementById('btnNewChat').focus()")
+        page.evaluate("closeMobileSidebar()")
+        focused = page.evaluate("() => document.activeElement && document.activeElement.id")
+    finally:
+        browser.close()
+        playwright.stop()
+
+    if expects_rescue:
+        assert focused != "btnNewChat", (
+            f"at {band['width']}px the closed sidebar is visibility:hidden; the "
+            f"rescue must park focus off its now-invisible control (got {focused!r})"
+        )
+    else:
+        assert focused == "btnNewChat", (
+            f"at {band['width']}px the sidebar stays visible, so closeMobileSidebar() "
+            f"must not steal focus from a focused control (got {focused!r})"
+        )
