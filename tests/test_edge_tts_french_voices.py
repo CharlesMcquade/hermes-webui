@@ -111,12 +111,23 @@ function _speechSetting(settingKey, storageKey, fallback) {{
 }}
 function _syncSpeechPreferenceCache() {{}}
 const document = {{
-  createElement(tag) {{ return {{tagName: tag, value: '', textContent: '', selected: false}}; }},
+  createElement(tag) {{
+    const el = {{tagName: tag, value: '', textContent: '', selected: false, label: '', children: []}};
+    el.appendChild = function (child) {{ this.children.push(child); return child; }};
+    return el;
+  }},
 }};
+// Mirrors HTMLSelectElement.options: options inside <optgroup> children are flattened in order.
 const ttsVoiceSel = {{
-  options: [],
-  set innerHTML(html) {{ this.options = []; }},
-  appendChild(el) {{ this.options.push(el); return el; }},
+  _nodes: [],
+  set innerHTML(html) {{ this._nodes = []; }},
+  appendChild(el) {{ this._nodes.push(el); return el; }},
+  get options() {{
+    const out = [];
+    for (const n of this._nodes) {{ if (n.tagName === 'optgroup') out.push(...n.children); else out.push(n); }}
+    return out;
+  }},
+  get groups() {{ return this._nodes.filter(n => n.tagName === 'optgroup').map(g => [g.label, g.children.map(c => c.value)]); }},
 }};
 {populate_fn};
 window._populateTtsVoices();
@@ -191,3 +202,19 @@ def test_edge_picker_appends_french_voices_after_existing_entries():
     # placeholder is not in this list; only the edgeVoices options are.
     values = [o["value"] for o in _render_edge_picker_options("")]
     assert values == PRE_EXISTING_EDGE_VOICES + VOICES
+
+
+def test_edge_voice_picker_groups_by_language_and_labels_child_voice():
+    """UX gate: the Edge list is grouped per language with <optgroup>, order inside each
+    group unchanged, and Eloise (a child voice in Microsoft's catalog) says so."""
+    populate_fn = _extract_balanced_block(PANELS_JS, "window._populateTtsVoices=function(){")
+    assert "createElement('optgroup')" in populate_fn
+    assert "'Eloise (French, Female, Child)'" in PANELS_JS
+    rows = _render_edge_picker_options("")
+    by_value = {r["value"]: r["label"] for r in rows}
+    assert by_value["fr-FR-EloiseNeural"] == "Eloise (French, Female, Child)"
+    # existing voices keep their relative order and stay first
+    assert [r["value"] for r in rows][:8] == [
+        "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural", "zh-CN-YunjianNeural",
+        "zh-CN-YunyangNeural", "en-US-AriaNeural", "en-US-GuyNeural", "id-ID-GadisNeural",
+    ]
