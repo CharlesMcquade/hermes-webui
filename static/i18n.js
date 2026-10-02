@@ -677,7 +677,7 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: 'When enabled, older messages load automatically as you scroll upward. When disabled, use the older-messages button.',
     settings_label_auto_scroll_follow: 'Auto-scroll to new content',
-    settings_desc_auto_scroll_follow: 'When enabled, the view auto-scrolls to the bottom as new tokens stream in. Uncheck to disable auto-scrolling and control the scroll position manually.',
+    settings_desc_auto_scroll_follow: 'When enabled, the view auto-scrolls to the bottom as new tokens stream in. When disabled, you control the scroll position manually.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
     settings_label_show_titlebar_profile: 'Show profile switcher in titlebar',
     settings_desc_show_titlebar_profile: 'When enabled, a profile switcher button appears in the top-left app titlebar so you can change profiles from any tab. Off by default; the composer footer always has a profile switcher regardless of this setting.',
@@ -2544,7 +2544,7 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: 'Se abilitato, i messaggi precedenti si caricano automaticamente scorrendo in alto. Se disabilitato, usa il pulsante messaggi precedenti.',
     settings_label_auto_scroll_follow: 'Scorrimento automatico ai nuovi contenuti',
-    settings_desc_auto_scroll_follow: 'Se abilitato, la vista scorre automaticamente verso il basso man mano che arrivano nuovi token. Deseleziona per disabilitare lo scorrimento automatico e controllare la posizione manualmente.',
+    settings_desc_auto_scroll_follow: 'Se abilitato, la vista scorre automaticamente verso il basso man mano che arrivano nuovi token. Se disabilitato, controlli tu la posizione di scorrimento.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
     settings_label_show_titlebar_profile: 'Mostra il selettore di profilo nella barra del titolo',
     settings_desc_show_titlebar_profile: 'Se attivo, nella barra del titolo in alto a sinistra compare un pulsante per cambiare profilo da qualsiasi scheda. Disattivato per impostazione predefinita; il piè di pagina del compositore ha sempre un selettore di profilo indipendentemente da questa impostazione.',
@@ -4350,7 +4350,7 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: '有効にすると、上にスクロールしたとき古いメッセージを自動で読み込みます。無効の場合は古いメッセージボタンを使います。',
     settings_label_auto_scroll_follow: '新しい内容へ自動スクロール',
-    settings_desc_auto_scroll_follow: '有効にすると、新しいトークンがストリーミングされる際に自動で一番下までスクロールします。チェックを外すと自動スクロールを無効化し、スクロール位置を自分で操作できます。',
+    settings_desc_auto_scroll_follow: '有効にすると、新しいトークンがストリーミングされる際に自動で一番下までスクロールします。無効にすると、スクロール位置を自分で操作できます。',
     settings_label_render_user_markdown: 'ユーザーメッセージでMarkdownをレンダリングする',
     settings_label_show_titlebar_profile: 'タイトルバーにプロファイル切替を表示',
     settings_desc_show_titlebar_profile: '有効にすると、左上のアプリのタイトルバーにプロファイル切替ボタンが表示され、どのタブからでもプロファイルを変更できます。既定ではオフです。この設定に関係なく、コンポーザーのフッターには常にプロファイル切替があります。',
@@ -6917,7 +6917,7 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: 'Если включено, старые сообщения загружаются автоматически при прокрутке вверх. Если выключено, используйте кнопку загрузки старых сообщений.',
     settings_label_auto_scroll_follow: 'Автопрокрутка к новому содержимому',
-    settings_desc_auto_scroll_follow: 'Если включено, область автоматически прокручивается вниз по мере поступления новых токенов. Снимите флажок, чтобы отключить автопрокрутку и управлять прокруткой вручную.',
+    settings_desc_auto_scroll_follow: 'Если включено, область автоматически прокручивается вниз по мере поступления новых токенов. Если выключено, вы сами управляете прокруткой.',
     settings_label_render_user_markdown: 'Отображать Markdown в сообщениях пользователя',
     settings_label_show_titlebar_profile: 'Показывать переключатель профилей в заголовке окна',
     settings_desc_show_titlebar_profile: 'Если включено, в заголовке окна в левом верхнем углу появляется кнопка переключения профилей, позволяющая менять профиль с любой вкладки. По умолчанию выключено; в нижней части редактора всегда есть переключатель профилей независимо от этой настройки.',
@@ -8692,7 +8692,7 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: 'Si está activado, los mensajes antiguos se cargan automáticamente al desplazarte hacia arriba. Si está desactivado, usa el botón de mensajes antiguos.',
     settings_label_auto_scroll_follow: 'Desplazamiento automático al nuevo contenido',
-    settings_desc_auto_scroll_follow: 'Si está activado, la vista se desplaza automáticamente hacia abajo a medida que llegan nuevos tokens. Desmarca para desactivar el desplazamiento automático y controlar la posición manualmente.',
+    settings_desc_auto_scroll_follow: 'Si está activado, la vista se desplaza automáticamente hacia abajo a medida que llegan nuevos tokens. Si está desactivado, controlas tú la posición de desplazamiento.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
     settings_label_show_titlebar_profile: 'Mostrar el selector de perfiles en la barra de título',
     settings_desc_show_titlebar_profile: 'Cuando está activado, aparece un botón de cambio de perfil en la barra de título de la aplicación, en la esquina superior izquierda, para que puedas cambiar de perfil desde cualquier pestaña. Desactivado de forma predeterminada; el pie del compositor siempre tiene un selector de perfiles independientemente de este ajuste.',
@@ -10106,7 +10106,7 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: 'Wenn aktiviert, werden ältere Nachrichten beim Hochscrollen automatisch geladen. Wenn deaktiviert, nutzt du den Button für ältere Nachrichten.',
     settings_label_auto_scroll_follow: 'Automatisches Scrollen zu neuen Inhalten',
-    settings_desc_auto_scroll_follow: 'Wenn aktiviert, scrollt die Ansicht automatisch nach unten, während neue Tokens eintreffen. Deaktivieren, um das automatische Scrollen auszuschalten und die Scrollposition manuell zu steuern.',
+    settings_desc_auto_scroll_follow: 'Wenn aktiviert, scrollt die Ansicht automatisch nach unten, während neue Tokens eintreffen. Wenn deaktiviert, steuerst du die Scrollposition selbst.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
     settings_label_show_titlebar_profile: 'Profilwechsler in der Titelleiste anzeigen',
     settings_desc_show_titlebar_profile: 'Wenn aktiviert, erscheint in der Titelleiste der App oben links eine Schaltfläche zum Profilwechsel, sodass du das Profil von jedem Tab aus wechseln kannst. Standardmäßig deaktiviert; die Fußzeile des Editors hat unabhängig von dieser Einstellung immer einen Profilwechsler.',
@@ -12199,7 +12199,7 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: '启用后，向上滚动时会自动加载更早的消息。禁用时请使用加载更早消息按钮。',
     settings_label_auto_scroll_follow: '自动滚动到新内容',
-    settings_desc_auto_scroll_follow: '启用后，流式输出时页面会自动滚动到底部。取消勾选可禁用自动滚动并自由控制滚动位置。',
+    settings_desc_auto_scroll_follow: '启用后，流式输出时页面会自动滚动到底部。禁用后，你可以自由控制滚动位置，阅读答案不会被拽到底部。',
     settings_label_render_user_markdown: '在用户消息中渲染Markdown格式文本',
     settings_label_large_text_paste_as_attachment: '将粘贴的大段文本作为文件附加。',
     settings_desc_large_text_paste_as_attachment: '启用此功能后，粘贴的长文本将作为.md附件，而非直接填充到编辑器中。',
@@ -13176,7 +13176,7 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: '啟用後，向上捲動時會自動載入較早訊息。停用時請使用載入較早訊息按鈕。',
     settings_label_auto_scroll_follow: '自動捲動至新內容',
-    settings_desc_auto_scroll_follow: '啟用後，串流輸出時畫面會自動捲動到底部。取消勾選可停用自動捲動並自由控制捲動位置。',
+    settings_desc_auto_scroll_follow: '啟用後，串流輸出時畫面會自動捲動到底部。停用後，你可以自由控制捲動位置。',
     settings_label_render_user_markdown: 'Render markdown in user messages',
     settings_label_show_titlebar_profile: '在標題列顯示設定檔切換器',
     settings_desc_show_titlebar_profile: '啟用後，左上角的應用程式標題列會出現設定檔切換按鈕，讓你在任何分頁都能切換設定檔。預設關閉；無論此設定為何，輸入列底部一律保留設定檔切換器。',
@@ -14876,7 +14876,7 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: 'Quando ativado, mensagens antigas carregam automaticamente ao rolar para cima. Quando desativado, use o botão de mensagens antigas.',
     settings_label_auto_scroll_follow: 'Rolagem automática para novo conteúdo',
-    settings_desc_auto_scroll_follow: 'Quando ativado, a visualização rola automaticamente para baixo conforme novos tokens chegam. Desmarque para desativar a rolagem automática e controlar a posição manualmente.',
+    settings_desc_auto_scroll_follow: 'Quando ativado, a visualização rola automaticamente para baixo conforme novos tokens chegam. Quando desativado, você controla a posição de rolagem.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
     settings_label_show_titlebar_profile: 'Mostrar alternador de perfis na barra de título',
     settings_desc_show_titlebar_profile: 'Quando ativado, um botão de alternância de perfis aparece na barra de título do app, no canto superior esquerdo, para que você possa trocar de perfil em qualquer aba. Desativado por padrão; o rodapé do compositor sempre tem um alternador de perfis, independentemente desta configuração.',
@@ -16580,7 +16580,7 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: '활성화하면 위로 스크롤할 때 이전 메시지를 자동으로 불러옵니다. 비활성화하면 이전 메시지 버튼을 사용합니다.',
     settings_label_auto_scroll_follow: '새 내용으로 자동 스크롤',
-    settings_desc_auto_scroll_follow: '활성화하면 새 토큰이 스트리밍되는 동안 화면이 자동으로 맨 아래로 스크롤됩니다. 선택을 해제하면 자동 스크롤이 비활성화되고 스크롤 위치를 직접 제어합니다.',
+    settings_desc_auto_scroll_follow: '활성화하면 새 토큰이 스트리밍되는 동안 화면이 자동으로 맨 아래로 스크롤됩니다. 비활성화하면 스크롤 위치를 직접 제어합니다.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
     settings_label_show_titlebar_profile: '제목 표시줄에 프로필 전환기 표시',
     settings_desc_show_titlebar_profile: '활성화하면 앱 제목 표시줄 왼쪽 상단에 프로필 전환 버튼이 나타나 어느 탭에서든 프로필을 변경할 수 있습니다. 기본적으로 꺼져 있습니다. 이 설정과 관계없이 작성기 하단에는 항상 프로필 전환기가 있습니다.',
@@ -18400,7 +18400,7 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: 'Lorsqu\'il est activé, les anciens messages se chargent automatiquement lorsque vous faites défiler vers le haut. Lorsqu\'il est désactivé, utilisez le bouton des messages plus anciens.',
     settings_label_auto_scroll_follow: 'Défilement automatique vers le nouveau contenu',
-    settings_desc_auto_scroll_follow: 'Lorsqu\'il est activé, la vue défile automatiquement vers le bas à mesure que de nouveaux jetons arrivent. Décochez pour désactiver le défilement automatique et contrôler la position manuellement.',
+    settings_desc_auto_scroll_follow: 'Lorsqu\'il est activé, la vue défile automatiquement vers le bas à mesure que de nouveaux jetons arrivent. Lorsqu\'il est désactivé, vous contrôlez la position de défilement manuellement.',
     settings_label_render_user_markdown: 'Rendre le markdown dans les messages de l\'utilisateur',
     settings_label_show_titlebar_profile: 'Afficher le sélecteur de profil dans la barre de titre',
     settings_desc_show_titlebar_profile: 'Lorsqu\'il est activé, un bouton de sélection de profil apparaît dans la barre de titre en haut à gauche de l\'application, vous permettant de changer de profil depuis n\'importe quel onglet. Désactivé par défaut ; le pied de page du compositeur dispose toujours d\'un sélecteur de profil, indépendamment de ce paramètre.',
@@ -20419,7 +20419,7 @@ const LOCALES = {
     settings_default_message_mode_queue: 'Zařadit navazující zprávu',
     settings_default_message_mode_steer: 'Steer (mezitahová oprava)',
     settings_desc_api_redact: 'Uživatelé samostatně hostované instance mohou zakázat pro transparentnost (nedoporučeno pro sdílené instance).',
-    settings_desc_auto_scroll_follow: 'Když povoleno, zobrazení se automaticky posouvá dolů jak nové tokeny přicházejí. Zrušte zaškrtnutí pro zakázání automatického posouvání a manuální ovládání.',
+    settings_desc_auto_scroll_follow: 'Když povoleno, zobrazení se automaticky posouvá dolů jak nové tokeny přicházejí. Když zakázáno, pozici posouvání ovládáte manuálně.',
     settings_desc_auto_title_refresh: 'Automaticky regeneruje název relace na základě poslední výměny, udržuje ho relevantní jak konverzace pokračuje. Vyžaduje aby byl nakonfigurován LLM model pro generování názvů.',
     settings_desc_auxiliary_models: 'Směrování vedlejších úloh pro vision, kompresi, generování názvů atd. "Auto" používá váš hlavní chatovací model.',
     settings_desc_bot_name: 'Použito pouze pro výchozí profil. Ostatní profily používají vlastní názvy profilů.',
@@ -21939,7 +21939,7 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: 'Etkinleştirildiğinde, yukarı doğru kaydırdığınızda eski mesajlar otomatik olarak yüklenir. Devre dışı bırakıldığında eski mesajlar düğmesini kullanın.',
     settings_label_auto_scroll_follow: 'Yeni içeriğe otomatik kaydır',
-    settings_desc_auto_scroll_follow: 'Etkinleştirildiğinde, yeni belirteçler akarken görünüm otomatik olarak en alta kaydırılır. Otomatik kaydırmayı devre dışı bırakmak ve kaydırma konumunu manuel kontrol etmek için işareti kaldırın.',
+    settings_desc_auto_scroll_follow: 'Etkinleştirildiğinde, yeni belirteçler akarken görünüm otomatik olarak en alta kaydırılır. Devre dışı bırakıldığında kaydırma konumunu kendiniz kontrol edersiniz.',
     settings_label_render_user_markdown: 'Render markdown in user messages',
     settings_label_show_titlebar_profile: 'Başlık çubuğunda profil değiştiriciyi göster',
     settings_desc_show_titlebar_profile: 'Etkinleştirildiğinde, sol üstteki uygulama başlık çubuğunda bir profil değiştirici düğmesi görünür, böylece herhangi bir sekmeden profil değiştirebilirsiniz. Varsayılan olarak kapalıdır; bu ayardan bağımsız olarak oluşturucu altbilgisinde her zaman bir profil değiştirici bulunur.',
@@ -23759,7 +23759,7 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: 'Gdy ta opcja jest włączona, starsze wiadomości ładują się automatycznie przy przewijaniu w górę. Gdy jest wyłączona, użyj przycisku wczytywania starszych wiadomości.',
     settings_label_auto_scroll_follow: 'Automatyczne przewijanie do nowej treści',
-    settings_desc_auto_scroll_follow: 'Gdy włączone, widok automatycznie przewija się na dół w miarę napływania nowych tokenów. Odznacz, aby wyłączyć automatyczne przewijanie i samodzielnie kontrolować pozycję.',
+    settings_desc_auto_scroll_follow: 'Gdy włączone, widok automatycznie przewija się na dół w miarę napływania nowych tokenów. Gdy wyłączone, sam kontrolujesz pozycję przewijania.',
     settings_label_render_user_markdown: 'Renderuj markdown w wiadomościach użytkownika',
     settings_label_show_titlebar_profile: 'Pokaż przełącznik profili na pasku tytułu',
     settings_desc_show_titlebar_profile: 'Gdy ta opcja jest włączona, w lewym górnym rogu paska tytułu aplikacji pojawia się przycisk przełącznika profili, umożliwiający zmianę profilu z dowolnej karty. Domyślnie wyłączone; stopka edytora zawsze zawiera przełącznik profili, niezależnie od tego ustawienia.',
@@ -25456,7 +25456,7 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: 'Khi bật, các tin nhắn cũ sẽ tự động tải khi bạn cuộn lên trên. Khi tắt, dùng nút tải tin nhắn cũ.',
     settings_label_auto_scroll_follow: 'Tự động cuộn đến nội dung mới',
-    settings_desc_auto_scroll_follow: 'Khi bật, khung nhìn sẽ tự động cuộn xuống cuối khi token mới được stream vào. Bỏ chọn để tắt tự động cuộn và tự điều khiển vị trí cuộn.',
+    settings_desc_auto_scroll_follow: 'Khi bật, khung nhìn sẽ tự động cuộn xuống cuối khi token mới được stream vào. Khi tắt, bạn sẽ tự điều khiển vị trí cuộn.',
     settings_label_render_user_markdown: 'Render Markdown trong tin nhắn người dùng',
     settings_label_show_titlebar_profile: 'Hiển thị bộ chuyển profile trên thanh tiêu đề',
     settings_desc_show_titlebar_profile: 'Khi bật, nút chuyển profile sẽ xuất hiện ở góc trên bên trái thanh tiêu đề ứng dụng để bạn đổi profile từ bất kỳ tab nào. Mặc định tắt; chân khung soạn thảo luôn có bộ chuyển profile dù cài đặt này thế nào.',
