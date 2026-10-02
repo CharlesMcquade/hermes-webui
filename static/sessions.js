@@ -3877,6 +3877,13 @@ async function _ensureMessagesLoaded(sid, opts) {
   if(S.session&&S.session.session_id===sid){
     if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
     S.session.message_count=Number(data.session.message_count || msgs.length);
+    // #quiet-delegation: keep the visible total in step with the reload — the
+    // server derives it from the merged transcript on message loads, so the
+    // sidebar/topbar cannot report a stale count after state.db outgrows the
+    // sidecar (gate review finding 3).
+    if(typeof data.session.visible_message_count==='number'&&data.session.visible_message_count>=0){
+      S.session.visible_message_count=data.session.visible_message_count;
+    }
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     // Phase 2: the messages=1 response carries the canonical cold-load
     // `todo_state` snapshot, derived server-side from the FULL untruncated

@@ -319,6 +319,42 @@ def test_sidecar_prefix_writes_visible_message_count(tmp_path):
     assert stub.compact()["visible_message_count"] == 1
 
 
+def test_legacy_sidecar_metadata_only_load_falls_back_to_message_count(tmp_path, monkeypatch):
+    """Gate review finding 1: a sidecar written BEFORE this PR has no
+    visible-count prefix field, which parses as None — and compact() then
+    emitted visible_message_count 0, making older sessions show "0 messages"
+    in the sidebar. The legacy fallback must surface the raw message_count
+    (a legacy file cannot contain hidden delegation_wakeup rows)."""
+    import json as _json
+
+    import api.models as models_mod
+    from api.models import Session
+
+    # Write a REAL legacy sidecar: full session JSON WITHOUT the
+    # visible_message_count prefix key.
+    legacy = Session(
+        session_id="legacy7882",
+        messages=[
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "q2"},
+        ],
+    )
+    legacy.save(skip_index=True)
+    path = models_mod.SESSION_DIR / "legacy7882.json"
+    payload = _json.loads(path.read_text(encoding="utf-8"))
+    payload.pop("visible_message_count", None)
+    payload["message_count"] = 3
+    path.write_text(_json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(models_mod.SESSIONS, "get", lambda sid, default=None: None)
+    stub = Session.load_metadata_only("legacy7882")
+    assert stub is not None
+    assert stub._loaded_metadata_only is True
+    # The prefix carried NO visible count; the fallback must produce 3, not 0.
+    assert stub.compact()["visible_message_count"] == 3
+
+
 def test_compact_visible_count_refreshes_after_growth(tmp_path, monkeypatch):
     """A full session must re-walk its live array, not trust the count it was
     loaded with: save → load → append → save previously reported the stale
@@ -426,6 +462,98 @@ def test_retry_truncates_context_at_the_same_visible_turn(monkeypatch, tmp_path)
     # resubmitted prompt (or its reply) survives in the model context.
     assert [m["content"] for m in session.context_messages] == []
     assert [m["content"] for m in session.messages] == []
+    assert saved
+
+
+def test_retry_on_compressed_history_clears_later_context(monkeypatch, tmp_path):
+    """Gate review finding 2 (re-gate): when compression has already dropped
+    the selected visible human turn from context_messages, /retry must cut
+    the display transcript AND clear the later context — leaving the hidden
+    delegation handoff and its reply in context would carry them into the
+    next send."""
+    import contextlib
+
+    import api.session_ops as session_ops
+    from api.models import Session
+
+    session = Session(
+        session_id="retrycomp7882",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "real question"},
+            {"role": "assistant", "content": "delegating..."},
+            _hidden_row(),
+            {"role": "assistant", "content": "child result summary"},
+        ],
+        # Post-compression context: the selected "real question" turn (and the
+        # hidden handoff after it) are GONE — only a compressed summary and
+        # the tail remain.
+        context_messages=[
+            {"role": "user", "content": "compression summary of earlier turns"},
+            {"role": "assistant", "content": "child result summary"},
+        ],
+    )
+    saved = []
+    session.save = lambda *args, **kwargs: saved.append(True)
+    monkeypatch.setattr(session_ops, "get_session", lambda sid: session)
+    monkeypatch.setattr(session_ops, "SESSIONS", {session.session_id: session})
+    monkeypatch.setattr(
+        session_ops, "_get_session_agent_lock", lambda sid: contextlib.nullcontext()
+    )
+
+    session_ops.retry_last(session.session_id)
+
+    # Display history cut at the selected visible turn.
+    assert [m["content"] for m in session.messages] == [
+        "old question",
+        "old answer",
+    ]
+    # The later context (summary + hidden handoff's reply) must NOT survive —
+    # the next send cannot carry the removed turn.
+    assert session.context_messages == []
+    assert saved
+
+
+def test_undo_on_compressed_history_clears_later_context(monkeypatch, tmp_path):
+    """Same fail-closed rule as retry: /undo on a compressed history must not
+    leave the hidden delegation handoff's reply in model context."""
+    import contextlib
+
+    import api.session_ops as session_ops
+    from api.models import Session
+
+    session = Session(
+        session_id="undocomp7882",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "real question"},
+            _hidden_row(),
+            {"role": "assistant", "content": "child result summary"},
+        ],
+        context_messages=[
+            {"role": "user", "content": "compression summary of earlier turns"},
+            {"role": "assistant", "content": "child result summary"},
+        ],
+    )
+    saved = []
+    session.save = lambda *args, **kwargs: saved.append(True)
+    monkeypatch.setattr(session_ops, "get_session", lambda sid: session)
+    monkeypatch.setattr(session_ops, "SESSIONS", {session.session_id: session})
+    monkeypatch.setattr(
+        session_ops, "_get_session_agent_lock", lambda sid: contextlib.nullcontext()
+    )
+
+    session_ops.undo_last(session.session_id)
+
+    assert [m["content"] for m in session.messages] == [
+        "old question",
+        "old answer",
+    ]
+    assert session.context_messages == []
     assert saved
 
 

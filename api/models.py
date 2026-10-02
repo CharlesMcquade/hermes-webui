@@ -2212,6 +2212,14 @@ class Session:
         # (gate review finding 3: visible 1 for 2 persisted messages).
         if getattr(self, '_loaded_metadata_only', False):
             _meta_visible = getattr(self, '_metadata_visible_message_count', None)
+            # Legacy sidecars written before this PR have NO visible-count
+            # prefix field, which parses as None — not as "unknown". Emitting
+            # 0 here made older sessions show "0 messages" in the sidebar
+            # (gate review, metadata-only load). Fall back to the raw
+            # message_count: a legacy file cannot contain hidden
+            # delegation_wakeup rows, so every message is visible.
+            if _meta_visible is None:
+                _meta_visible = message_count if message_count else None
         else:
             _meta_visible = None
         visible_message_count = max(

@@ -1016,6 +1016,15 @@ def retry_last(session_id: str) -> dict[str, Any]:
                 truncated_context = _truncate_at_last_user(s.context_messages)
                 if truncated_context is not None:
                     s.context_messages = truncated_context
+                else:
+                    # The selected visible human turn is not in model context
+                    # any more (compression already dropped it or everything
+                    # after it). Cutting only at the context's own last user
+                    # row would LEAVE the hidden delegation handoff and its
+                    # reply in context while the display transcript lost them
+                    # (gate review finding 2). Fail closed: clear the later
+                    # context so the next send cannot carry the removed turn.
+                    s.context_messages = []
         s.save()
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
@@ -1065,6 +1074,13 @@ def undo_last(session_id: str) -> dict[str, Any]:
                 truncated_context = _truncate_at_last_user(s.context_messages)
                 if truncated_context is not None:
                     s.context_messages = truncated_context
+                else:
+                    # Same compressed-history fail-closed rule as retry_last:
+                    # the removed visible turn is already gone from model
+                    # context, so clearing the later context is the only way
+                    # to keep the hidden delegation handoff out of the next
+                    # send (gate review finding 2).
+                    s.context_messages = []
         s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
     preview = (removed_text[:40] + '...') if len(removed_text) > 40 else removed_text
     return {
