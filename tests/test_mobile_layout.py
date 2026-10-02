@@ -533,7 +533,9 @@ def _run_sidebar_lifecycle(start_width, start_drawer_open, end_width, pref):
     import subprocess
     helpers = _extract_boot_js_functions(
         'closeMobileSidebar', '_isDesktopWidth', '_isCompactWorkspaceViewport',
-        '_sidebarShouldCollapse', '_syncSidebarAria', '_applySidebarState')
+        '_sidebarShouldCollapse', '_syncSidebarAria', '_applySidebarState',
+        '_isPhoneWidthViewport', '_isFocusableControl',
+        '_releaseFocusFromClosedPanel')
     pref_js = 'null' if pref is None else repr(pref)
     script = f"""
 {helpers}
@@ -622,6 +624,8 @@ def _run_sidebar_open_then_resize(width, pref, opener, clicks=1):
     helpers = _extract_boot_js_functions(
         'closeMobileSidebar', '_isDesktopWidth', '_isCompactWorkspaceViewport',
         '_sidebarShouldCollapse', '_syncSidebarAria', '_applySidebarState',
+        '_isPhoneWidthViewport', '_isFocusableControl',
+        '_releaseFocusFromClosedPanel',
         '_isSidebarCollapsed', 'toggleSidebar', 'expandSidebar',
         'toggleMobileSidebar', 'mobileSwitchPanel')
     pref_js = 'null' if pref is None else repr(pref)
@@ -933,13 +937,20 @@ def test_workspace_toggle_close_race_guard_present():
     PR fixes, so lock the guard in.
     """
     fn = _js_function_body(BOOT, "closeMobileWorkspacePanelFromChat")
-    # The guard must short-circuit before closeWorkspacePanel()
+    # The guard must short-circuit before the close call. Anchor on the
+    # argument-bearing call: the explicit-dismiss path passes the invoker
+    # control so focus lands back on the toggle, and a bare "closeWorkspacePanel()"
+    # anchor would not match that form.
     assert "#btnWorkspacePanelToggle" in fn, \
         "pointerdown close must ignore taps on the workspace panel toggle"
     for selector in ("#btnWorkspacePanelEdgeToggle", ".workspace-toggle-btn", ".mobile-files-btn"):
         assert selector in fn, f"toggle guard must also cover {selector}"
-    assert fn.index("if(t) return;") < fn.index("closeWorkspacePanel()"), \
+    assert fn.index("if(t) return;") < fn.index("closeWorkspacePanel("), \
         "the guard must return before closeWorkspacePanel() runs"
+    # The explicit-dismiss path hands focus back to the edge toggle that opened
+    # the drawer; a bare close() would strand focus on the now-hidden panel.
+    assert "closeWorkspacePanel($('btnWorkspacePanelEdgeToggle'))" in fn, \
+        "tapping outside the drawer must return focus to the invoker"
 
 
 def test_executed_sidebar_tests_skip_cleanly_without_node():
