@@ -164,13 +164,29 @@ def test_cancel_after_compression_journals_under_original_session_id(tmp_path, m
     _, snapshot = channel.subscribe_with_snapshot()
     assert snapshot["last_event_id"] == cancel_event["event_id"]
 
-    # 7. Assert: NO continuation journal exists for this run.
-    continuation_journal_path = (
-        tmp_path / "sessions" / "run_journals" / continuation_sid / f"{stream_id}.jsonl"
+    # 7. Assert: NO continuation journal exists for this run. Derive the
+    #    path from the canonical journal writer/reader helpers
+    #    (`run_journal._run_path` / RUN_JOURNAL_DIR_NAME = "_run_journal"),
+    #    NOT a hand-guessed directory — a wrong-path assertion can never fail.
+    continuation_journal_path = run_journal._run_path(
+        continuation_sid, stream_id, session_dir=tmp_path / "sessions"
+    )
+    assert run_journal.RUN_JOURNAL_DIR_NAME in continuation_journal_path.parts, (
+        "the derived continuation path must live under the canonical journal dir"
     )
     assert not continuation_journal_path.exists(), (
         f"NO continuation journal must be created for run {stream_id} — "
         f"before the fix the cancel terminal was split into {continuation_journal_path}"
+    )
+    # And the journal root contains EXACTLY ONE physical journal for this
+    # run, under the ORIGINAL session ID.
+    journal_root = tmp_path / "sessions" / run_journal.RUN_JOURNAL_DIR_NAME
+    physical_journals = list(journal_root.glob(f"*/{stream_id}.jsonl"))
+    assert physical_journals == [
+        run_journal._run_path(original_sid, stream_id, session_dir=tmp_path / "sessions")
+    ], (
+        f"exactly one physical journal must exist under {journal_root}, "
+        f"under the ORIGINAL session ID — got {physical_journals}"
     )
 
     # 8. Assert: find_run_summary() returns the COMPLETE journal — the one
