@@ -6612,6 +6612,11 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 'session_id': stream_owner_id or session_id,
                 'target_session_id': session_id,
                 'title': effective_title,
+                # The title this event REPLACES. The client passes it back as
+                # expectedCurrent so a listener-style update is accepted even
+                # when the outgoing title is a malformed persisted value that
+                # no default/provisional candidate matches (#7318 re-gate).
+                'expectedCurrent': current,
             })
             # Sync the generated title to state.db so `hermes sessions list` shows it.
             try:
