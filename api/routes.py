@@ -14081,6 +14081,16 @@ def _handle_session_get(handler, parsed) -> bool:
             # keep the raw count available as ``actual_message_count`` but
             # do not let it make the frontend expect phantom messages.
             raw["message_count"] = _merged_message_count
+        if load_messages and _all_msgs:
+            # #quiet-delegation gate review finding 3: after state.db has
+            # grown past the sidecar, compact()'s visible total can be stale
+            # (it trusts the sidecar prefix / metadata counts). On message
+            # loads the merged display transcript is the authority — derive
+            # the visible total from it.
+            raw["visible_message_count"] = sum(
+                1 for m in _all_msgs
+                if isinstance(m, dict) and not is_hidden_transcript_row(m)
+            )
         # Signal to the frontend that older messages were omitted. The
         # message window cursor already reflects visible-row pagination and
         # avoids false positives when raw hidden tool rows exceed msg_limit.
