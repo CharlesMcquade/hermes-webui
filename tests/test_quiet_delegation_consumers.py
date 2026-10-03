@@ -592,3 +592,204 @@ def test_predicate_keys_on_typed_source_not_content():
     # Non-dict / missing source are never hidden.
     assert not is_hidden_transcript_row(None)
     assert not is_hidden_transcript_row({"role": "user", "content": "hi"})
+
+
+# ── Round-4 re-gate findings ───────────────────────────────────────────────
+
+
+def test_retry_context_cut_lands_on_selected_turn_not_retained_user(
+    monkeypatch, tmp_path
+):
+    """Finding 1 (round-4): when compression replaced the selected human turn
+    with a retained summary user row, the context cut must not stop at that
+    unrelated retained user — that would leave the hidden handoff's reply in
+    context while the selected turn is resubmitted. The selected turn cannot
+    be proved present, so the later context clears."""
+    import contextlib
+
+    import api.session_ops as session_ops
+    from api.models import Session
+
+    session = Session(
+        session_id="retryctx7882b",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "real question"},
+            {"role": "assistant", "content": "delegating..."},
+            _hidden_row(),
+            {"role": "assistant", "content": "child result summary"},
+        ],
+        # Compressed context: the summary user is NOT the selected turn.
+        context_messages=[
+            {"role": "user", "content": "summary of earlier turns (retained user)"},
+            {"role": "assistant", "content": "child result summary"},
+        ],
+    )
+    saved = []
+    session.save = lambda *args, **kwargs: saved.append(True)
+    monkeypatch.setattr(session_ops, "get_session", lambda sid: session)
+    monkeypatch.setattr(session_ops, "SESSIONS", {session.session_id: session})
+    monkeypatch.setattr(
+        session_ops, "_get_session_agent_lock", lambda sid: contextlib.nullcontext()
+    )
+
+    session_ops.retry_last(session.session_id)
+
+    # The unrelated retained user must NOT survive as the cut boundary:
+    # fail closed clears the whole later context.
+    assert session.context_messages == []
+    assert saved
+
+
+def test_undo_context_cut_lands_on_selected_turn_not_retained_user(
+    monkeypatch, tmp_path
+):
+    """Same identity-first rule for /undo (finding 2, round-4)."""
+    import contextlib
+
+    import api.session_ops as session_ops
+    from api.models import Session
+
+    session = Session(
+        session_id="undoctx7882b",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "real question"},
+            _hidden_row(),
+            {"role": "assistant", "content": "child result summary"},
+        ],
+        context_messages=[
+            {"role": "user", "content": "summary of earlier turns (retained user)"},
+            {"role": "assistant", "content": "child result summary"},
+        ],
+    )
+    saved = []
+    session.save = lambda *args, **kwargs: saved.append(True)
+    monkeypatch.setattr(session_ops, "get_session", lambda sid: session)
+    monkeypatch.setattr(session_ops, "SESSIONS", {session.session_id: session})
+    monkeypatch.setattr(
+        session_ops, "_get_session_agent_lock", lambda sid: contextlib.nullcontext()
+    )
+
+    session_ops.undo_last(session.session_id)
+
+    assert session.context_messages == []
+    assert saved
+
+
+def test_retry_context_cut_still_lands_on_matching_turn(monkeypatch, tmp_path):
+    """The identity matcher keeps working when the selected turn IS in context:
+    the cut lands before it (not at the context's own last user row)."""
+    import contextlib
+
+    import api.session_ops as session_ops
+    from api.models import Session
+
+    session = Session(
+        session_id="retryctx7882c",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "real question"},
+            _hidden_row(),
+            {"role": "assistant", "content": "child result summary"},
+        ],
+        context_messages=[
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "real question"},
+            _hidden_row(),
+            {"role": "assistant", "content": "child result summary"},
+        ],
+    )
+    saved = []
+    session.save = lambda *args, **kwargs: saved.append(True)
+    monkeypatch.setattr(session_ops, "get_session", lambda sid: session)
+    monkeypatch.setattr(session_ops, "SESSIONS", {session.session_id: session})
+    monkeypatch.setattr(
+        session_ops, "_get_session_agent_lock", lambda sid: contextlib.nullcontext()
+    )
+
+    session_ops.retry_last(session.session_id)
+
+    # Cut before "real question": the context keeps the prefix and loses the
+    # hidden handoff and its reply.
+    assert [m["content"] for m in session.context_messages] == [
+        "old question",
+        "old answer",
+    ]
+    assert saved
+
+
+def test_sidebar_cache_transports_visible_message_count(monkeypatch):
+    """Finding 2 (round-4): ``_SIDEBAR_SESSION_RESPONSE_FIELDS`` gates both the
+    bounded cached rows and the final /api/sessions serializer. Without the
+    scalar there, cache hits fall back to the raw count in the sidebar."""
+    import api.route_session_list_cache as slc
+
+    payload = {
+        "sessions": [
+            {
+                "session_id": "vis7882",
+                "title": "t",
+                "message_count": 5,
+                "visible_message_count": 4,
+            }
+        ]
+    }
+    bounded = slc._session_list_cache_bounded_payload(payload)
+    assert bounded["sessions"][0]["visible_message_count"] == 4
+    # Explicit zero is preserved (a transcript of only hidden rows).
+    bounded0 = slc._session_list_cache_bounded_payload(
+        {"sessions": [{"session_id": "z", "message_count": 2, "visible_message_count": 0}]}
+    )
+    assert bounded0["sessions"][0]["visible_message_count"] == 0
+
+
+def test_fork_session_keeps_delegation_wakeup_source(monkeypatch, tmp_path):
+    """Finding 3 (round-4): a fork session's ``session_source`` ownership
+    override must not clobber the internal producer's explicit
+    ``delegation_wakeup`` row stamp — the hidden-row predicate keys on it."""
+    import api.routes as routes
+    from api.models import Session
+
+    session = Session(session_id="forkwakeup7882", workspace=str(tmp_path))
+    session.session_source = "fork"
+    monkeypatch.setattr(routes, "get_webui_session_save_mode", lambda: "deferred")
+
+    routes._prepare_chat_start_session_for_stream(
+        session,
+        msg="[ASYNC DELEGATION COMPLETE x] internal handoff",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="m",
+        model_provider="p",
+        stream_id="stream-7882",
+        source="delegation_wakeup",
+    )
+
+    assert session.pending_user_source == "delegation_wakeup"
+
+
+def test_fork_session_still_stamps_ordinary_human_rows(monkeypatch, tmp_path):
+    """Ordinary fork-human rows keep the fork identity override."""
+    import api.routes as routes
+    from api.models import Session
+
+    session = Session(session_id="forkhuman7882", workspace=str(tmp_path))
+    session.session_source = "fork"
+    monkeypatch.setattr(routes, "get_webui_session_save_mode", lambda: "deferred")
+
+    routes._prepare_chat_start_session_for_stream(
+        session,
+        msg="a human prompt in a fork",
+        attachments=[],
+        workspace=str(tmp_path),
+        model="m",
+        model_provider="p",
+        stream_id="stream-7882b",
+        source="webui",
+    )
+
+    assert session.pending_user_source == "fork"
