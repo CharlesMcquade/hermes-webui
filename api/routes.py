@@ -24023,9 +24023,19 @@ def _prepare_chat_start_session_for_stream(
     a normal session message. Empty sessions are never saved here because this
     helper only runs after a non-empty message is validated.
     """
+    # The internal delegation producer's explicit ``delegation_wakeup`` stamp
+    # is ROW provenance: the hidden-row predicate keys on it, so a fork
+    # session's ``session_source`` ownership override must never clobber it —
+    # otherwise the handoff renders as a human bubble in a fork (#7882 gate
+    # review, finding 3). Ordinary fork-human rows keep the fork identity via
+    # ``_fork_child_turn``, which is stamped from ``session_source`` below.
+    _prompt_is_delegation_wakeup = str(source or "").strip().lower() == "delegation_wakeup"
     effective_source = (
         "fork"
-        if str(getattr(s, "session_source", None) or "").strip().lower() == "fork"
+        if (
+            str(getattr(s, "session_source", None) or "").strip().lower() == "fork"
+            and not _prompt_is_delegation_wakeup
+        )
         else source
     )
     s.workspace = workspace
