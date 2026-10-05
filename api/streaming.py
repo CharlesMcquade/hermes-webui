@@ -15644,14 +15644,39 @@ def _run_agent_streaming(
         # their run journal — if the tab closed before POST landed, the Steer
         # was gone from the settled transcript. This runs for completion,
         # cancellation, and error paths alike.
+        #
+        # #7188 re-gate must-fix 1: scene persistence targets the CONTINUATION
+        # session when mid-run compression re-keyed it (the RFC contract — the
+        # user is on the continuation after the 'compressed' event). The
+        # journal itself still lives under the ADMISSION id, so it is read
+        # from the original id and only the scene target follows the
+        # continuation. Without the split, the scene lands on the sealed
+        # parent's previous turn and the continuation never gets it.
         try:
             from api.routes import _persist_terminal_anchor_scene_from_journal
             from api.run_journal import read_run_events, select_authoritative_terminal_event
-            _settle_events = read_run_events(session_id, stream_id).get("events") or []
+            # Journal identity: the ADMISSION id (the journal lives there);
+            # scene target: the CONTINUATION id when compression re-keyed it.
+            # Both fall back to the worker's own session_id when no rotation
+            # happened. locals() guards against the early-exit paths that
+            # never reached the compression bookkeeping.
+            _settle_local_vars = locals()
+            _settle_journal_session_id = (
+                _settle_local_vars.get('_compression_origin_session_id') or session_id
+            )
+            _settle_target_session_id = (
+                _settle_local_vars.get('_compression_continuation_session_id')
+                or _settle_journal_session_id
+            )
+            _settle_events = read_run_events(
+                _settle_journal_session_id, stream_id
+            ).get("events") or []
             _terminal = select_authoritative_terminal_event(_settle_events)
             _terminal_state = _terminal.get("terminal_state") if _terminal else None
             _persist_terminal_anchor_scene_from_journal(
-                session_id, stream_id, terminal_state=_terminal_state
+                _settle_target_session_id,
+                stream_id,
+                terminal_state=_terminal_state,
             )
         except Exception:
             logger.debug(
@@ -16780,6 +16805,13 @@ def cancel_stream(stream_id: str) -> bool:
     # may still be unwinding). Settle the anchor scene here too so a cancelled
     # turn's Steer deliveries survive even if the tab closed before the
     # browser's scene POST landed.
+    #
+    # #7188 re-gate must-fix 1 (cancel path): the scene target is the session
+    # the user is actually on — _cancel_session_id, which resolves to
+    # agent.session_id (the compression continuation after a mid-run
+    # rotation) before falling back to the admission id. The journal is
+    # found by stream id (find_run_file globs every session dir), so reading
+    # it stays independent of the target choice.
     if _cancel_session_id:
         try:
             from api.routes import _persist_terminal_anchor_scene_from_journal

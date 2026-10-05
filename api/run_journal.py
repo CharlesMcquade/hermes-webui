@@ -442,40 +442,22 @@ def _append_run_event_locked(
     seq: int | None = None,
     created_at: float | None = None,
 ) -> dict:
-    if seq is not None:
-        assigned_seq = int(seq)
-        _note_assigned_seq(path, assigned_seq)
-    else:
-        assigned_seq = _reserve_next_seq(path)
-    terminal_state = _terminal_state_for_event(event_name, payload)
-    event = {
-        "version": 1,
-        "event_id": f"{run_id}:{assigned_seq}",
-        "seq": assigned_seq,
-        "run_id": str(run_id),
-        "session_id": str(session_id),
-        "event": event_name,
-        "type": event_name,
-        "created_at": float(created_at if created_at is not None else time.time()),
-        "terminal": bool(terminal_state),
-        "terminal_state": terminal_state,
-        "payload": payload,
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    created_file = not path.exists()
-    line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
-    fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-    with os.fdopen(fd, "a", encoding="utf-8") as fh:
-        fh.write(line)
-        fh.flush()
-        # A delivered Steer becomes user-visible durable conversation history
-        # immediately, before the run's next terminal fsync boundary.
-        if _should_fsync_event(terminal_state) or event_name == "steer_delivered":
-            os.fsync(fh.fileno())
-    _discard_cached_summary(path)
-    if created_file:
-        _fsync_parent_dir(path)
-    return event
+    """Append one event while the caller holds ``_lock_for(path)``.
+
+    Acceptance-fence writer transactions hold the per-path lock across
+    reserve->append->publish so SSE queue order cannot disagree with
+    journal seq; they call this lock-free engine entry directly.
+    """
+    payload = payload if payload is not None else {}
+    return _append_run_event_engine(
+        path,
+        session_id,
+        run_id,
+        event_name,
+        payload,
+        seq=seq,
+        created_at=created_at,
+    )
 
 
 def append_run_event(
@@ -495,84 +477,110 @@ def append_run_event(
     if not event_name:
         raise ValueError("event_name is required")
     with _lock_for(path):
-        key = str(path)
-        with _SEQ_CACHE_LOCK:
-            cached_next = _SEQ_CACHE.get(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        created_file = not path.exists()
-        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_RDWR, 0o600)
-        try:
-            with _journal_process_lock(fd, path):
-                # Inspect the same inode that will receive the write. Only a cold
-                # cache seeds/repairs from disk; ordinary appends stay O(1).
-                signature = _held_journal_signature(fd)
-                size = signature[2]
-                with _SEQ_CACHE_LOCK:
-                    if _SEQ_CACHE_SIGNATURES.get(key) != signature:
-                        cached_next = None
-                if cached_next is None:
-                    with os.fdopen(os.dup(fd), "rb") as fh:
-                        fh.seek(0)
-                        next_seq, repair_size, add_newline = _prepare_journal_append(
-                            fh, str(session_id), str(run_id), size,
-                        )
-                else:
-                    next_seq, repair_size, add_newline = cached_next, size, False
-                assigned_seq = int(seq) if seq is not None else next_seq
-                terminal_state = _terminal_state_for_event(event_name, payload)
-                event = {
-                    "version": 2,
-                    "event_id": f"{run_id}:{assigned_seq}",
-                    "seq": assigned_seq,
-                    "run_id": str(run_id),
-                    "session_id": str(session_id),
-                    "event": event_name,
-                    "type": event_name,
-                    "created_at": float(created_at if created_at is not None else time.time()),
-                    "terminal": bool(terminal_state),
-                    "terminal_state": terminal_state,
-                    "payload": payload,
-                }
-                # Encode before mutating the file or publishing a sequence. JSON's
-                # ASCII escapes preserve lone provider surrogates without losing a
-                # row or replacing content; normal Unicode stays readable on disk.
-                line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
-                try:
-                    encoded = line.encode("utf-8")
-                except UnicodeEncodeError:
-                    encoded = (json.dumps(event, ensure_ascii=True, separators=(",", ":")) + "\n").encode("utf-8")
-                if add_newline:
-                    encoded = b"\n" + encoded
-                try:
-                    if repair_size != size:
-                        os.ftruncate(fd, repair_size)
-                    remaining = memoryview(encoded)
-                    while remaining:
-                        written = os.write(fd, remaining)
-                        if written <= 0:
-                            raise OSError("run journal write made no progress")
-                        remaining = remaining[written:]
-                    if _should_fsync_event(terminal_state):
-                        os.fsync(fd)
-                except BaseException:
-                    # No buffered close can flush a partial row after this rollback.
-                    # Even if rollback itself fails, evict the cache so a later
-                    # append must inspect/repair the actual file before proceeding.
-                    with _SEQ_CACHE_LOCK:
-                        _SEQ_CACHE.pop(key, None)
-                        _SEQ_CACHE_SIGNATURES.pop(key, None)
-                    _discard_cached_summary(path)
+        return _append_run_event_engine(
+            path,
+            session_id,
+            run_id,
+            event_name,
+            payload,
+            seq=seq,
+            created_at=created_at,
+        )
+
+
+def _append_run_event_engine(
+    path: Path,
+    session_id: str,
+    run_id: str,
+    event_name: str,
+    payload,
+    *,
+    seq: int | None = None,
+    created_at: float | None = None,
+) -> dict:
+    """Append one durable event; caller must hold _lock_for(path)."""
+    key = str(path)
+    key = str(path)
+    with _SEQ_CACHE_LOCK:
+        cached_next = _SEQ_CACHE.get(key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    created_file = not path.exists()
+    fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_RDWR, 0o600)
+    try:
+        with _journal_process_lock(fd, path):
+            # Inspect the same inode that will receive the write. Only a cold
+            # cache seeds/repairs from disk; ordinary appends stay O(1).
+            signature = _held_journal_signature(fd)
+            size = signature[2]
+            with _SEQ_CACHE_LOCK:
+                if _SEQ_CACHE_SIGNATURES.get(key) != signature:
+                    cached_next = None
+            if cached_next is None:
+                with os.fdopen(os.dup(fd), "rb") as fh:
+                    fh.seek(0)
+                    next_seq, repair_size, add_newline = _prepare_journal_append(
+                        fh, str(session_id), str(run_id), size,
+                    )
+            else:
+                next_seq, repair_size, add_newline = cached_next, size, False
+            assigned_seq = int(seq) if seq is not None else next_seq
+            terminal_state = _terminal_state_for_event(event_name, payload)
+            event = {
+                "version": 2,
+                "event_id": f"{run_id}:{assigned_seq}",
+                "seq": assigned_seq,
+                "run_id": str(run_id),
+                "session_id": str(session_id),
+                "event": event_name,
+                "type": event_name,
+                "created_at": float(created_at if created_at is not None else time.time()),
+                "terminal": bool(terminal_state),
+                "terminal_state": terminal_state,
+                "payload": payload,
+            }
+            # Encode before mutating the file or publishing a sequence. JSON's
+            # ASCII escapes preserve lone provider surrogates without losing a
+            # row or replacing content; normal Unicode stays readable on disk.
+            line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+            try:
+                encoded = line.encode("utf-8")
+            except UnicodeEncodeError:
+                encoded = (json.dumps(event, ensure_ascii=True, separators=(",", ":")) + "\n").encode("utf-8")
+            if add_newline:
+                encoded = b"\n" + encoded
+            try:
+                if repair_size != size:
                     os.ftruncate(fd, repair_size)
-                    raise
+                remaining = memoryview(encoded)
+                while remaining:
+                    written = os.write(fd, remaining)
+                    if written <= 0:
+                        raise OSError("run journal write made no progress")
+                    remaining = remaining[written:]
+                # A delivered Steer becomes user-visible durable conversation
+                # history immediately, before the run's next terminal fsync
+                # boundary.
+                if _should_fsync_event(terminal_state) or event_name == "steer_delivered":
+                    os.fsync(fd)
+            except BaseException:
+                # No buffered close can flush a partial row after this rollback.
+                # Even if rollback itself fails, evict the cache so a later
+                # append must inspect/repair the actual file before proceeding.
                 with _SEQ_CACHE_LOCK:
-                    _SEQ_CACHE[key] = max(next_seq, assigned_seq + 1)
-                    _SEQ_CACHE_SIGNATURES[key] = _held_journal_signature(fd)
+                    _SEQ_CACHE.pop(key, None)
+                    _SEQ_CACHE_SIGNATURES.pop(key, None)
                 _discard_cached_summary(path)
-        finally:
-            os.close(fd)
-        if created_file:
-            _fsync_parent_dir(path)
-        return event
+                os.ftruncate(fd, repair_size)
+                raise
+            with _SEQ_CACHE_LOCK:
+                _SEQ_CACHE[key] = max(next_seq, assigned_seq + 1)
+                _SEQ_CACHE_SIGNATURES[key] = _held_journal_signature(fd)
+            _discard_cached_summary(path)
+    finally:
+        os.close(fd)
+    if created_file:
+        _fsync_parent_dir(path)
+    return event
 
 
 class RunJournalWriter:
