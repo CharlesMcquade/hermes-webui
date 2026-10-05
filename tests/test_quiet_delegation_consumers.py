@@ -20,9 +20,29 @@ Every consumer calls the one shared predicate
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from api.process_event_utils import is_hidden_transcript_row
+
+_ROOT = Path(__file__).resolve().parents[1]
+SESSIONS_SRC = (_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+
+
+def _function_body(src: str, signature: str) -> str:
+    start = src.index(signature)
+    brace = src.index("{", start)
+    depth = 0
+    for idx in range(brace, len(src)):
+        char = src[idx]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : idx + 1]
+    raise AssertionError(f"could not extract function body for {signature!r}")
 
 
 def _hidden_row(**extra):
@@ -793,3 +813,319 @@ def test_fork_session_still_stamps_ordinary_human_rows(monkeypatch, tmp_path):
     )
 
     assert session.pending_user_source == "fork"
+
+
+# ── Re-gate round: sanitized compression copies + fork regeneration ────────
+
+
+def _sanitized_re_stamped_shape(session, tmp_path, sid, *, target_last=False):
+    """Build a session whose context holds the exact shape manual compression
+    stores: sanitized copies (``id``/``timestamp`` stripped by the API-safe
+    key set) re-stamped with fresh wall-clock times by the compression
+    writeback. The selected display turn's text survives; its identity
+    does not."""
+    from api.models import Session
+
+    return Session(
+        session_id=sid,
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "real question"},
+            _hidden_row(),
+            {"role": "assistant", "content": "child result summary"},
+        ],
+        # Manual-compression shape: the summary user is a SANITIZED copy of an
+        # earlier turn (no id), and every row carries a FRESH re-stamped
+        # timestamp that cannot equal the display rows'.
+        context_messages=[
+            {"role": "user", "content": "old question", "timestamp": 1781024000.0},
+            {"role": "assistant", "content": "old answer", "timestamp": 1781024001.0},
+            {"role": "user", "content": "real question", "timestamp": 1781024002.0},
+            _hidden_row(timestamp=1781024003.0),
+            {"role": "assistant", "content": "child result summary", "timestamp": 1781024004.0},
+        ],
+    )
+
+
+@pytest.mark.parametrize("op", ["retry", "undo"])
+def test_retry_undo_after_manual_compression_keeps_summary_cuts_suffix(
+    monkeypatch, tmp_path, op
+):
+    """Re-gate must-fix 1: manual compression stores sanitized id-less copies
+    of the display rows and re-stamps them with fresh timestamps. The old
+    matcher treated two present-but-different timestamps as a non-match, so
+    nothing ever matched and the fallback cleared the WHOLE context. With the
+    sanitized, re-stamped shape the content match must still cut before the
+    selected turn — keeping the compression summary prefix in context."""
+    import contextlib
+
+    import api.session_ops as session_ops
+
+    session = _sanitized_re_stamped_shape(
+        None, tmp_path, f"{op}comp7882"
+    )
+    saved = []
+    session.save = lambda *args, **kwargs: saved.append(True)
+    monkeypatch.setattr(session_ops, "get_session", lambda sid: session)
+    monkeypatch.setattr(session_ops, "SESSIONS", {session.session_id: session})
+    monkeypatch.setattr(
+        session_ops, "_get_session_agent_lock", lambda sid: contextlib.nullcontext()
+    )
+
+    getattr(session_ops, f"{op}_last")(session.session_id)
+
+    # Display history cut at the selected visible turn (unchanged).
+    assert [m["content"] for m in session.messages] == [
+        "old question",
+        "old answer",
+    ]
+    # The content match cuts BEFORE the selected turn: the summary prefix
+    # survives and the suffix (hidden handoff + reply) is gone.
+    assert [m["content"] for m in session.context_messages] == [
+        "old question",
+        "old answer",
+    ]
+    assert saved
+
+
+@pytest.mark.parametrize("op", ["retry", "undo"])
+def test_retry_undo_unmatched_context_cuts_suffix_not_everything(
+    monkeypatch, tmp_path, op
+):
+    """Re-gate must-fix 1 (fallback shape): when the selected turn truly is
+    absent from context (compression dropped it), the fallback must cut before
+    the context's own last user row — hidden rows included — instead of
+    clearing everything, so earlier context survives while the removed suffix
+    (handoff + reply) cannot reach the next send."""
+    import contextlib
+
+    import api.session_ops as session_ops
+    from api.models import Session
+
+    session = Session(
+        session_id=f"{op}fallback7882",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "real question"},
+            _hidden_row(),
+            {"role": "assistant", "content": "child result summary"},
+        ],
+        # Manual-compression shape: the selected "real question" turn was
+        # dropped, but the compressed tail RETAINS the hidden handoff + its
+        # reply after the summary user. Master's fallback cut before the
+        # context's own last user row (the hidden handoff) and so preserved
+        # the summary; this head's old fallback cleared everything.
+        context_messages=[
+            {"role": "user", "content": "compression summary of earlier turns"},
+            {"role": "assistant", "content": "working on it"},
+            _hidden_row(),
+            {"role": "assistant", "content": "child result summary"},
+        ],
+    )
+    saved = []
+    session.save = lambda *args, **kwargs: saved.append(True)
+    monkeypatch.setattr(session_ops, "get_session", lambda sid: session)
+    monkeypatch.setattr(session_ops, "SESSIONS", {session.session_id: session})
+    monkeypatch.setattr(
+        session_ops, "_get_session_agent_lock", lambda sid: contextlib.nullcontext()
+    )
+
+    getattr(session_ops, f"{op}_last")(session.session_id)
+
+    # The summary (and its assistant line) survive as context; the cut lands
+    # before the context's own last user row — the hidden handoff — so the
+    # removed suffix (handoff + reply) cannot reach the next send.
+    assert [m["content"] for m in session.context_messages] == [
+        "compression summary of earlier turns",
+        "working on it",
+    ]
+    assert saved
+
+
+@pytest.mark.parametrize("op", ["retry", "undo"])
+def test_retry_undo_different_id_same_text_is_not_a_match(monkeypatch, tmp_path, op):
+    """Greptile P1: a LATER user row that repeats the selected turn's text but
+    carries a different id is a different turn — it must not capture the cut,
+    or /retry would leave the removed turn in context. With ids on both rows
+    the id mismatch vetoes the content match, and the fallback cuts before the
+    context's own last user row (which here is that later row itself)."""
+    import contextlib
+
+    import api.session_ops as session_ops
+    from api.models import Session
+
+    session = Session(
+        session_id=f"{op}wrongturn7882",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "same text", "id": "msg-display-1"},
+            _hidden_row(),
+            {"role": "assistant", "content": "child result summary"},
+        ],
+        context_messages=[
+            {"role": "user", "content": "same text", "id": "msg-display-1",
+             "timestamp": 1781024000.0},
+            {"role": "user", "content": "same text", "id": "msg-later-2",
+             "timestamp": 1781024005.0},
+            {"role": "assistant", "content": "child result summary"},
+        ],
+    )
+    saved = []
+    session.save = lambda *args, **kwargs: saved.append(True)
+    monkeypatch.setattr(session_ops, "get_session", lambda sid: session)
+    monkeypatch.setattr(session_ops, "SESSIONS", {session.session_id: session})
+    monkeypatch.setattr(
+        session_ops, "_get_session_agent_lock", lambda sid: contextlib.nullcontext()
+    )
+
+    getattr(session_ops, f"{op}_last")(session.session_id)
+
+    # The id mismatch vetoes the later same-text row, so the cut lands on the
+    # TRUE selected turn (the first row, matched by id) — not on the later
+    # duplicate. Everything after the selected turn is removed, including the
+    # duplicate row the Greptile P1 warned about.
+    assert session.context_messages == []
+    assert saved
+
+
+def test_fork_wakeup_turn_settles_with_fork_ownership_proof():
+    """Re-gate must-fix 2: after an async delegation completes in a fork, the
+    settled wakeup row must carry ``_fork_child_turn`` (fork ownership proof
+    regeneration requires) WHILE keeping ``_source: delegation_wakeup`` (the
+    hidden-row predicate). Without it regeneration returns
+    ``regeneration_read_only`` in both eager and deferred modes."""
+    from api.streaming import _materialize_active_turn_user, _settle_current_turn_boundary
+
+    identity = {
+        "session_id": "fork-child-7882",
+        "session_source": "fork",
+        "fork_session_id": "fork-child-7882",
+        "source": "delegation_wakeup",
+        "text": "[ASYNC DELEGATION COMPLETE d1] internal handoff",
+        "timestamp": 1781024055.0,
+        "token": "stream-x:1781024055",
+        "attachments": [],
+        "checkpoint": None,
+        "current_turn_user_idx": None,
+        "turn_id": "",
+    }
+
+    materialized = _materialize_active_turn_user(
+        identity,
+        identity["text"],
+        "delegation_wakeup",
+    )
+    assert materialized["_source"] == "delegation_wakeup"
+    assert materialized["_fork_child_turn"] == "fork-child-7882"
+
+    settled = _settle_current_turn_boundary(
+        [],
+        [{"role": "assistant", "content": "child answer"}],
+        identity,
+        identity["text"],
+        "delegation_wakeup",
+    )
+    user_rows = [m for m in settled if isinstance(m, dict) and m.get("role") == "user"]
+    assert len(user_rows) == 1
+    assert user_rows[0]["_source"] == "delegation_wakeup"
+    assert user_rows[0]["_fork_child_turn"] == "fork-child-7882"
+
+
+def test_ordinary_webui_wakeup_materialization_unchanged():
+    """The fork-ownership branch must not leak into non-fork sessions."""
+    from api.streaming import _materialize_active_turn_user
+
+    identity = {
+        "session_id": "webui-7882",
+        "session_source": "webui",
+        "fork_session_id": None,
+        "source": "delegation_wakeup",
+        "text": "[ASYNC DELEGATION COMPLETE d2] internal handoff",
+        "timestamp": 1781024056.0,
+        "token": "stream-y:1781024056",
+        "attachments": [],
+        "checkpoint": None,
+        "current_turn_user_idx": None,
+        "turn_id": "",
+    }
+    row = _materialize_active_turn_user(identity, identity["text"], "delegation_wakeup")
+    assert row["_source"] == "delegation_wakeup"
+    assert "_fork_child_turn" not in row
+
+
+def test_sidebar_state_db_overlay_bumps_visible_count_with_raw_growth():
+    """Re-gate should-fix 3: detailed sidebar counts must follow state.db
+    growth. When the state.db count advances past the sidecar's, the visible
+    count rides along (monotone raw-delta bump) instead of staying stale."""
+    from api.models import _apply_sidebar_state_db_override_metadata
+
+    sessions = [
+        {
+            "session_id": "growth7882",
+            "message_count": 2,
+            "visible_message_count": 2,
+            "last_message_at": 1781024000.0,
+            "updated_at": 1781024000.0,
+        }
+    ]
+    metadata = {
+        "growth7882": {
+            "_state_db_source": "webui",
+            "_state_db_message_count": 4,
+            "_state_db_last_message_at": 1781024010.0,
+        }
+    }
+    _apply_sidebar_state_db_override_metadata(sessions, metadata)
+
+    assert sessions[0]["message_count"] == 4
+    # Two new state.db rows: visible follows the growth (no hidden rows known).
+    assert sessions[0]["visible_message_count"] == 4
+
+
+def test_sidebar_state_db_overlay_leaves_absent_visible_count_absent():
+    """Legacy rows without a visible count keep the raw-count fallback."""
+    from api.models import _apply_sidebar_state_db_override_metadata
+
+    sessions = [
+        {
+            "session_id": "legacy7882",
+            "message_count": 2,
+            "last_message_at": 1781024000.0,
+            "updated_at": 1781024000.0,
+        }
+    ]
+    metadata = {
+        "legacy7882": {
+            "_state_db_source": "webui",
+            "_state_db_message_count": 6,
+            "_state_db_last_message_at": 1781024010.0,
+        }
+    }
+    _apply_sidebar_state_db_override_metadata(sessions, metadata)
+
+    assert sessions[0]["message_count"] == 6
+    assert "visible_message_count" not in sessions[0]
+
+
+def test_local_send_bumps_visible_count_with_raw_count():
+    """Re-gate should-fix 4: a local send that advances the raw count must
+    advance the visible count too, or the topbar/sidebar label stays stale
+    until the next refresh."""
+    # The function's destructured parameter list contains braces, so a naive
+    # brace-depth extractor mis-pairs; slice to the next top-level function.
+    start = SESSIONS_SRC.index("function upsertActiveSessionForLocalTurn")
+    end = SESSIONS_SRC.index("function _sessionRowsWithActiveEphemeralSession", start)
+    body = SESSIONS_SRC[start:end]
+
+    # The visible-count bump must exist and must be guarded on a present,
+    # non-negative server value (absent value keeps the fallback contract).
+    assert "visible_message_count" in body
+    assert "typeof S.session.visible_message_count==='number'" in body
+    # The raw count assignment must precede the visible bump (same mutation).
+    assert body.index("S.session.message_count=count;") < body.index(
+        "visible_message_count"
+    )

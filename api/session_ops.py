@@ -606,8 +606,18 @@ def _truncate_context_before_row(context_messages, target_row):
 
     Returns the truncated list, or None when the selected turn cannot be
     proved present in context (compression already dropped it or everything
-    after it): the caller then clears the later context so the next send
-    cannot carry the removed turn.
+    after it): the caller then cuts before the context's own last user row
+    so the removed suffix cannot reach the next send.
+
+    Matching is identity-first (message id), then content, then timestamp.
+    Two rows that BOTH carry ids are different turns when the ids differ —
+    a later user row that repeats the selected turn's text must never
+    capture the cut (greptile P1). Rows with NO id are the sanitized copies
+    manual compression stores: their id/timestamp identity is gone (the
+    sanitize key set drops both, and the writeback re-stamps fresh
+    wall-clock times), so content is the only surviving identity and a
+    content match is accepted even when timestamps disagree (#7882 re-gate
+    must-fix 1).
     """
     history = context_messages if isinstance(context_messages, list) else []
     if not isinstance(target_row, dict):
@@ -620,10 +630,17 @@ def _truncate_context_before_row(context_messages, target_row):
         if not isinstance(row, dict) or row.get('role') != 'user':
             continue
         row_id = row.get('id') or row.get('message_id')
+        if target_id is not None and row_id is not None and row_id != target_id:
+            continue
         if target_id is not None and row_id == target_id:
             return history[:i]
         if _extract_text(row.get('content', '')) != target_text:
             continue
+        if row_id is None and target_id is not None:
+            # Id-less context row (sanitized compression copy): content is
+            # the only surviving identity; the fresh re-stamped timestamp
+            # must not veto the match.
+            return history[:i]
         row_ts = row.get('timestamp')
         if target_ts is not None and row_ts is not None:
             if row_ts == target_ts:
@@ -631,6 +648,24 @@ def _truncate_context_before_row(context_messages, target_row):
             continue
         return history[:i]
     return None
+
+
+def _context_prefix_before_last_user(context_messages):
+    """Cut before the context's own last user row (fallback truncation).
+
+    The retry/undo fallback for a selected turn that cannot be proved
+    present in context. Cutting before the LAST user row — hidden
+    delegation rows included — keeps earlier context (e.g. the compression
+    summary user) instead of clearing everything, while still removing the
+    tail that could carry the hidden handoff's reply (the earlier request
+    was to clear the removed suffix, not the whole context).
+    """
+    history = context_messages if isinstance(context_messages, list) else []
+    for i in range(len(history) - 1, -1, -1):
+        row = history[i]
+        if isinstance(row, dict) and row.get('role') == 'user':
+            return history[:i]
+    return []
 
 
 def _truncation_watermark_for(messages):
@@ -1042,13 +1077,18 @@ def retry_last(session_id: str) -> dict[str, Any]:
                     s.context_messages = truncated_context
                 else:
                     # The selected visible human turn is not in model context
-                    # any more (compression already dropped it or everything
-                    # after it). Cutting only at the context's own last user
-                    # row would LEAVE the hidden delegation handoff and its
-                    # reply in context while the display transcript lost them
-                    # (gate review finding 2). Fail closed: clear the later
-                    # context so the next send cannot carry the removed turn.
-                    s.context_messages = []
+                    # any more (e.g. a manual compression stored sanitized
+                    # id-less copies and re-stamped fresh timestamps, and
+                    # nothing matched). Cutting only at the context's own last
+                    # user row would LEAVE the hidden delegation handoff and
+                    # its reply in context while the display transcript lost
+                    # them (gate review finding 2). Cut before the context's
+                    # own last user row — hidden rows included — so the removed
+                    # suffix (handoff + reply) cannot reach the next send while
+                    # the earlier summary context survives (#7882 re-gate).
+                    s.context_messages = _context_prefix_before_last_user(
+                        s.context_messages
+                    )
         s.save()
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
@@ -1101,12 +1141,15 @@ def undo_last(session_id: str) -> dict[str, Any]:
                 if truncated_context is not None:
                     s.context_messages = truncated_context
                 else:
-                    # Same compressed-history fail-closed rule as retry_last:
-                    # the removed visible turn is already gone from model
-                    # context, so clearing the later context is the only way
-                    # to keep the hidden delegation handoff out of the next
-                    # send (gate review finding 2).
-                    s.context_messages = []
+                    # Same compressed-history fallback as retry_last: the
+                    # removed visible turn cannot be proved present in model
+                    # context, so cutting before the context's own last user
+                    # row — hidden rows included — is the way to keep the
+                    # hidden delegation handoff out of the next send without
+                    # discarding the surviving summary context (#7882 re-gate).
+                    s.context_messages = _context_prefix_before_last_user(
+                        s.context_messages
+                    )
         s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
     preview = (removed_text[:40] + '...') if len(removed_text) > 40 else removed_text
     return {

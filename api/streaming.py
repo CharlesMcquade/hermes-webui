@@ -2156,6 +2156,16 @@ def _active_turn_authority(session, stream_id, msg_text):
     )
     return {
         'session_id': getattr(session, 'session_id', None),
+        # #7882 re-gate: fork-ownership context for delegation_wakeup turns —
+        # the row stamp keeps the typed _source, but the _fork_child_turn
+        # ownership proof regeneration requires is derived from the session's
+        # fork identity, not the row source.
+        'session_source': getattr(session, 'session_source', None),
+        'fork_session_id': (
+            getattr(session, 'session_id', None)
+            if str(getattr(session, 'session_source', None) or '').strip().lower() == 'fork'
+            else None
+        ),
         'token': token,
         'text': pending_text if pending_text is not None else msg_text,
         'timestamp': getattr(session, 'pending_started_at', None),
@@ -2183,6 +2193,13 @@ def _resolve_active_turn_authority(identity, *, result=None, agent=None):
     resolved = dict(identity)
     resolved.pop('agent_turn_boundary_resolved', None)
     resolved.pop('agent_turn_boundary_source', None)
+    # Preserve the fork-ownership context (#7882 re-gate): a delegation_wakeup
+    # turn inside a fork session derives its _fork_child_turn proof from these
+    # fields at materialization/settlement time.
+    if 'session_source' not in resolved:
+        resolved['session_source'] = None
+    if 'fork_session_id' not in resolved:
+        resolved['fork_session_id'] = None
 
     # Treat the boundary as one coherent pair. In particular, do not retain the
     # failed Agent instance's index/turn when credential self-heal creates a
@@ -2442,8 +2459,22 @@ def _materialize_active_turn_user(identity, msg_text, source):
             identity.get('source') or source or 'webui',
             active_turn_token=identity.get('token'),
         )
-        if str(identity.get('source') or source or '').strip().lower() == 'fork':
+        _settle_source = str(identity.get('source') or source or '').strip().lower()
+        if _settle_source == 'fork':
             child_session_id = identity.get('session_id')
+            if child_session_id:
+                message['_fork_child_turn'] = child_session_id
+        elif (
+            _settle_source == 'delegation_wakeup'
+            and str(identity.get('session_source') or '').strip().lower() == 'fork'
+        ):
+            # A delegation wakeup INSIDE a fork session: the row's _source stays
+            # delegation_wakeup (the hidden-row predicate keys on it), but the
+            # fork-ownership proof regeneration authorization requires rides on
+            # _fork_child_turn (#7882 re-gate must-fix 2 — without it every
+            # regeneration after an async delegation completes in a fork
+            # returns regeneration_read_only).
+            child_session_id = identity.get('session_id') or identity.get('fork_session_id')
             if child_session_id:
                 message['_fork_child_turn'] = child_session_id
     else:
@@ -2484,8 +2515,19 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
             _settle_source,
             active_turn_token=identity.get('token'),
         )
-        if str(_settle_source).strip().lower() == 'fork':
+        _settle_source_lower = str(_settle_source).strip().lower()
+        if _settle_source_lower == 'fork':
             child_session_id = identity.get('session_id')
+            if child_session_id:
+                existing_checkpoint['_fork_child_turn'] = child_session_id
+        elif (
+            _settle_source_lower == 'delegation_wakeup'
+            and str(identity.get('session_source') or '').strip().lower() == 'fork'
+        ):
+            # Fork-internal delegation wakeup (see _materialize_active_turn_user):
+            # keep _source = delegation_wakeup for hiding, but carry the fork
+            # ownership proof so regeneration stays authorized (#7882 re-gate).
+            child_session_id = identity.get('session_id') or identity.get('fork_session_id')
             if child_session_id:
                 existing_checkpoint['_fork_child_turn'] = child_session_id
         if isinstance(checkpoint, dict):
@@ -10166,6 +10208,13 @@ def _materialize_pending_user_turn_before_error(
         '_recovered': True,
     }
     if str(pending_source or '').strip().lower() == 'fork':
+        recovered['_fork_child_turn'] = session.session_id
+    elif (
+        str(pending_source or '').strip().lower() == 'delegation_wakeup'
+        and str(getattr(session, 'session_source', None) or '').strip().lower() == 'fork'
+    ):
+        # Fork-internal delegation wakeup: keep the typed _source for hiding but
+        # carry the fork-ownership proof regeneration requires (#7882 re-gate).
         recovered['_fork_child_turn'] = session.session_id
     stamp_message_source(recovered, pending_source)
     if pending_attachments:

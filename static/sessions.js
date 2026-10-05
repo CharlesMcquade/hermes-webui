@@ -8282,6 +8282,14 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
   const localCount=Array.isArray(S.messages)?S.messages.length:0;
   const count=Math.max(Number(S.session.message_count||0),Number(messageCount||0),localCount,1);
   S.session.message_count=count;
+  // #7882 re-gate should-fix 4: the topbar and sidebar now prefer the visible
+  // count, so a local send that bumps only the raw count leaves a stale label
+  // until the next refresh. A locally submitted turn is always visible, so
+  // bump both together. When the server has not sent a visible total yet,
+  // leave it absent so the renderer's raw-count fallback applies.
+  if(typeof S.session.visible_message_count==='number'&&S.session.visible_message_count>=0){
+    S.session.visible_message_count=Math.max(S.session.visible_message_count+1,count);
+  }
   S.session.last_message_at=nowSec;
   S.session.updated_at=nowSec;
   if((S.session.title==='Untitled'||!S.session.title)&&title){
