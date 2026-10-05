@@ -521,6 +521,194 @@ def test_terminal_settlement_no_scene_for_empty_journal(
     assert result is False
 
 
+# ── #7188 re-gate must-fix 1: mid-run compression scene target ───────────────
+
+
+def test_terminal_settlement_targets_continuation_after_compression(
+    isolated_steer_state,
+    tmp_path,
+    monkeypatch,
+):
+    """Re-gate must-fix 1: a run compressed mid-turn re-keys the session
+    (s.session_id = continuation, recorded in the compression bookkeeping).
+    The worker's terminal settlement must persist the journal scene onto the
+    CONTINUATION session — where the user actually is after the 'compressed'
+    event — while the journal itself still lives under the admission id.
+
+    Before the fix the settlement passed the worker's original ``session_id``,
+    so the scene landed on the sealed parent and the continuation never got
+    it. This test drives the real settlement seam with the compression state
+    the worker would hold and asserts the target split.
+    """
+    from api import routes, streaming
+
+    sid = "compression_settle_parent"
+    continuation_sid = "compression_settle_continuation"
+    stream_id = "compression_settle_run"
+
+    # Real journal under the ADMISSION id (the immutable journal identity).
+    run_journal.append_run_event(
+        sid, stream_id, "steer_delivered",
+        {"text": "steer text", "status": "delivered", "created_at": time.time()},
+        session_dir=tmp_path,
+    )
+    run_journal.append_run_event(
+        sid, stream_id, "done", {"session": {}}, session_dir=tmp_path,
+    )
+
+    # Continuation session holds the transcript the scene must attach to.
+    continuation_session = MagicMock()
+    continuation_session.session_id = continuation_sid
+    continuation_session.anchor_activity_scenes = {}
+    continuation_session.messages = [
+        {"role": "assistant", "content": "final answer", "timestamp": int(time.time())},
+    ]
+    continuation_session.save = MagicMock(return_value=True)
+    models_sessions = {continuation_sid: continuation_session}
+
+    captured = {}
+    real_settlement = routes._persist_terminal_anchor_scene_from_journal
+
+    def _recording_settlement(session_id, stream_id_arg, **kwargs):
+        captured["target"] = session_id
+        with patch.object(routes, "get_session", side_effect=lambda s: models_sessions[s]), \
+             patch.object(routes, "find_run_summary", return_value={
+                 "session_id": sid,
+                 "run_id": stream_id,
+                 "last_seq": 2,
+                 "last_event_id": f"{stream_id}:2",
+             }), \
+             patch.object(routes, "read_run_events", return_value={
+                 "session_id": sid,
+                 "run_id": stream_id,
+                 "events": run_journal.read_run_events(
+                     sid, stream_id, session_dir=tmp_path
+                 )["events"],
+                 "malformed": False,
+             }):
+            return real_settlement(session_id, stream_id_arg, **kwargs)
+
+    monkeypatch.setattr(
+        routes, "_persist_terminal_anchor_scene_from_journal", _recording_settlement
+    )
+
+    # Simulate the worker's post-compression locals through the REAL finally
+    # block: build a tiny function with the same settlement block the worker
+    # runs, holding the compression bookkeeping the mid-run rotation leaves.
+    import inspect
+    src = inspect.getsource(streaming)
+    marker = "# ── #7188 rework: server-side terminal settlement"
+    block = src[src.index(marker):]
+    block = block[:block.index("# ── Defer-path fix")]
+    assert "_compression_continuation_session_id" in block, (
+        "settlement block must consult the compression continuation id"
+    )
+
+    # Execute the extracted settlement block with the worker's locals.
+    namespace = {
+        "session_id": sid,               # worker's original session id
+        "stream_id": stream_id,
+        "_compression_origin_session_id": sid,
+        "_compression_continuation_session_id": continuation_sid,
+        "logger": streaming.logger,
+    }
+    block_code = "\n".join(
+        line[8:] if line.startswith("        ") else line
+        for line in block.splitlines()
+    )
+    exec(compile(block_code, "<settlement-block>", "exec"), namespace)
+
+    # The scene target must be the CONTINUATION, not the sealed parent.
+    assert captured["target"] == continuation_sid, (
+        "terminal settlement must target the continuation session after a "
+        "mid-run compression, not the sealed parent"
+    )
+    # And the scene actually persisted onto the continuation session.
+    assert continuation_session.save.called
+    records = continuation_session.anchor_activity_scenes
+    assert len(records) == 1
+    record = list(records.values())[0]
+    assert record["stream_id"] == stream_id
+    steer_rows = [
+        r for r in record["scene"]["activity_rows"]
+        if r.get("source_event_type") == "steer_delivered"
+    ]
+    assert len(steer_rows) == 1, "the steered run's scene must carry the steer row"
+
+
+def test_terminal_settlement_unchanged_without_compression(
+    isolated_steer_state,
+    tmp_path,
+    monkeypatch,
+):
+    """No mid-run compression: settlement targets the worker's own session id
+    (the journal lives under it too) — behavior identical to the pre-regate
+    contract."""
+    from api import routes, streaming
+    import inspect
+
+    sid = "nocompression_settle_sid"
+    stream_id = "nocompression_settle_run"
+
+    run_journal.append_run_event(
+        sid, stream_id, "steer_delivered",
+        {"text": "steer text", "status": "delivered", "created_at": time.time()},
+        session_dir=tmp_path,
+    )
+    run_journal.append_run_event(
+        sid, stream_id, "done", {"session": {}}, session_dir=tmp_path,
+    )
+
+    mock_session = MagicMock()
+    mock_session.session_id = sid
+    mock_session.anchor_activity_scenes = {}
+    mock_session.messages = [
+        {"role": "assistant", "content": "final answer", "timestamp": int(time.time())},
+    ]
+    mock_session.save = MagicMock(return_value=True)
+
+    src = inspect.getsource(streaming)
+    marker = "# ── #7188 rework: server-side terminal settlement"
+    block = src[src.index(marker):]
+    block = block[:block.index("# ── Defer-path fix")]
+
+    namespace = {
+        "session_id": sid,
+        "stream_id": stream_id,
+        # No compression bookkeeping locals — early-exit path shape.
+        "logger": streaming.logger,
+    }
+    block_code = "\n".join(
+        line[8:] if line.startswith("        ") else line
+        for line in block.splitlines()
+    )
+    with patch.object(routes, "get_session", return_value=mock_session), \
+         patch.object(routes, "find_run_summary", return_value={
+             "session_id": sid,
+             "run_id": stream_id,
+             "last_seq": 2,
+             "last_event_id": f"{stream_id}:2",
+         }), \
+         patch.object(routes, "read_run_events", return_value={
+             "session_id": sid,
+             "run_id": stream_id,
+             "events": run_journal.read_run_events(
+                 sid, stream_id, session_dir=tmp_path
+             )["events"],
+             "malformed": False,
+         }), \
+         patch.object(routes, "_get_session_agent_lock") as _lock_ctx:
+        _lock_ctx.return_value.__enter__ = MagicMock()
+        _lock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+        exec(compile(block_code, "<settlement-block>", "exec"), namespace)
+
+    assert mock_session.save.called
+    records = mock_session.anchor_activity_scenes
+    assert len(records) == 1
+    record = list(records.values())[0]
+    assert record["stream_id"] == stream_id
+
+
 # ── #7188 re-gate: deterministic concurrency/lifecycle tests ──────────────────
 
 
