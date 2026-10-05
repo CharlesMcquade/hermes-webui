@@ -8281,14 +8281,23 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
   const nowSec=Math.floor((Number(timestampMs)||Date.now())/1000);
   const localCount=Array.isArray(S.messages)?S.messages.length:0;
   const count=Math.max(Number(S.session.message_count||0),Number(messageCount||0),localCount,1);
+  // #7882 re-gate (greptile follow-up): send() calls this updater up to twice
+  // per send (initial optimistic pass + provisional-title pass), so the count
+  // bump must be IDEMPOTENT per send — derive from the authoritative local
+  // transcript length instead of incrementing a cached scalar. A turn already
+  // present in S.messages adds nothing; a fresh optimistic turn adds exactly
+  // one visible row. Hidden delegation rows are the only messages that don't
+  // render, and those never originate from a local send.
+  const localVisible=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m.role!=='tool'&&m._source!=='delegation_wakeup').length;
   S.session.message_count=count;
   // #7882 re-gate should-fix 4: the topbar and sidebar now prefer the visible
   // count, so a local send that bumps only the raw count leaves a stale label
-  // until the next refresh. A locally submitted turn is always visible, so
-  // bump both together. When the server has not sent a visible total yet,
-  // leave it absent so the renderer's raw-count fallback applies.
+  // until the next refresh. Derive the visible count the same way (local
+  // transcript authority, never double-counting the second updater call).
+  // When the server has not sent a visible total yet, leave it absent so the
+  // renderer's raw-count fallback applies.
   if(typeof S.session.visible_message_count==='number'&&S.session.visible_message_count>=0){
-    S.session.visible_message_count=Math.max(S.session.visible_message_count+1,count);
+    S.session.visible_message_count=Math.max(S.session.visible_message_count,localVisible,count);
   }
   S.session.last_message_at=nowSec;
   S.session.updated_at=nowSec;

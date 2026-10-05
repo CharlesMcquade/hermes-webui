@@ -1114,7 +1114,9 @@ def test_sidebar_state_db_overlay_leaves_absent_visible_count_absent():
 def test_local_send_bumps_visible_count_with_raw_count():
     """Re-gate should-fix 4: a local send that advances the raw count must
     advance the visible count too, or the topbar/sidebar label stays stale
-    until the next refresh."""
+    until the next refresh. The bump must be IDEMPOTENT per send — send()
+    calls the updater up to twice (optimistic pass + provisional-title pass),
+    so one send must not raise the total twice."""
     # The function's destructured parameter list contains braces, so a naive
     # brace-depth extractor mis-pairs; slice to the next top-level function.
     start = SESSIONS_SRC.index("function upsertActiveSessionForLocalTurn")
@@ -1125,6 +1127,15 @@ def test_local_send_bumps_visible_count_with_raw_count():
     # non-negative server value (absent value keeps the fallback contract).
     assert "visible_message_count" in body
     assert "typeof S.session.visible_message_count==='number'" in body
+    # Idempotency: the bump must derive from a length authority, not
+    # increment the cached scalar (a "+1" increment double-counts the
+    # second updater call within one send).
+    assert "visible_message_count+1" not in body, (
+        "the visible bump must not increment the cached scalar — send() "
+        "calls this updater twice per send and one message would raise the "
+        "topbar/sidebar totals twice (greptile P2)"
+    )
+    assert "localVisible" in body
     # The raw count assignment must precede the visible bump (same mutation).
     assert body.index("S.session.message_count=count;") < body.index(
         "visible_message_count"

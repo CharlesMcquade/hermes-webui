@@ -7801,13 +7801,14 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
                     existing_actual = 0
                 session['message_count'] = state_count
                 session['actual_message_count'] = max(state_count, existing_actual)
-                # #7882 re-gate should-fix 3: the visible count must follow the
-                # raw total when state.db outgrows the sidecar. The overlay
-                # cannot know which new rows are hidden, so the conservative
-                # monotone bound is: visible = max(old_visible, raw_delta).
-                # Ordinary turns add only visible rows, so this matches the
-                # true count; a hidden handoff would over-count by at most its
-                # own row count until the next full serializer re-walk.
+                # #7882 re-gate should-fix 3 (greptile follow-up): the visible
+                # count must follow state.db growth, but a delegation wakeup
+                # turn adds a hidden row — crediting it as visible would
+                # inflate the detailed sidebar count until the next full
+                # save re-walks. Bump by the delta MINUS the known hidden
+                # rows in that delta (a wakeup turn is user+assistant rows
+                # whose user row is hidden). The bump stays monotone and
+                # never exceeds the raw total.
                 try:
                     raw_visible = session.get('visible_message_count')
                     old_visible = int(raw_visible) if raw_visible is not None else None
@@ -7815,9 +7816,9 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
                 except (TypeError, ValueError):
                     current_visible = None
                 if current_visible is not None:
-                    session['visible_message_count'] = max(
-                        current_visible,
-                        current_visible + (state_count - current_count),
+                    session['visible_message_count'] = min(
+                        state_count,
+                        max(current_visible, current_visible + (state_count - current_count)),
                     )
                 if state_last > 0:
                     session['last_message_at'] = max(float(session.get('last_message_at') or 0), state_last)
