@@ -1103,6 +1103,7 @@ def _run_gateway_runs_api_streaming(
                 if relayed:
                     surfaced_approval_ids.add(approval_key)
 
+    clean_eof_reconnects = 0
     while True:
         if cancel_event.is_set():
             put_gateway_event("cancel", {"message": "Cancelled by user"})
@@ -1110,6 +1111,7 @@ def _run_gateway_runs_api_streaming(
         resp = None
         outcome = "eof"
         events_unreachable = False
+        stream_text = None
         try:
             resp = _open_gateway_run_events(
                 base_url, headers, run_id, last_seq[0],
@@ -1172,6 +1174,12 @@ def _run_gateway_runs_api_streaming(
             # Terminal frame relayed (or the user/gateway cancelled); the
             # caller settles the turn from the returned text.
             return final_text, usage
+        # A data frame was relayed on this connection (or its outcome was
+        # otherwise not a bare clean EOF): real progress — reset the
+        # clean-EOF reconnect backoff so a healthy-but-chatty stream is
+        # never paced.
+        if outcome != "eof" or stream_text:
+            clean_eof_reconnects = 0
         # ---- durable status probe: the only success arbiter (Fix 1) ----
         # Round-3 review: the 404 grace re-probe lives HERE, inside status
         # arbitration — before any /events reopen. The first 404 is re-probed
@@ -1250,6 +1258,24 @@ def _run_gateway_runs_api_streaming(
             # broken endpoint cannot hot-loop the probe.
             if events_unreachable:
                 cancel_event.wait(GATEWAY_REATTACH_POLL_INTERVAL)
+            else:
+                # Round-5/6 review (maintainer, shipping gate for #8030): a
+                # CLEAN EOF — the connection accepted then closed with no
+                # terminal frame and no transport error — reconnects
+                # immediately, so a gateway or proxy that closes every few
+                # milliseconds hot-loops this thread (his witness: 3,000
+                # reconnects / 3,001 probes in 60s, zero waits). Back off
+                # between consecutive clean-EOF reconnects, doubling to a
+                # cap; any real progress (a data frame committed a new seq)
+                # resets the backoff below, and Stop is honoured during the
+                # wait. The status probe still runs every cycle, so a run
+                # that completes while we are backed off is still observed.
+                clean_eof_reconnects += 1
+                backoff = min(
+                    _CLEAN_EOF_BACKOFF_BASE_SECS * (2 ** (clean_eof_reconnects - 1)),
+                    _CLEAN_EOF_BACKOFF_MAX_SECS,
+                )
+                cancel_event.wait(backoff)
             continue
         if action == "cancel":
             # Maintainer should-fix (round-3 re-review): persist the cancelled
@@ -1319,6 +1345,14 @@ _GATEWAY_WATCHDOG_READ_EPSILON = 2.0
 # probe only covers a status-before-registration race, and the re-probe runs
 # immediately with no poll-interval sleep.
 _STATUS_404_GRACE_PROBES = 2
+# Consecutive clean-EOF reconnects (no terminal frame, no transport error:
+# the gateway or a proxy accepts the connection and closes it immediately)
+# pace themselves before reopening /events. Backoff doubles from
+# _CLEAN_EOF_BACKOFF_BASE_SECS up to _CLEAN_EOF_BACKOFF_MAX_SECS; any REAL
+# progress (a data frame committed a new seq, or durable status reporting the
+# run no longer streaming) resets it. Stop is honoured during every wait.
+_CLEAN_EOF_BACKOFF_BASE_SECS = 0.5
+_CLEAN_EOF_BACKOFF_MAX_SECS = 30.0
 _REATTACH_SCAN_HEAD_BYTES = 16 * 1024
 
 

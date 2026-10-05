@@ -1965,6 +1965,106 @@ def test_r7_observer_off_reconnect_cursor_unchanged():
     assert harness["urlopen"].header(1, "Last-Event-ID") == "5"
 
 
+def test_r8_clean_eof_reconnect_backoff_bounds_reconnect_rate():
+    """Round-6 shipping gate (maintainer, release PR #8030): a gateway or
+    proxy that accepts the events connection and closes it cleanly every
+    ~20ms used to hot-loop this thread — 3,000 reconnects / 3,001 status
+    probes in 60s with zero waits (his virtual-clock witness). Consecutive
+    clean-EOF reconnects now back off (0.5s doubling to a 30s cap), the
+    backoff RESETS when real progress arrives (a data frame committing a
+    new seq), and Stop during a backoff wait still cancels promptly.
+    RED pre-fix: the 60s script burned ~all 16 connect slots with ~16
+    probes and zero clock time."""
+    clock = FakeClock()
+    # 16 clean-EOF closes (each ~20ms of virtual connection time), then a
+    # terminal frame so the turn finishes inside the script budget.
+    script = [
+        FakeSseResponse(keepalive() * 2, end="eof", clock=clock, advance_per_line=0.01)
+        for _ in range(16)
+    ]
+    script.append(FakeSseResponse(
+        sse_frame(1, {"event": "run.completed", "output": "finally"}), end="eof"))
+    harness = run_turn(
+        clock=clock,
+        urlopen_script=script,
+        status_script=[{"status": "running"}] * 17,
+    )
+    result = harness["result"]
+    assert result[0] == "finally", f"turn must complete from the terminal frame, got {result!r}"
+    urlopen_calls = len(harness["urlopen"].requests)
+    probe_calls = harness["status"].calls
+    # Bounded rate: with the backoff, the 16 clean-EOF connects cost
+    # 0.5+1+2+4+8+16+30*10 ≈ 331.5 virtual seconds (his unpatched witness:
+    # the same script burned 60s of connects with ZERO waits). Assert the
+    # waits happened and the doubling reached the cap.
+    assert clock.now >= 300.0, (
+        f"clean-EOF backoff must pace the reconnects (elapsed {clock.now}s, "
+        f"connects={urlopen_calls}, probes={probe_calls})")
+    assert urlopen_calls == 17, f"script consumed exactly: connects={urlopen_calls}"
+    # The waits scaled: probe gaps climb 0.5, 1, 2, 4, 8, 16 then sit at
+    # the 30s cap — doubling engaged, not a flat sleep.
+    gaps = [t for (kind, t) in harness["trace"] if kind == "status"]
+    deltas = [round(b - a, 2) for a, b in zip(gaps, gaps[1:], strict=False)]
+    # The +0.04 per gap is the virtual connection time of each clean-EOF
+    # script entry (2 keepalive lines x 0.02s).
+    assert deltas[:6] == [0.54, 1.04, 2.04, 4.04, 8.04, 16.04], f"doubling gaps, got {deltas!r}"
+    assert all(g == 30.04 for g in deltas[6:]), f"cap engaged at 30s, got {deltas!r}"
+
+
+def test_r8_real_progress_resets_clean_eof_backoff():
+    """A data frame committing a new seq is REAL progress: the backoff must
+    reset so a healthy-but-chatty stream is never paced. Two clean EOFs ->
+    a delta (seq 2) -> two more clean EOFs: the reconnect after the delta
+    must be immediate (zero clock advance across it), proving the reset."""
+    clock = FakeClock()
+    harness = run_turn(
+        clock=clock,
+        urlopen_script=[
+            FakeSseResponse(b"", end="eof"),                      # clean EOF 1
+            FakeSseResponse(b"", end="eof"),                      # clean EOF 2
+            # clean EOF 3 carrying a DATA frame: real progress
+            FakeSseResponse(sse_frame(2, {"event": "message.delta", "delta": "Hello"}), end="eof"),
+            FakeSseResponse(b"", end="eof"),                      # clean EOF 4
+            FakeSseResponse(
+                sse_frame(3, {"event": "run.completed", "output": "Hello"}), end="eof"),
+        ],
+        status_script=[{"status": "running"}] * 5,
+    )
+    assert harness["result"][0] == "Hello"
+    # Probe-gap timeline: connect 1 -> base 0.5s; connect 2 -> 1.0s
+    # (doubling); connect 3 delivered a data frame — REAL progress, so the
+    # backoff RESETS and connect 4's clean EOF waits only the base 0.5s
+    # again. Without the reset the third gap would be 2.0s (the accrued
+    # doubling continuing). The final connect's terminal frame returns
+    # before any further probe.
+    probes = [t for (kind, t) in harness["trace"] if kind == "status"]
+    gaps = [round(b - a, 2) for a, b in zip(probes, probes[1:], strict=False)]
+    assert gaps == [0.5, 1.0, 0.5], (
+        f"backoff must reset on real progress (gaps {gaps!r})")
+
+
+def test_r8_stop_during_clean_eof_backoff_cancels_promptly():
+    """Stop landing during the FIRST backoff wait must cancel inside that
+    wait: no second connect, no status probe after the wait, and the
+    cancel event surfaces."""
+    clock = FakeClock()
+    harness = run_turn(
+        clock=clock,
+        cancel_event=StopDuringWaitEvent(clock),
+        urlopen_script=[
+            FakeSseResponse(b"", end="eof"),
+        ],
+        status_script=[{"status": "running"}],
+    )
+    assert harness["result"][0] is None
+    cancels = [e for e in harness["events"] if e[0] == "cancel"]
+    assert cancels, "cancellation must be surfaced"
+    assert len(harness["urlopen"].requests) == 1, (
+        "Stop during the backoff must prevent the second connect")
+    assert len(harness["trace"]) == 2, (
+        f"no status probe may follow the cancelled wait, trace={harness['trace']!r}")
+
+
 def main():
     tests = [
         test_events_404_after_partial_stream_interrupted_status_does_not_settle_partial_text,
@@ -2001,6 +2101,9 @@ def main():
         test_r6_rejected_status_approval_payload_does_not_mask_replay,
         test_r7_observer_on_seq_still_advances_reconnect_cursor,
         test_r7_observer_off_reconnect_cursor_unchanged,
+        test_r8_clean_eof_reconnect_backoff_bounds_reconnect_rate,
+        test_r8_real_progress_resets_clean_eof_backoff,
+        test_r8_stop_during_clean_eof_backoff_cancels_promptly,
     ]
     failed = 0
     for test in tests:
