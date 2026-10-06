@@ -61,7 +61,6 @@ from api.config import (
     warm_models_catalog_provenance_if_cold,
     load_settings,
     parse_reasoning_effort,
-    coerce_reasoning_effort_for_model,
     effective_reasoning_effort,
     _main_model_request_overrides,
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
@@ -6615,13 +6614,11 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
         try:
             existing = json.loads(existing_text)
             existing_msgs = len(existing.get('messages') or [])
-            existing_snapshot = bool(existing.get('pre_compression_snapshot'))
         except (json.JSONDecodeError, ValueError):
             # Treat corrupt/malformed old JSON as missing history and rewrite it
             # from the in-memory pre-compression messages below. That is safer
             # than leaving an unreadable recovery snapshot behind.
             existing_msgs = -1
-            existing_snapshot = False
         if len(s.messages) > existing_msgs:
             # In-memory messages are newer than the file; save the full old
             # snapshot from the current session object while preserving its
