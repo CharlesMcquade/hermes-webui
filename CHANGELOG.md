@@ -114,6 +114,12 @@
 
 ### Fixed
 
+- **Gateway-backend browser turns no longer hang on a run-events stream that only sends keepalives.** A wall-clock
+  watchdog re-checks the run's status when the event stream makes no real progress for about two minutes: a finished
+  run settles from that status, and a running one reconnects from the last event without repeating tokens. A Gateway
+  that keeps closing the stream immediately is paced with a capped backoff instead of a reconnect storm, and Stop still
+  cancels promptly during a wait. Thanks @Ejmathewp. (#7978 by @Ejmathewp)
+
 - **A dead model endpoint no longer hides your other custom providers from the model picker.** The cold model
   catalog shares its time budget fairly across custom-provider probes: an unreachable endpoint can't use up the whole
   window, and a healthy slow gateway appears on the first picker load whatever its position in the configuration.
