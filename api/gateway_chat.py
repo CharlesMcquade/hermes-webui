@@ -1221,7 +1221,10 @@ def _run_gateway_runs_api_streaming(
         # seeded from the turn-wide buffer, so after the first delta every
         # clean EOF would return non-empty text and the backoff would
         # never double (a flat 0.5s forever, ~110 reconnects/minute).
-        if accepted_frame:
+        # A watchdog STALL is a connection that stayed live for the whole
+        # budget (keepalives flowing), not a clean EOF the gateway slammed
+        # shut: it must not accumulate the pacing either (round-8 review).
+        if accepted_frame or outcome == "stalled":
             clean_eof_reconnects = 0
         # ---- durable status probe: the only success arbiter (Fix 1) ----
         # Round-3 review: the 404 grace re-probe lives HERE, inside status

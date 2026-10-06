@@ -2088,6 +2088,33 @@ def test_r8_stop_during_clean_eof_backoff_cancels_promptly():
         f"no status probe may follow the cancelled wait, trace={harness['trace']!r}")
 
 
+def test_r8_keepalive_stall_does_not_feed_clean_eof_backoff():
+    """A keepalive-only STALL is a live connection the watchdog closed after
+    ~120s of liveness, not a clean EOF the gateway slammed shut: with the run
+    still running it must reconnect without accumulating the clean-EOF
+    backoff (a long silent tool call would otherwise wait up to 30s per
+    reconnect for events the gateway is already holding). The wait after
+    each stall stays at the base 0.5s. RED on 4f90c606: [0.5, 1.0, 2.0, 4.0]."""
+    clock = FakeClock()
+
+    def stall():
+        # 16 comment/blank lines x 10s: the 120s watchdog trips on the 14th.
+        return FakeSseResponse(keepalive() * 8, end="eof", clock=clock, advance_per_line=10.0)
+
+    script = [stall() for _ in range(4)]
+    script.append(FakeSseResponse(
+        sse_frame(0, {"event": "run.completed", "output": "done"}), end="eof"))
+    harness = run_turn(
+        clock=clock, urlopen_script=script, status_script=[{"status": "running"}] * 5)
+    assert harness["result"][0] == "done"
+    probes = [t for (kind, t) in harness["trace"] if kind == "status"]
+    connects = [t for (kind, t) in harness["trace"] if kind == "events"]
+    assert len(probes) == 4 and len(connects) == 5
+    waits = [round(connects[i + 1] - probes[i], 2) for i in range(4)]
+    assert waits == [0.5, 0.5, 0.5, 0.5], (
+        f"a watchdog stall must not accumulate the clean-EOF backoff (waits {waits!r})")
+
+
 def test_r8_overflow_bounded_exponent_survives_long_clean_eof_runs():
     """Round-7 review CORE: unbounded, `0.5 * (2 ** (n - 1))` overflows
     float conversion at reconnect ~1,025 (~8.5h into a stuck turn) and the
@@ -2154,6 +2181,7 @@ def main():
         test_r8_reasoning_only_connection_resets_backoff,
         test_r8_stop_during_clean_eof_backoff_cancels_promptly,
         test_r8_overflow_bounded_exponent_survives_long_clean_eof_runs,
+        test_r8_keepalive_stall_does_not_feed_clean_eof_backoff,
     ]
     failed = 0
     for test in tests:
