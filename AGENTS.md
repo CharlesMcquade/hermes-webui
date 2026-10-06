@@ -23,6 +23,23 @@ unrelated work. Keep subsystem-specific safety and contract requirements below.
 - `docs/UIUX-GUIDE.md` and `DESIGN.md` for layout, interaction flow, themes,
   chat rendering, and composer chrome
 
+## Existing-service deployment
+
+Before preparing an update for an installed service, read the site's local
+operations note (for example, a git-ignored `AGENTS.local.md`) when present.
+Discover the selected release, actual running paths, supervisor, restart controls,
+and rollback contract rather than assuming the working checkout is production.
+Keep private paths and machine-specific commands out of this tracked guide.
+
+Treat building, validating, selecting for the next restart, and restarting as
+separate actions with separate effects and approval boundaries. Do not turn a
+request for restart readiness into an autonomous service restart. For frozen
+releases, require matching source commits, authentic build provenance, runtime
+identity, file/dependency inventories, and isolated startup evidence; inventory
+success alone is not readiness. Verify which selected artifact the user's actual
+restart control will consume before recommending it. After reconnecting, read
+durable operation results before retrying or claiming a deployment succeeded.
+
 ## Onboarding and reinstall support
 
 If the task involves install, reinstall, bootstrap, first-run onboarding,
