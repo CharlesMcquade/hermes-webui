@@ -6479,9 +6479,19 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     return 'Conversation topic'
 
 
-def _is_generic_fallback_title(title: str) -> bool:
+def _is_generic_fallback_title(title) -> bool:
     """Return True for low-information fallback labels that should not be persisted."""
     return str(title or '').strip().lower() in {'conversation topic'}
+
+
+# Recovery cap for a model that keeps answering badly: an invalid model output
+# suppresses the local fallback so the next completed exchange retries the LLM
+# (the local fallback would mark a warm-up opener as successfully titled). A
+# model that ALWAYS returns the wrong language or a list would otherwise retry
+# forever — one title call per turn plus the invalid-output backup chain. After
+# this many exchanges with a still-invalid title, accept the local fallback and
+# stop retrying (maintainer re-gate, #7318).
+_TITLE_RECOVERY_MAX_EXCHANGES = 3
 
 
 def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None, stream_owner_id: str = None):
@@ -6562,10 +6572,23 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 'llm_language_mismatch',
                 'llm_language_mismatch_aux',
             }
-            if not next_title and not invalid_model_output:
+            # Recovery cap: snapshot the exchange count under the same decision
+            # lock region that validated the retry premise, and accept the local
+            # fallback once the session has this many exchanges — a model that
+            # keeps answering badly must not mint one title call per turn
+            # forever (#7318 re-gate, SHOULD-FIX).
+            try:
+                exchange_count = _count_exchanges(s.messages)
+            except Exception:
+                exchange_count = 0
+            recovery_capped = invalid_model_output and exchange_count >= _TITLE_RECOVERY_MAX_EXCHANGES
+            if not next_title and (not invalid_model_output or recovery_capped):
                 fallback_title = _fallback_title_from_exchange(user_text, assistant_text)
                 if fallback_title and not _is_generic_fallback_title(fallback_title):
-                    logger.debug("Using local fallback for session title generation")
+                    logger.debug(
+                        "Using local fallback for session title generation%s",
+                        " (recovery cap reached)" if recovery_capped else "",
+                    )
                     next_title = fallback_title
                     source = 'fallback'
                 elif fallback_title:
@@ -6609,7 +6632,13 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             else:
                 _put_title_status(put_event, session_id, source, llm_status, effective_title, raw_preview)
             put_event('title', {
-                'session_id': stream_owner_id or session_id,
+                # The listener keys its guard on session_id, so this must be the
+                # TITLE TARGET (B) — not the stream owner (A): after an A→B
+                # compression rotation, a reattached listener runs with
+                # activeSid=B and would reject an A-keyed event before ever
+                # checking expectedCurrent, leaving B's malformed title in place.
+                'session_id': session_id,
+                'stream_owner_session_id': stream_owner_id or session_id,
                 'target_session_id': session_id,
                 'title': effective_title,
                 # The title this event REPLACES. The client passes it back as

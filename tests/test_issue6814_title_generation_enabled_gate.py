@@ -131,6 +131,98 @@ def test_enabled_true_string_parses_as_enabled():
         assert _aux_title_generation_enabled() is True
 
 
+# ---------------------------------------------------------------------------
+# #7318 re-gate SHOULD-FIX: recovery cap for a model that keeps answering badly
+# ---------------------------------------------------------------------------
+def _make_capped_session(exchanges):
+    """A provisional session with *exchanges* completed user+assistant pairs."""
+    messages = []
+    for i in range(exchanges):
+        messages.append({'role': 'user', 'content': f'Question number {i + 1}?'})
+        messages.append({'role': 'assistant', 'content': f'Answer number {i + 1}.'})
+    from api.models import title_from
+    provisional = title_from(messages, 'Untitled')
+    s = MagicMock()
+    s.title = provisional
+    s.llm_title_generated = False
+    s.messages = messages
+    s.session_id = 'test-7318-cap-session'
+    s.save = MagicMock()
+    return s, provisional
+
+
+def _run_capped_update(session, provisional, events, agent_status):
+    from api.streaming import _run_background_title_update
+    _run_background_title_update(
+        session_id=session.session_id,
+        user_text=str(session.messages[0]['content']),
+        assistant_text=str(session.messages[-1]['content']),
+        placeholder_title=provisional,
+        put_event=lambda e, d: events.append((e, d)),
+        agent=None,
+    )
+    return events
+
+
+def test_recovery_cap_accepts_fallback_at_limit():
+    """A persistently-invalid model output retries every completed exchange.
+    At _TITLE_RECOVERY_MAX_EXCHANGES the local fallback is accepted and the
+    title is persisted — the calls must stop growing after that."""
+    from api.streaming import _run_background_title_update, _TITLE_RECOVERY_MAX_EXCHANGES
+    s, provisional = _make_capped_session(_TITLE_RECOVERY_MAX_EXCHANGES)
+    events = []
+    with patch('api.streaming.get_session', return_value=s), \
+         patch('api.streaming.SESSIONS', {}), \
+         patch('api.streaming.LOCK', threading.Lock()), \
+         patch_tg_config({'provider': 'openai', 'model': 'gpt-x'}), \
+         patch('api.streaming._generate_llm_session_title_via_aux',
+               return_value=(None, 'llm_language_mismatch_aux', '糟糕的标题')):
+        _run_capped_update(s, provisional, events, 'llm_language_mismatch_aux')
+
+    # The fallback was accepted despite the invalid model output.
+    assert s.title != provisional
+    s.save.assert_called()
+    statuses = [d for e, d in events if e == 'title_status']
+    assert statuses and statuses[0]['status'] == 'fallback'
+
+
+def test_recovery_cap_below_limit_still_retries():
+    """Below the cap the invalid output still suppresses the local fallback
+    (the retry-next-exchange contract is unchanged)."""
+    from api.streaming import _run_background_title_update, _TITLE_RECOVERY_MAX_EXCHANGES
+    s, provisional = _make_capped_session(max(1, _TITLE_RECOVERY_MAX_EXCHANGES - 1))
+    events = []
+    with patch('api.streaming.get_session', return_value=s), \
+         patch('api.streaming.SESSIONS', {}), \
+         patch('api.streaming.LOCK', threading.Lock()), \
+         patch_tg_config({'provider': 'openai', 'model': 'gpt-x'}), \
+         patch('api.streaming._generate_llm_session_title_via_aux',
+               return_value=(None, 'llm_language_mismatch_aux', '糟糕的标题')):
+        _run_capped_update(s, provisional, events, 'llm_language_mismatch_aux')
+
+    assert s.title == provisional  # untouched, still retrying
+    s.save.assert_not_called()
+
+
+def test_recovery_cap_eligibility_turns_off_after_fallback():
+    """Once the fallback title is persisted, the session is no longer eligible
+    for background title generation — the call loop is actually broken, not
+    merely slowed."""
+    from api.streaming import _background_title_generation_eligible, _TITLE_RECOVERY_MAX_EXCHANGES
+    s, _ = _make_capped_session(_TITLE_RECOVERY_MAX_EXCHANGES)
+    fallback_title = 'Question number 1'
+    s.title = fallback_title
+    s.llm_title_generated = True
+    assert _background_title_generation_eligible(s) is False
+
+
+def test_recovery_cap_constant_sane():
+    """The cap is small and finite: 5 title calls over 5 turns (master behavior)
+    must become 3 calls over 6 turns and then stop."""
+    from api.streaming import _TITLE_RECOVERY_MAX_EXCHANGES
+    assert _TITLE_RECOVERY_MAX_EXCHANGES == 3
+
+
 def test_refresh_path_honors_disabled():
     """Adaptive refresh worker must skip when the flag is false."""
     from api.streaming import _run_background_title_refresh

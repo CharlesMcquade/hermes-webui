@@ -6,7 +6,7 @@ import subprocess
 import pytest
 
 
-def _build_script(delayed, title_events, malformed_b_title=None):
+def _build_script(delayed, title_events, malformed_b_title=None, active_sid='A', run_done=True):
     source = (Path(__file__).parents[1] / 'static/messages.js').read_text()
     # Extract the pending-title declaration block (both maps), the listener,
     # applySessionTitleUpdate, and the done-rebind drain — all real source.
@@ -26,10 +26,11 @@ def _build_script(delayed, title_events, malformed_b_title=None):
         end = source.index('\n          }', start) + len('\n          }')
         drain = source[start:end]
     b_title = malformed_b_title or 'New Chat'
+    open_title = b_title if active_sid == 'B' else 'New Chat'
     script = '''
 const assert=require('assert');
-const activeSid='A';
-const S={session:{session_id:'A',title:'New Chat'}};
+const activeSid=''' + json.dumps(active_sid) + ''';
+const S={session:{session_id:''' + json.dumps(active_sid) + ''',title:''' + json.dumps(open_title) + '''}};
 const _allSessions=[{session_id:'B',title:''' + json.dumps(b_title) + '''}];
 const _sessionTitleProvisionalBySid=new Map();
 const _firstUserMessageTitleCandidate=()=>'';
@@ -42,11 +43,11 @@ function finishDone(){
  S.session={session_id:'B',title:''' + json.dumps(b_title) + '''};
 ''' + drain + '''
 }
-if(!DELAYED) finishDone();
+if(RUN_DONE&&!DELAYED) finishDone();
 for(const ev of TITLE_EVENTS) onTitle({data:JSON.stringify(ev)});
-if(DELAYED) finishDone();
+if(RUN_DONE&&DELAYED) finishDone();
 '''
-    return script.replace('DELAYED', json.dumps(delayed)).replace('TITLE_EVENTS', json.dumps(title_events))
+    return script.replace('DELAYED', json.dumps(delayed)).replace('TITLE_EVENTS', json.dumps(title_events)).replace('RUN_DONE', json.dumps(run_done))
 
 
 def _run_node(script):
@@ -128,3 +129,86 @@ console.log('PASS: bare_call_refused');
     result = _run_node(script)
     assert result.returncode == 0, result.stderr
     assert 'PASS: bare_call_refused' in result.stdout
+
+
+@pytest.mark.parametrize('delayed', [False, True])
+def test_reattached_continuation_listener_accepts_target_keyed_event(delayed):
+    """Re-gate finding ([SILENT, Codex]): after A→B compression the server
+    emits the title event with session_id: A, but the reattached listener runs
+    with activeSid: B and returned before ever checking expectedCurrent — B's
+    malformed title stayed in place (master updates B; this head did not).
+
+    The server now keys the event on the title TARGET (B) and carries the
+    stream OWNER (A) as stream_owner_session_id, and the listener accepts
+    either id. The deterministic probe: a B-active listener with the new
+    B-keyed event updates B; a genuinely foreign stream (no id match) is
+    still rejected."""
+    malformed = 'Title options: 1. Fix login 2. OAuth flow 3. Debug'
+    recovered = 'Debug OAuth login redirect'
+
+    # 1. New server shape: session_id=B (target), stream_owner_session_id=A.
+    #    The reattached listener (activeSid=B) must accept it and update B.
+    #    RED-BEFORE: the old listener hard-rejects any event whose session_id
+    #    is not activeSid — a B-active listener dropped the A-keyed event the
+    #    old server sent, and a B-keyed event never existed. This case exercises
+    #    both halves: only the new listener accepts the target-keyed event, and
+    #    the owner fallback keeps pre-rotation A-captured listeners working.
+    script = _build_script(delayed, [
+        {'session_id': 'B', 'stream_owner_session_id': 'A',
+         'target_session_id': 'B', 'title': recovered,
+         'expectedCurrent': malformed},
+    ], malformed_b_title=malformed, active_sid='B') + '''
+assert.equal(S.session.session_id,'B');
+assert.equal(S.session.title,''' + json.dumps(recovered) + ''');
+assert.equal(_allSessions[0].title,''' + json.dumps(recovered) + ''');
+// The owner fallback must ALSO deliver A-keyed events to an A-active listener.
+console.log('PASS: reattached_b_updated');
+'''
+    result = _run_node(script)
+    assert result.returncode == 0, result.stderr
+    assert 'PASS: reattached_b_updated' in result.stdout
+
+    # 2. Owner fallback: an A-active mid-stream listener (the pre-rotation
+    #    capture) must still accept the event via stream_owner_session_id —
+    #    this is the case the old session_id-keyed guard served. finishDone()
+    #    is NOT called here (mid-stream listener, still on A).
+    script = _build_script(delayed, [
+        {'session_id': 'B', 'stream_owner_session_id': 'A',
+         'target_session_id': 'B', 'title': recovered,
+         'expectedCurrent': 'New Chat'},
+    ], active_sid='A', run_done=False) + '''
+assert.equal(S.session.session_id,'A');
+// The target is B: the sidebar row updates, the open session (A) does not.
+assert.equal(_allSessions[0].title,''' + json.dumps(recovered) + ''');
+console.log('PASS: owner_fallback_still_updates');
+'''
+    result = _run_node(script)
+    assert result.returncode == 0, result.stderr
+    assert 'PASS: owner_fallback_still_updates' in result.stdout
+
+    # 2. Mutation bite: the OLD server shape (session_id=A only) must still be
+    #    rejected by the B-active listener — proving the old shape was the bug
+    #    and the new guard still rejects genuinely foreign streams.
+    script = _build_script(delayed, [
+        {'session_id': 'A', 'target_session_id': 'B', 'title': recovered,
+         'expectedCurrent': malformed},
+    ], malformed_b_title=malformed, active_sid='B') + '''
+assert.equal(S.session.title,''' + json.dumps(malformed) + ''');
+console.log('PASS: old_shape_rejected_by_reattached_listener');
+'''
+    result = _run_node(script)
+    assert result.returncode == 0, result.stderr
+    assert 'PASS: old_shape_rejected_by_reattached_listener' in result.stdout
+
+    # 3. A genuinely foreign stream id updates nothing.
+    script = _build_script(delayed, [
+        {'session_id': 'unrelated', 'stream_owner_session_id': 'unrelated',
+         'target_session_id': 'B', 'title': recovered,
+         'expectedCurrent': malformed},
+    ], malformed_b_title=malformed, active_sid='B') + '''
+assert.equal(S.session.title,''' + json.dumps(malformed) + ''');
+console.log('PASS: foreign_stream_rejected');
+'''
+    result = _run_node(script)
+    assert result.returncode == 0, result.stderr
+    assert 'PASS: foreign_stream_rejected' in result.stdout

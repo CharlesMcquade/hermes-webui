@@ -845,7 +845,15 @@ class TestRotatedSessionStreamEndOwner(unittest.TestCase):
             'title-target id, or the client SSE fence never closes the stream',
         )
         title_events = [d for e, d in emitted if e == 'title']
-        self.assertEqual([d['session_id'] for d in title_events], ['original-stream-owner-id'])
+        # #7318 re-gate: the title event is keyed on the title TARGET so a
+        # reattached continuation-B listener passes its guard; the stream
+        # owner rides along as stream_owner_session_id for pre-rotation
+        # A-captured listeners, and stream_end keeps the owner id (SSE fence).
+        self.assertEqual([d['session_id'] for d in title_events], ['rotated-continuation-id'])
+        self.assertEqual(
+            [d['stream_owner_session_id'] for d in title_events],
+            ['original-stream-owner-id'],
+        )
         self.assertEqual([d['target_session_id'] for d in title_events], ['rotated-continuation-id'])
 
     def test_stream_end_defaults_to_session_id_without_rotation(self):
