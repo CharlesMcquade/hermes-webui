@@ -9237,14 +9237,22 @@ function _sendTtsRequest(init, owner){
             throw new Error((j&&j.error)||('TTS request failed: '+r.status));
           });
         }
-        return r.arrayBuffer();
+        return r.arrayBuffer().then(function(buf){
+          // Keep the audio MIME type the server declared. Callers build a
+          // Blob for an <audio> element, and a Blob with no type loses the
+          // `audio/mpeg` the response carried (master's r.blob() preserved
+          // it) — Safari is the browser that needs it to decode.
+          const ct=(r.headers&&typeof r.headers.get==='function')
+            ? r.headers.get('content-type') : '';
+          return {ok:true, buf:buf, type:(ct||'').split(';')[0].trim()};
+        });
       })
       .then(
-        function(buf){
+        function(res){
           // A 429-retry settles to an already-settled {ok}/{err} result;
           // pass it through instead of double-wrapping it as the chunk buf.
-          if(buf&&typeof buf==='object'&&('ok' in buf)) return buf;
-          return {ok:true, buf:buf};
+          if(res&&typeof res==='object'&&('ok' in res)) return res;
+          return {ok:true, buf:res};
         },
         function(err){ return {ok:false, err:err}; }
       );
@@ -9354,7 +9362,7 @@ function _playEdgeTtsChunked(text, btn){
     .then(function(res){
       if(!_owns()) return;
       if(!res.ok){ _fail((res.err&&res.err.message)||'Edge TTS failed'); return; }
-      const url=URL.createObjectURL(new Blob([res.buf]));
+      const url=URL.createObjectURL(new Blob([res.buf],{type:res.type}));
       const audio=new Audio(url);
       _playingEdgeAudio=audio;
       audio.onended=function(){
@@ -9724,6 +9732,13 @@ function stopTTS(){
   _ttsActiveBtn=null;
   // Reset all speaking buttons
   document.querySelectorAll('[data-speaking="1"]').forEach(btn=>{ btn.dataset.speaking='0'; });
+  // Voice-mode closure: the generation above just invalidated every playback,
+  // so any rearm a terminal callback scheduled earlier is now stale (it will
+  // defer, not reopen the mic). Notify voice mode — while it is still
+  // speaking, boot.js schedules the owner-aware rearm that hands the mic back
+  // once the audio it now owns has gone quiet. This covers a cancel that
+  // lands before the cancelled playback's own terminal callback.
+  if(typeof window._hermesTtsVoiceClosure==='function') window._hermesTtsVoiceClosure();
 }
 
 function autoReadLastAssistant(){

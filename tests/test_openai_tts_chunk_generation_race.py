@@ -56,8 +56,9 @@ and a fake Audio element:
         replacement claimed the turn.
   19.   voice-mode delayed mic rearm ownership: A's retained rearm timer is
         drained after a real speakMessage() replacement — the mic must stay
-        closed and B's handle/generation/button state must survive; the
-        no-replacement control rearms exactly once.
+        closed while B is audible, then DEFER-reschedule (not be discarded)
+        and arm once B is quiet; B's handle/generation/button state must
+        survive throughout, and the no-replacement control rearms once.
   20.   shared _playAudioBuf (ElevenLabs): rejected AudioContext.resume() is
         terminal — state/button settled, no source starts, and the returned
         promise resolves (direct settle probe).
@@ -65,6 +66,14 @@ and a fake Audio element:
         createBufferSource throw is terminal and settles.
   22.   shared _playAudioBuf (ElevenLabs): a synchronous start() throw stops/
         disconnects the partially constructed source and settles.
+  23-24. round-6 must-fix: voice playback A queues its mic rearm and a
+        replacement B finishes around A's timer. Both orderings (B before /
+        after A's timer fires) must end hands-free mode in `listening` with
+        exactly one rearm, never stalled with zero; the stale rearm must not
+        reopen the mic while B is audible. The round-6 head ends stalled.
+  25.   should-fix: _sendTtsRequest returns the response Content-Type and
+        every Audio-element Blob passes it through (master's r.blob() kept
+        the server's audio/mpeg; a bare ArrayBuffer Blob loses it - Safari).
 """
 from __future__ import annotations
 
@@ -186,11 +195,22 @@ class FakeURL {
 FakeURL.createObjectURL = () => 'blob:fake-' + (++_urlCounter);
 FakeURL.revokeObjectURL = () => {};
 const URL = FakeURL;
-class Blob { constructor(parts){ this.parts = parts; } }
+// Captures the type option every Audio-element caller passes, so a probe can
+// assert the response Content-Type reaches the Blob (master's r.blob() did).
+const createdBlobs = [];
+class Blob {
+  constructor(parts, opts){
+    this.parts = parts;
+    this.type = (opts && opts.type) || '';
+    createdBlobs.push(this);
+  }
+}
 
 const speechSynthesis = {
   cancelCalls: 0, speakCalls: [], speaking: false,
-  cancel(){ this.cancelCalls += 1; },
+  // A real cancel() ends the current utterance, so `speaking` goes false -
+  // the audio-deferral check in _scheduleVoiceMicRearm depends on it.
+  cancel(){ this.cancelCalls += 1; this.speaking = false; },
   speak(u){ this.speakCalls.push(u); this.speaking = true; },
   getVoices(){ return []; },
   pause(){}, resume(){},
@@ -236,11 +256,25 @@ eval(['_speakResponse', '_armBrowserTtsRecovery', '_clearBrowserTtsRecovery',
   '_scheduleVoiceMicRearm', '_clearVoiceMicRearm']
   .map((n) => extractFunction(boot, n)).join('\n'));
 
+// boot.js registers the voice-closure notification on `window` next to the
+// rearm helpers; extractFunction() only returns the function body, so the
+// production assignment is pulled out of the source verbatim and evaluated
+// against this scope (which stands in for the module scope).
+const _closureMatch = boot.match(/window\._hermesTtsVoiceClosure=function\(\)\{[\s\S]*?\n  \};/);
+if (_closureMatch) eval(_closureMatch[0]);
+else window._hermesTtsVoiceClosure = undefined;   // pre-fix head: no notification
+
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 function fakeBtn(){ return { dataset: {} }; }
 function fakeMsgBtn(text){ const row = { dataset: { rawText: text } }; return { dataset: {}, closest: () => row }; }
 const longText = Array(60).fill('这是一段足够长的用于测试分块播放的中文文本段落。').join('');
-const okResp = () => Promise.resolve({ ok: true, status: 200, arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)) });
+// Mirrors the real /api/tts caller: every engine's response is answered with
+// an explicit audio Content-Type (api/routes.py sends audio/mpeg).
+const okResp = () => Promise.resolve({
+  ok: true, status: 200,
+  headers: { get: (k) => (String(k).toLowerCase() === 'content-type' ? 'audio/mpeg' : null) },
+  arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)),
+});
 const rateLimitedResp = () => Promise.resolve({ ok: false, status: 429, json: () => Promise.resolve({}) });
 
 function resetState(){
@@ -254,6 +288,7 @@ function resetState(){
   if (_browserTtsKeepAlive) { clearInterval(_browserTtsKeepAlive); _browserTtsKeepAlive = null; }
   _browserTtsSuppressNextErrorRearm = false; _startListeningCalls = 0;
   toasts.length = 0; fetchCalls.length = 0; startedSources.length = 0; audioEls.length = 0;
+  createdBlobs.length = 0;
   domRows = []; speakingBtns = [];
   speechSynthesis.cancelCalls = 0; speechSynthesis.speakCalls.length = 0; speechSynthesis.speaking = false;
   for (const k of Object.keys(_ls)) delete _ls[k];
@@ -1013,10 +1048,12 @@ function scenario18() {
 // 19. Voice-mode delayed mic rearm ownership. A's real terminal callback
 //     (browser branch) queues the owner-aware rearm timer; the real manual
 //     entry point speakMessage() then replaces playback through the
-//     canonical stopTTS boundary and advances the generation. Draining A's
-//     retained timer must NOT restart listening, and B's handle/generation/
-//     button state must remain intact. Control: on a turn with no
-//     replacement the owner-aware rearm still fires — exactly once.
+//     canonical stopTTS boundary and advances the generation. A's retained
+//     rearm must NOT restart listening while B is audible; once B has gone
+//     quiet it DEFERS-reschedules (it must not be discarded, or hands-free
+//     mode stalls) and then arms. B's handle/generation/button state must
+//     survive throughout. Control: on a turn with no replacement the
+//     owner-aware rearm still fires — exactly once.
 function scenario19() {
   resetState();
   const realSetTimeout = globalThis.setTimeout;
@@ -1038,7 +1075,7 @@ function scenario19() {
   if (btn.dataset.speaking !== '1') throw new Error('s19: B listen button not marked');
   return sleep(60).then(() => {                // drain A's retained timer window
     if (_startListeningCalls !== 0) throw new Error('s19: stale rearm reopened the mic under B');
-    if (_voiceMicRearmTimer !== null) throw new Error('s19: stale rearm timer still pending');
+    if (_voiceMicRearmTimer === null) throw new Error('s19: stale rearm was discarded instead of deferred');
     if (_ttsSpeaking !== true) throw new Error('s19: B speaking state lost');
     if (_ttsGeneration !== bGen) throw new Error('s19: B generation changed');
     if (btn.dataset.speaking !== '1') throw new Error('s19: B button state lost');
@@ -1050,6 +1087,14 @@ function scenario19() {
     _ttsAudioCtx._decode.ok({});
     if (_playingEdgeAudio !== startedSources[0]) throw new Error('s19: B handle lost after stale rearm drain');
     if (_startListeningCalls !== 0) throw new Error('s19: stale rearm reopened the mic after B start');
+    // B finished before A's timer fired: A's deferred rearm must now arm —
+    // hands-free mode resumes instead of stalling (the discard bug).
+    _ttsSpeaking = false;                      // B's source ended naturally
+    return sleep(60);
+  }).then(() => {
+    if (_startListeningCalls !== 1) {
+      throw new Error('s19: deferred rearm never armed after B went quiet (calls=' + _startListeningCalls + ')');
+    }
     // Control: fresh turn, no replacement -> the owner-aware rearm fires once.
     _voiceModeState = 'thinking';
     _ls['hermes-tts-engine'] = 'browser';
@@ -1058,9 +1103,10 @@ function scenario19() {
     const uttC = speechSynthesis.speakCalls[speechSynthesis.speakCalls.length - 1];
     if (!uttC || uttC === uttA) throw new Error('s19: control utterance not spoken');
     uttC.onend();
+    speechSynthesis.speaking = false;
     return sleep(60);
   }).then(() => {
-    if (_startListeningCalls !== 1) {
+    if (_startListeningCalls !== 2) {
       throw new Error('s19: control rearm did not fire exactly once (calls=' + _startListeningCalls + ')');
     }
     // Defense layers below the generation check: a retained timer must also
@@ -1070,9 +1116,10 @@ function scenario19() {
     const uttD = speechSynthesis.speakCalls[speechSynthesis.speakCalls.length - 1];
     if (!uttD) throw new Error('s19: phase3a utterance not spoken');
     uttD.onend();
+    speechSynthesis.speaking = false;
     _voiceModeActive = false;                  // 3a: inactive at timer time
     return sleep(60).then(() => {
-      if (_startListeningCalls !== 1) {
+      if (_startListeningCalls !== 2) {
         throw new Error('s19: rearm fired while voice mode inactive (calls=' + _startListeningCalls + ')');
       }
       _voiceModeActive = true;
@@ -1081,11 +1128,12 @@ function scenario19() {
       const uttE = speechSynthesis.speakCalls[speechSynthesis.speakCalls.length - 1];
       if (!uttE) throw new Error('s19: phase3b utterance not spoken');
       uttE.onend();
+      speechSynthesis.speaking = false;
       _voiceModeState = 'listening';           // 3b: not speaking at timer time
       return sleep(60);
     });
   }).then(() => {
-    if (_startListeningCalls !== 1) {
+    if (_startListeningCalls !== 2) {
       throw new Error('s19: rearm fired while voice state not speaking (calls=' + _startListeningCalls + ')');
     }
     globalThis.setTimeout = realSetTimeout;
@@ -1202,6 +1250,210 @@ function scenario22() {
 }
 
 
+// 23. Round-6 must-fix: B finishes BEFORE A's rearm timer has fired. Real
+//     voice-mode playback A (Edge) queues its owner-aware rearm; the real
+//     manual speakMessage() Listen path then replaces A through stopTTS().
+//     B's own chain never schedules a rearm (the manual Listen path does not
+//     touch voice mode), so A's retained rearm is the only one there is: it
+//     must defer while B is audible and arm once B is quiet. The round-6
+//     head instead discards it - listening never resumes.
+function scenario23() {
+  resetState();
+  _ttsRequestMinGapMs = 20;                    // shrink the pacing window
+  const realSetTimeout = globalThis.setTimeout;
+  // Only the rearm timer is shortened (the guard semantics are unchanged);
+  // the scheduler's own timers stay real so it can actually fire.
+  const realSetTimeoutFn = realSetTimeout;
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    if (ms === 500 || ms === 1000) return realSetTimeoutFn(fn, 20, ...rest);
+    return realSetTimeoutFn(fn, ms, ...rest);
+  };
+  _voiceModeActive = true;
+  _voiceModeState = 'thinking';
+  _voiceModeThinkingSid = null;
+  _ls['hermes-tts-engine'] = 'elevenlabs';
+  domRows = [{ dataset: { rawText: 'voice A reply text' } }];
+  _speakResponse();                            // A: real voice-mode ElevenLabs path
+  return sleep(0).then(() => {
+    if (fetchCalls.length !== 1) throw new Error('s23: A request not issued');
+    fetchCalls[0].resolve(okResp());           // A resolves
+    return sleep(30);
+  }).then(() => {
+    if (audioEls.length !== 1) throw new Error('s23: A audio element missing');
+    if (!audioEls[0].played) throw new Error('s23: A audio not played');
+    audioEls[0].onended();                     // A ends -> queues owner-aware rearm
+    if (_voiceMicRearmTimer === null) throw new Error('s23: A rearm not queued');
+    if (_startListeningCalls !== 0) throw new Error('s23: rearm fired synchronously');
+    // B through the real manual entry point (Listen button on any message).
+    const btn = fakeMsgBtn('manual B text');
+    _ls['hermes-tts-engine'] = 'edge';
+    speakMessage(btn);
+    if (btn.dataset.speaking !== '1') throw new Error('s23: B listen button not marked');
+    if (speechSynthesis.cancelCalls === 0) throw new Error('s23: stopTTS boundary not taken');
+    // A's timer fires inside this window while B is still pending, then
+    // audible: it must defer, never open the mic underneath B.
+    return sleep(300);
+  }).then(() => {
+    if (fetchCalls.length !== 2) {
+      throw new Error('s23: B request not issued (calls=' + fetchCalls.length + ')');
+    }
+    if (_startListeningCalls !== 0) throw new Error('s23: rearm opened the mic while B pending/audible');
+    if (_voiceMicRearmTimer === null) throw new Error('s23: rearm discarded instead of deferred');
+    fetchCalls[1].resolve(okResp());           // B chunk audio arrives and plays
+    return sleep(30);
+  }).then(() => {
+    if (audioEls.length < 2) throw new Error('s23: B audio element missing');
+    if (!audioEls[1].played) throw new Error('s23: B audio not played');
+    if (_startListeningCalls !== 0) throw new Error('s23: rearm opened the mic while B audible');
+    // B finishes before any rearm could arm: A's deferred rearm must arm once.
+    audioEls[1].onended();
+    return sleep(60);
+  }).then(() => {
+    if (_startListeningCalls !== 1) {
+      throw new Error('s23: deferred rearm never armed after B ended (calls=' + _startListeningCalls + ')');
+    }
+    return sleep(60);                          // must not reschedule forever
+  }).then(() => {
+    if (_startListeningCalls !== 1) {
+      throw new Error('s23: rearm armed more than once (calls=' + _startListeningCalls + ')');
+    }
+    globalThis.setTimeout = realSetTimeoutFn;
+    return 'PASS';
+  });
+}
+
+// 24. Round-6 must-fix: B finishes AFTER A's rearm timer has already fired
+//     and been deferred. Real voice-mode playback A (ElevenLabs) queues its
+//     rearm; the real auto-read entry point replaces A through stopTTS() and
+//     the shared scheduler. A's timer drains first (still defers while B is
+//     audible), then B ends and the mic re-arms exactly once.
+function scenario24() {
+  resetState();
+  _ttsRequestMinGapMs = 20;                    // shrink the pacing window
+  const realSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (fn, ms, ...rest) => {
+    if (ms === 500 || ms === 1000) return realSetTimeout(fn, 20, ...rest);
+    return realSetTimeout(fn, ms, ...rest);
+  };
+  _voiceModeActive = true;
+  _voiceModeState = 'thinking';
+  _voiceModeThinkingSid = null;
+  _ls['hermes-tts-engine'] = 'elevenlabs';
+  domRows = [{ dataset: { rawText: 'voice A long reply text' } }];
+  _speakResponse();                            // A: real voice-mode ElevenLabs path
+  return sleep(0).then(() => {
+    if (fetchCalls.length !== 1) throw new Error('s24: A request not issued');
+    fetchCalls[0].resolve(okResp());
+    return sleep(30);
+  }).then(() => {
+    if (audioEls.length !== 1 || !audioEls[0].played) throw new Error('s24: A audio not playing');
+    audioEls[0].onended();                     // A ends -> queues owner-aware rearm
+    if (_voiceMicRearmTimer === null) throw new Error('s24: A rearm not queued');
+    // B through the real auto-read entry point (stopTTS() -> notify).
+    _ls['hermes-tts-auto-read'] = 'true';
+    _ls['hermes-tts-engine'] = 'edge';
+    domRows = [{ dataset: { rawText: 'auto-read B reply text' } }];
+    autoReadLastAssistant();
+    return sleep(0);
+  }).then(() => {
+    if (speechSynthesis.cancelCalls === 0) throw new Error('s24: stopTTS boundary not taken');
+    // A's timer window drains here: it must defer (B pending/audible), and
+    // must NOT be re-created from the stopTTS() closure notification in a
+    // way that double-arms (the notification clears then reschedules once).
+    return sleep(100);
+  }).then(() => {
+    if (_startListeningCalls !== 0) throw new Error('s24: rearm opened the mic while B audible');
+    if (fetchCalls.length !== 2) {
+      throw new Error('s24: B request not issued after cooldown (calls=' + fetchCalls.length + ')');
+    }
+    if (_voiceMicRearmTimer === null) throw new Error('s24: rearm discarded while B audible');
+    fetchCalls[1].resolve(okResp());
+    return sleep(30);
+  }).then(() => {
+    if (audioEls.length < 2) throw new Error('s24: B audio element missing');
+    if (!audioEls[1].played) throw new Error('s24: B audio not played');
+    if (_startListeningCalls !== 0) throw new Error('s24: rearm opened the mic under B');
+    audioEls[1].onended();                     // B ends after A's timer fired
+    return sleep(60);
+  }).then(() => {
+    if (_startListeningCalls !== 1) {
+      throw new Error('s24: deferred rearm never armed after B ended (calls=' + _startListeningCalls + ')');
+    }
+    return sleep(60);
+  }).then(() => {
+    if (_startListeningCalls !== 1) {
+      throw new Error('s24: rearm armed more than once (calls=' + _startListeningCalls + ')');
+    }
+    globalThis.setTimeout = realSetTimeout;
+    return 'PASS';
+  });
+}
+
+// 25. Should-fix: _sendTtsRequest returns the response Content-Type and
+//     every Audio-element Blob passes it through. Master's r.blob() kept the
+//     server's audio/mpeg; the bare ArrayBuffer Blob loses it (Safari).
+function scenario25() {
+  resetState();
+  const btn = fakeBtn();
+  _playEdgeTtsChunked('AAAA', btn);            // ui.js Audio-element caller
+  return sleep(0).then(() => {
+    if (fetchCalls.length !== 1) throw new Error('s25: edge request not issued');
+    fetchCalls[0].resolve(okResp());
+    return sleep(30);
+  }).then(() => {
+    if (audioEls.length !== 1) throw new Error('s25: edge audio missing');
+    if (createdBlobs.length !== 1) throw new Error('s25: edge blob missing');
+    if (createdBlobs[0].type !== 'audio/mpeg') {
+      throw new Error('s25: edge blob lost the content type: ' + JSON.stringify(createdBlobs[0].type));
+    }
+    // A response without a Content-Type must degrade to '' (not 'undefined').
+    _playEdgeTtsChunked('BBBB', fakeBtn());
+    return sleep(300);
+  }).then(() => {
+    if (fetchCalls.length !== 2) {
+      throw new Error('s25: second request not issued (calls=' + fetchCalls.length + ')');
+    }
+    fetchCalls[1].resolve(Promise.resolve({
+      ok: true, status: 200,
+      headers: { get: () => '' },
+      arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)),
+    }));
+    return sleep(30);
+  }).then(() => {
+    if (createdBlobs.length !== 2) throw new Error('s25: second blob missing');
+    if (createdBlobs[1].type !== '') {
+      throw new Error('s25: missing content type must degrade to empty, got ' +
+        JSON.stringify(createdBlobs[1].type));
+    }
+    // Voice-mode Audio-element callers (boot.js) must carry it too.
+    _voiceModeActive = true;
+    _voiceModeState = 'thinking';
+    _voiceModeThinkingSid = null;
+    _ls['hermes-tts-engine'] = 'openai';
+    domRows = [{ dataset: { rawText: 'voice mode reply text' } }];
+    _speakResponse();
+    return sleep(0);
+  }).then(() => {
+    if (fetchCalls.length !== 2) {
+      throw new Error('s25: voice request issued during cooldown (calls=' + fetchCalls.length + ')');
+    }
+    return sleep(300);
+  }).then(() => {
+    if (fetchCalls.length !== 3) {
+      throw new Error('s25: voice request not issued (calls=' + fetchCalls.length + ')');
+    }
+    fetchCalls[2].resolve(okResp());
+    return sleep(30);
+  }).then(() => {
+    const voiceBlob = createdBlobs[createdBlobs.length - 1];
+    if (!voiceBlob) throw new Error('s25: voice blob missing');
+    if (voiceBlob.type !== 'audio/mpeg') {
+      throw new Error('s25: voice blob lost the content type: ' + JSON.stringify(voiceBlob.type));
+    }
+    return 'PASS';
+  });
+}
+
 const scenario = process.argv[4];
 const runner = {
   scenario1: scenario1, scenario2: scenario2, scenario3: scenario3, scenario4: scenario4,
@@ -1210,6 +1462,7 @@ const runner = {
   scenario13: scenario13, scenario14: scenario14, scenario15: scenario15, scenario16: scenario16,
   scenario17: scenario17, scenario18: scenario18,
   scenario19: scenario19, scenario20: scenario20, scenario21: scenario21, scenario22: scenario22,
+  scenario23: scenario23, scenario24: scenario24, scenario25: scenario25,
 }[scenario];
 if (!runner) throw new Error('unknown scenario: ' + scenario);
 let outcome;
@@ -1237,7 +1490,7 @@ if (outcome && typeof outcome.then === 'function') {
     "scenario6", "scenario7", "scenario8", "scenario9", "scenario10",
     "scenario11", "scenario12", "scenario13", "scenario14", "scenario15",
     "scenario16", "scenario17", "scenario18", "scenario19", "scenario20",
-    "scenario21", "scenario22",
+    "scenario21", "scenario22", "scenario23", "scenario24", "scenario25",
 ])
 def test_openai_tts_chunk_chain_race(tmp_path, scenario):
     """Behavioral coverage for the unified TTS request scheduler and the

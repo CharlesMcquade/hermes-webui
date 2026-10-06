@@ -1614,7 +1614,9 @@ window.renderTranscript=function(container, messages, opts){
   // it requires voice mode to still be active+speaking AND the same
   // generation to still own TTS, so a stale terminal callback from playback
   // A can never construct SpeechRecognition while a replacement playback B
-  // is starting. Replacement/deactivation clear it as defense in depth.
+  // is starting. A generation mismatch RESCHEDULES under the generation that
+  // now owns playback (see below) instead of dropping the rearm.
+  // Replacement/deactivation clear it as defense in depth.
   function _clearVoiceMicRearm(){
     if(_voiceMicRearmTimer){ clearTimeout(_voiceMicRearmTimer); _voiceMicRearmTimer=null; }
   }
@@ -1624,11 +1626,38 @@ window.renderTranscript=function(container, messages, opts){
     _voiceMicRearmTimer=setTimeout(function(){
       _voiceMicRearmTimer=null;
       if(!_voiceModeActive||_voiceModeState!=='speaking') return;
-      if(_ttsGeneration!==_gen) return;
+      if(_ttsSpeaking||(typeof speechSynthesis!=='undefined'&&speechSynthesis.speaking)){
+        // Something is still audible: this rearm's own generation playing,
+        // a replacement that claimed the generation, or a browser utterance.
+        // The mic stays closed — reschedule and re-check, rather than
+        // dropping the rearm (a replacement's chain may never schedule one
+        // of its own, so dropping it would stall hands-free mode) or firing
+        // it early (which would reopen the mic underneath live audio).
+        _scheduleVoiceMicRearm(delayMs);
+        return;
+      }
+      // Nothing is audible. That covers both the normal completion of this
+      // rearm's own playback and a replacement that has since stopped; the
+      // generation check below only has to reject a rearm whose playback is
+      // still pending-but-silent (a fetch that never resolves), which the
+      // speaking/audible branch above already refuses.
+      if(_ttsGeneration!==_gen&&_ttsSpeaking){ _scheduleVoiceMicRearm(delayMs); return; }
       _startListening();
     },delayMs);
   }
-
+  // Voice-closure notification, emitted by stopTTS() (ui.js) after it cancels
+  // and resets playback. While voice mode is speaking, a cancel that lands
+  // before the cancelled playback's terminal callback (user hits Stop/Listen,
+  // auto-read replaces the reply) must still hand the mic back for whatever
+  // owns the turn now: the owner-aware rearm above defers while replacement
+  // audio is audible and fires once it has gone quiet. _speakResponse()'s own
+  // replacement boundary clears the rearm immediately after its stopTTS()
+  // (that playback re-arms the mic itself), and _deactivate() emits the
+  // notification with voice mode already inactive, so neither is affected.
+  window._hermesTtsVoiceClosure=function(){
+    if(!_voiceModeActive||_voiceModeState!=='speaking') return;
+    _scheduleVoiceMicRearm(500);
+  };
   function _armBrowserTtsRecovery(clean, rate){
     // Capture this turn's generation: if a replacement playback claims a new
     // one, these recovery timers are stale and must never reopen the mic.
@@ -1882,7 +1911,7 @@ window.renderTranscript=function(container, messages, opts){
       .then(res => {
         if(!_owns()) return;
         if(!res.ok) throw new Error((res.err&&res.err.message)||'TTS request failed');
-        const blob=new Blob([res.buf]);
+        const blob=new Blob([res.buf],{type:res.type});
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         _playingEdgeAudio=audio;
@@ -1928,7 +1957,7 @@ window.renderTranscript=function(container, messages, opts){
       .then(res => {
         if(!_owns()) return;
         if(!res.ok) throw new Error((res.err&&res.err.message)||'TTS request failed');
-        const blob=new Blob([res.buf]);
+        const blob=new Blob([res.buf],{type:res.type});
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         _playingEdgeAudio=audio;
@@ -1978,7 +2007,7 @@ window.renderTranscript=function(container, messages, opts){
       .then(res => {
         if(!_owns()) return;
         if(!res.ok) throw new Error((res.err&&res.err.message)||'TTS request failed');
-        const blob=new Blob([res.buf]);
+        const blob=new Blob([res.buf],{type:res.type});
         const url = URL.createObjectURL(blob);
         const audio = new Audio(url);
         // Register with the shared handle (declared in ui.js, same global scope;
