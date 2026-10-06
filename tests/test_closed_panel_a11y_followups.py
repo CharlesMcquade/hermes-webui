@@ -323,14 +323,16 @@ def test_explicit_dismiss_hands_focus_back_to_the_invoking_control():
         "so its many content-selection callers are unaffected"
     )
 
-    # The workspace drawer's dismiss path (tapping outside it) returns to the edge
-    # toggle, which stays reachable after the drawer collapses.
+    # The workspace drawer's dismiss path (tapping outside it) returns focus to the
+    # control that opens the drawer in the current band. Above 900px that is the edge
+    # toggle; below it the toggle is display:none, so the composer's workspace
+    # button is the reachable invoker.
     chat_start = BOOT_JS.find("function closeMobileWorkspacePanelFromChat(")
     assert chat_start != -1, "the workspace drawer's outside-tap closer is missing"
     chat_body = BOOT_JS[chat_start : BOOT_JS.find("\n}", chat_start) + 2]
-    assert "closeWorkspacePanel($('btnWorkspacePanelEdgeToggle'))" in chat_body, (
+    assert "closeWorkspacePanel(_workspacePanelInvokerForBand())" in chat_body, (
         "tapping outside the drawer is an explicit dismiss and must hand focus back "
-        f"to the edge toggle; got {chat_body!r}"
+        f"to the band-appropriate invoker; got {chat_body!r}"
     )
 
 
@@ -345,6 +347,11 @@ def test_release_helper_only_focuses_an_explicit_visible_fallback():
     assert "fallback&&_isFocusableControl(fallback)" in helper, (
         "the fallback must be gated on _isFocusableControl() before being focused, or "
         f"a hidden invoker re-creates the invisible-focus bug; got {helper!r}"
+    )
+    assert "document.activeElement===fallback" in helper, (
+        "after focus() the helper must verify the fallback actually took it, and fall "
+        "through to the blur path when it did not — a control that silently refuses "
+        f"focus() would leave focus stranded on the hidden panel; got {helper!r}"
     )
     # The neutral landing survives as the fallback-of-last-resort.
     assert "blur()" in helper, (
@@ -369,6 +376,13 @@ def test_release_helper_only_focuses_an_explicit_visible_fallback():
     )
     assert "el.offsetParent" in guard_code, (
         f"the guard must reject display:none controls; got {guard_code!r}"
+    )
+    assert "getClientRects().length" in guard_code, (
+        "the guard must also reject controls with no client rects: a "
+        "position:fixed element is exempt from the offsetParent test whether it "
+        "is painted or not, so display:none fixed controls (#btnWorkspacePanel"
+        "EdgeToggle in the <=900px band) pass it and focus() silently fails; "
+        f"got {guard_code!r}"
     )
 
 
@@ -582,4 +596,399 @@ def test_an_unreachable_fallback_is_never_focused():
         "this browser DOES honour focus() on a visibility:hidden control — the guard in "
         "_isFocusableControl() is then load-bearing, and this test must be rewritten to "
         "assert the helper's behaviour instead of documenting a no-op"
+    )
+
+
+# ── Maintainer review, PR #7924: the workspace drawer's outside-tap dismiss ────
+#
+# closeMobileWorkspacePanelFromChat() only runs at <=900px, and that whole band
+# hides #btnWorkspacePanelEdgeToggle with display:none!important. The position:fixed
+# exemption in _isFocusableControl() let it through, focus() silently failed, and the
+# keyboard user was dropped on <body> and then onto browser chrome at the next Tab.
+#
+# These probes drive the REAL close path against the REAL production stylesheet at
+# the band where it broke. A static token assertion cannot see this: the failure is
+# "the browser refused the focus() call", which only shows up as an activeElement.
+
+# The band the bug lived in: 641-900px, where the edge toggle is display:none but
+# _isCompactWorkspaceViewport() still routes the workspace panel through the drawer.
+_COMPACT_WORKSPACE_BAND = {"width": 800, "height": 800}
+
+# The panel markup the walk needs: the drawer's own Close X plus a Files tab to park
+# focus on, exactly as in production.
+_WORKSPACE_PANEL_HTML = """<aside class="rightpanel">
+  <div class="panel-header"><div class="panel-actions">
+    <button class="panel-icon-btn close-preview" id="btnClearPreview" aria-label="Close preview">X</button>
+  </div></div>
+  <div class="workspace-panel-tabs" role="tablist">
+    <button class="workspace-panel-tab active" id="workspaceFilesTab" type="button">Files</button>
+  </div>
+</aside>"""
+
+# A control OUTSIDE the drawer, inside #mainChat so the pointerdown reaches the real
+# listener (boot.js binds it to #mainChat, and a synthetic event on a descendant
+# bubbles to it exactly as a real outside-tap does).
+_AFTER_PANEL_HTML = """<textarea id="msg"></textarea>"""
+
+
+def _workspace_functions_source() -> str:
+    """The production helpers the workspace-drawer walk needs, lifted verbatim.
+
+    Sourcing them (rather than restating them) keeps the probe honest — it fails if
+    boot.js changes its mind instead of testing a copy that drifted away from it.
+    The close path is incomplete without the panel-state functions it delegates to,
+    so closeWorkspacePanel -> _setWorkspacePanelMode -> syncWorkspacePanelUI are
+    extracted too; otherwise the real handler throws ReferenceError and the probe
+    would silently measure nothing.
+    """
+    source: list[str] = []
+    for name in (
+        "function _workspacePanelEls(",
+        "function _hasWorkspacePreviewVisible(",
+        "function _isCompactWorkspaceViewport(",
+        "function _isPhoneWidthViewport(",
+        "function _isFocusableControl(",
+        "function _releaseFocusFromClosedPanel(",
+        "function _setButtonTooltip(",
+        "function _uiText(",
+        "function _setWorkspacePanelMode(",
+        "function syncWorkspacePanelUI(",
+        "function _workspacePanelInvokerForBand(",
+        "function openWorkspacePanel(",
+        "function closeWorkspacePanel(",
+        "function closeMobileWorkspacePanelFromChat(",
+    ):
+        start = BOOT_JS.find(name)
+        assert start != -1, f"{name} is missing from boot.js"
+        body = BOOT_JS[start : BOOT_JS.find("\n}", start) + 2]
+        # Brace-matching on the raw text stops at the first "\n}", which for an
+        # object-literal body is the inner "};" line, not the function's own end.
+        # Verify the extraction is balanced so a truncated function (which would
+        # throw in the page and silently no-op the probe) cannot pass.
+        assert body.count("{") == body.count("}"), (
+            f"{name} extraction is unbalanced — the probe page would throw"
+        )
+        source.append(body)
+    return "\n".join(source)
+
+
+def _workspace_drawer_page_html() -> str:
+    return f"""<!doctype html><html><head><style>{STYLE_CSS}</style></head><body>
+<div class="layout" id="layout">
+  <main class="chat-shell" id="mainChat">
+    <div class="composer-left">
+      <div class="composer-ws-wrap">
+        <div class="composer-workspace-group ws-chip" id="composerWorkspaceGroup">
+          <button class="composer-workspace-files-btn" id="btnWorkspacePanelToggle"
+            type="button" title="Show workspace panel">Files</button>
+          <button class="composer-workspace-chip" id="composerWorkspaceChip"
+            type="button" disabled>ws</button>
+        </div>
+      </div>
+    </div>
+    {_AFTER_PANEL_HTML}
+  </main>
+</div>
+<button class="workspace-panel-edge-toggle" id="btnWorkspacePanelEdgeToggle"
+  type="button" data-tooltip="Show workspace panel" aria-label="Show workspace panel">E</button>
+{_WORKSPACE_PANEL_HTML}
+<script>$ = (id) => document.getElementById(id);</script>
+<script>let _workspacePanelMode = 'closed';</script>
+<script>{_workspace_functions_source()}</script>
+<script>
+  window.__openDrawer = () => {{
+    document.querySelector('.rightpanel').classList.add('mobile-open');
+    _workspacePanelMode = 'browse';
+  }};
+  window.__activeId = () => {{
+    const el = document.activeElement;
+    return el ? (el.id || el.tagName) : null;
+  }};
+  // The production wiring: boot.js binds closeMobileWorkspacePanelFromChat to
+  // pointerdown on #mainChat. Reproduce that binding here (the surrounding IIFE
+  // is not extractable as a standalone function) so the real handler body runs.
+  document.getElementById('mainChat')
+    .addEventListener('pointerdown', closeMobileWorkspacePanelFromChat);
+  // The real close leg of _setWorkspacePanelMode(): drop the class, then release
+  // focus the way the production function does.
+  window.__closeDrawer = (returnTo) => {{
+    const panel = document.querySelector('.rightpanel');
+    panel.classList.remove('mobile-open');
+    _workspacePanelMode = 'closed';
+    _releaseFocusFromClosedPanel(panel, returnTo);
+  }};
+  window.__edgeToggleDisplay = () =>
+    getComputedStyle(document.getElementById('btnWorkspacePanelEdgeToggle')).display;
+  window.__composerToggleRects = () =>
+    document.getElementById('btnWorkspacePanelToggle').getClientRects().length;
+</script>
+</body></html>"""
+
+
+def _run_outside_tap_focus_landing(width: int) -> str:
+    """Drive the outside-tap dismiss and report where document.activeElement lands.
+
+    Runs the real closeMobileWorkspacePanelFromChat() body against the real
+    stylesheet, so the pointerdown-guard branch, the band predicate and the fallback
+    choice all execute exactly as in production.
+    """
+    from playwright.sync_api import sync_playwright
+
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.launch(
+        headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"]
+    )
+    page = browser.new_page()
+    try:
+        page.set_viewport_size({"width": width, "height": 800})
+        page.set_content(_workspace_drawer_page_html())
+        page.evaluate("window.__openDrawer()")
+        # Focus the Files tab inside the open drawer: the state the maintainer's
+        # trace found when the dismiss misfired.
+        page.evaluate("document.getElementById('workspaceFilesTab').focus()")
+        # Fire the real handler. closeMobileWorkspacePanelFromChat bails on taps
+        # inside the panel or on a workspace toggle control, so target the chat
+        # textarea — the genuine outside-tap. A real mousedown blurs to <body>
+        # first, which is why real taps masked the bug; dispatch the event
+        # without that blur so the keyboard/AT dismiss path is what is measured.
+        page.evaluate(
+            """() => {
+                 document.getElementById('msg').dispatchEvent(
+                   new PointerEvent('pointerdown', {bubbles: true}));
+               }"""
+        )
+        page.wait_for_timeout(350)  # the 250ms slide-out + visibility flip
+        return page.evaluate("window.__activeId()")
+    finally:
+        browser.close()
+        playwright.stop()
+
+
+def test_outside_tap_dismiss_lands_focus_on_a_visible_invoker():
+    """The maintainer's #7924 should-fix, measured in the band that broke.
+
+    In the 641-900px band the drawer's outside-tap dismiss must hand focus to a
+    control the user can actually see and tab from. Before the fix it passed the
+    edge toggle, which is display:none across that whole band: focus() silently
+    failed, focus stayed on the hidden Files tab, and the next Tab escaped to
+    browser chrome. Real taps masked it (mousedown blurs to <body> first), so only
+    a programmatic/keyboard dismiss — an assistive-tech dismiss, or Enter on an
+    element — caught it."""
+    landed = _run_outside_tap_focus_landing(_COMPACT_WORKSPACE_BAND["width"])
+
+    assert landed == "btnWorkspacePanelToggle", (
+        "tapping outside the drawer at 800px must return focus to the composer's "
+        f"workspace toggle, the one visible invoker in that band (got {landed!r}). "
+        "Anything else — <body>, the hidden Files tab, browser chrome — means the "
+        "dismiss handed focus to a control the user cannot see or tab from."
+    )
+
+
+def test_edge_toggle_is_display_none_in_the_band_that_choose_the_fallback():
+    """Pin the premise, so the two probes above cannot silently go vacuous.
+
+    The whole reason the compact band needs a different fallback is that the edge
+    toggle is display:none there while the composer toggle is laid out. If a stylesheet
+    change moves either of those, the fallback choice has to be revisited.
+    """
+    playwright, browser = _chromium()
+    page = browser.new_page()
+    try:
+        page.set_viewport_size(_COMPACT_WORKSPACE_BAND)
+        page.set_content(_workspace_drawer_page_html())
+        page.evaluate("window.__openDrawer()")
+        edge_display = page.evaluate("window.__edgeToggleDisplay()")
+        composer_rects = page.evaluate("window.__composerToggleRects()")
+    finally:
+        browser.close()
+        playwright.stop()
+
+    assert edge_display == "none", (
+        f"the edge toggle must be display:none at {_COMPACT_WORKSPACE_BAND['width']}px "
+        f"for the compact-band fallback to be necessary; got display:{edge_display!r}"
+    )
+    assert composer_rects > 0, (
+        "the composer workspace toggle must be laid out at "
+        f"{_COMPACT_WORKSPACE_BAND['width']}px, or the replacement fallback is itself "
+        "unreachable"
+    )
+
+
+def test_a_fallback_that_refuses_focus_still_releases_focus():
+    """The safety net under the guard, measured rather than asserted.
+
+    _isFocusableControl() rejects a reachable-looking control that is display:none, so
+    the fallback branch is normally never entered for one. But the guard is a
+    prediction, not a guarantee — a control can hide between the check and the
+    focus() call — so the helper must confirm the focus actually landed and fall
+    through to the blur path when it did not. Staying on the dead node inside the
+    now-hidden panel is precisely the bug this series exists to remove.
+
+    A hidden-but-laid-out control (visibility:hidden) is the browser case that makes
+    focus() a no-op while still passing the offsetParent/position checks, so it is
+    what proves the fall-through.
+    """
+    playwright, browser = _chromium()
+    page = browser.new_page()
+    try:
+        page.set_viewport_size({"width": 390, "height": 780})
+        page.set_content(_workspace_drawer_page_html())
+        page.evaluate("window.__openDrawer()")
+        # Park focus inside the drawer, then hand the helper a fallback that will
+        # refuse focus().
+        page.evaluate("document.getElementById('workspaceFilesTab').focus()")
+        page.evaluate(
+            """() => {
+                 const panel = document.querySelector('.rightpanel');
+                 const doomed = document.getElementById('btnWorkspacePanelToggle');
+                 // visibility:hidden keeps the element laid out (offsetParent is
+                 // non-null) but makes focus() a no-op in Chromium.
+                 doomed.style.visibility = 'hidden';
+                 _releaseFocusFromClosedPanel(panel, doomed);
+               }"""
+        )
+        landed = page.evaluate("window.__activeId()")
+    finally:
+        browser.close()
+        playwright.stop()
+
+    assert landed != "workspaceFilesTab", (
+        "a fallback that refuses focus() must not leave focus stranded on the dead "
+        f"node inside the hidden panel; focus stayed on {landed!r}"
+    )
+
+
+def _close_x_drawer_page_html() -> str:
+    """The drawer's own Close X, wired to the REAL handleWorkspaceClose().
+
+    Needs the panel-state functions that path delegates to (closeWorkspacePanel ->
+    _setWorkspacePanelMode -> syncWorkspacePanelUI), plus a session so
+    syncWorkspacePanelUI() leaves the composer toggle enabled — with no session it
+    disables it (canBrowse is false) and the fallback is correctly refused, which
+    is a different scenario from the one under test.
+    """
+    functions = "\n".join(
+        BOOT_JS[start : BOOT_JS.find("\n}", start) + 2]
+        for name in (
+            "function _workspacePanelEls(",
+            "function _hasWorkspacePreviewVisible(",
+            "function _isFocusableControl(",
+            "function _releaseFocusFromClosedPanel(",
+            "function _setButtonTooltip(",
+            "function _uiText(",
+            "function _setWorkspacePanelMode(",
+            "function syncWorkspacePanelUI(",
+            "function _workspacePanelInvokerForBand(",
+            "function openWorkspacePanel(",
+            "function closeWorkspacePanel(",
+            "function handleWorkspaceClose(",
+            "function clearPreview(",
+        )
+        for start in [BOOT_JS.find(name)]
+        if start != -1
+    )
+    return (
+        f"""<!doctype html><html><head><style>{STYLE_CSS}</style></head><body>
+<div class="layout" id="layout">
+  <main class="chat-shell" id="mainChat">
+    <div class="composer-left">
+      <div class="composer-ws-wrap">
+        <div class="composer-workspace-group ws-chip" id="composerWorkspaceGroup">
+          <button class="composer-workspace-files-btn" id="btnWorkspacePanelToggle"
+            type="button" title="Show workspace panel">Files</button>
+          <button class="composer-workspace-chip" id="composerWorkspaceChip"
+            type="button" disabled>ws</button>
+        </div>
+      </div>
+    </div>
+    <textarea id="msg"></textarea>
+  </main>
+</div>
+<button class="workspace-panel-edge-toggle" id="btnWorkspacePanelEdgeToggle"
+  type="button" aria-label="Show workspace panel">E</button>
+<aside class="rightpanel">
+  <div class="panel-header"><div class="panel-actions">
+    <button class="panel-icon-btn close-preview" id="btnClearPreview" aria-label="Close preview">X</button>
+  </div></div>
+  <div class="workspace-panel-tabs" role="tablist">
+    <button class="workspace-panel-tab active" id="workspaceFilesTab" type="button">Files</button>
+  </div>
+</aside>
+<script>$ = (id) => document.getElementById(id);</script>
+<script>__SESSION__</script>
+<script>
+let _workspacePanelMode = 'closed';
+let _previewCurrentPath='', _previewCurrentMode='', _previewDirty=false;
+function t(k,f){{ return f; }}
+function renderBreadcrumb(){{}}
+</script>
+<script>
+function _isCompactWorkspaceViewport(){{ return window.matchMedia('(max-width: 900px)').matches; }}
+</script>
+<script>{functions}</script>
+<script>
+  window.__openDrawer = () => {{
+    document.querySelector('.rightpanel').classList.add('mobile-open');
+    _workspacePanelMode = 'browse';
+    syncWorkspacePanelUI();
+  }};
+  window.__activeId = () => {{
+    const el = document.activeElement;
+    return el ? (el.id || el.tagName) : null;
+  }};
+  $('btnClearPreview').onclick = handleWorkspaceClose;
+</script>
+</body></html>"""
+        # The session object has braces that f-string syntax would eat; substitute
+        # it after the fact. A session is what makes the composer toggle enabled
+        # (canBrowse), which is the scenario under test.
+        .replace("__SESSION__", "const S = {session:{session_id:1}, _profileDefaultWorkspace:null};")
+    )
+
+
+def test_the_drawers_own_close_x_returns_focus_to_the_invoker():
+    """The senior review's carried-over should-fix, measured.
+
+    The workspace drawer's own Close used to leave focus on <body>: the panel sync
+    disables that very button (syncWorkspacePanelUI sets clearBtn.disabled=!isOpen),
+    and the X is what handleWorkspaceClose() is wired to, so by the time any rescue
+    could run the focused node had already been dropped. The next Tab then escaped
+    the document. handleWorkspaceClose() now captures the band-appropriate invoker
+    before closing, exactly as the outside-tap dismiss does.
+    """
+    playwright, browser = _chromium()
+    page = browser.new_page()
+    try:
+        page.set_viewport_size({"width": 390, "height": 780})
+        page.set_content(_close_x_drawer_page_html())
+        page.evaluate("window.__openDrawer()")
+        page.wait_for_timeout(400)  # the 250ms slide-in transition
+        # Focus the drawer's own X — what a keyboard user does before dismissing.
+        page.evaluate("document.getElementById('btnClearPreview').focus()")
+        assert page.evaluate("window.__activeId()") == "btnClearPreview", (
+            "the probe must start with the drawer's Close focused"
+        )
+        page.evaluate("document.getElementById('btnClearPreview').click()")
+        after_close = page.evaluate("window.__activeId()")
+        page.wait_for_timeout(350)  # the 250ms slide-out transition
+        after_settle = page.evaluate("window.__activeId()")
+        page.keyboard.press("Tab")
+        after_tab = page.evaluate("window.__activeId()")
+    finally:
+        browser.close()
+        playwright.stop()
+
+    assert after_close == "btnWorkspacePanelToggle", (
+        "the drawer's own Close is an explicit dismiss and must hand focus to the "
+        f"invoker, not strand it on <body> (focus went to {after_close!r})"
+    )
+    assert after_settle == "btnWorkspacePanelToggle", (
+        "focus must stay on the invoker once the close animation settles, "
+        f"not fall back to <body> (focus went to {after_settle!r})"
+    )
+    # Walking on from the invoker must not re-enter the now-hidden drawer: the
+    # composer is what follows the drawer in the tab order.
+    assert after_tab == "msg", (
+        "the next Tab must continue from the invoker into the composer, not walk "
+        f"back into the closed drawer (got {after_tab!r})"
     )

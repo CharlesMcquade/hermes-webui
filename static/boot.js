@@ -268,7 +268,12 @@ function _releaseFocusFromClosedPanel(panel, fallback){
   if(!panel.contains(active))return;
   if(fallback&&_isFocusableControl(fallback)){
     try{fallback.focus();}catch(_){}
-    return;
+    // A reachable-looking control can still refuse focus() (a display:none
+    // control that slipped past the guard, or one a concurrent close hid in the
+    // same tick). Verify it actually took focus, and fall through to the blur
+    // path when it did not: staying on the dead node inside the now-hidden
+    // panel is the bug this helper exists to prevent.
+    if(document.activeElement===fallback)return;
   }
   // <body> is the neutral landing spot: it holds no tab stop, so the next Tab
   // continues from the document start.
@@ -285,6 +290,12 @@ function _isFocusableControl(el){
   // visibility:hidden, which still lays the element out.
   if(!el.offsetParent&&getComputedStyle(el).position!=='fixed')return false;
   if(getComputedStyle(el).visibility==='hidden')return false;
+  // getClientRects is the rendered-truth check that closes the display:none hole:
+  // offsetParent is null for a fixed element whether it is painted or not, so the
+  // position:'fixed' exemption above let a display:none control pass. The edge
+  // toggle is display:none across the whole 641-900px band, and focus() on it
+  // silently fails, which lands the user on browser chrome at the next Tab.
+  if(!el.getClientRects().length)return false;
   return true;
 }
 
@@ -353,7 +364,20 @@ function handleWorkspaceClose(){
     clearPreview();
     return;
   }
-  closeWorkspacePanel();
+  // Explicit dismiss: hand focus back to the control that opened the panel, like
+  // the "Close menu" X. Capture it BEFORE closing — the panel sync disables this
+  // very button, and a disabled focused button drops focus to <body>, which once
+  // made the rescue a no-op and left the next Tab walking the hidden drawer.
+  closeWorkspacePanel(_workspacePanelInvokerForBand());
+}
+
+// The control that opens the workspace drawer in the band the code is running in.
+// The edge toggle only exists above 900px; at or below it the edge toggle is
+// display:none and the composer's workspace toggle is the reachable invoker.
+function _workspacePanelInvokerForBand(){
+  return _isCompactWorkspaceViewport()
+    ? $('btnWorkspacePanelToggle')
+    : $('btnWorkspacePanelEdgeToggle');
 }
 
 async function _maybeBindFreshDefaultWorkspaceSession(prefillIntent=null){
@@ -723,9 +747,9 @@ function closeMobileWorkspacePanelFromChat(e){
     : null;
   if(t) return;
   // Tapping outside the drawer is an explicit dismiss, so hand focus back to the
-  // edge toggle that opened it (#7713 follow-up: a plain <body> landing would restart
+  // control that opened it (#7713 follow-up: a plain <body> landing would restart
   // the next Tab at the top of the document).
-  closeWorkspacePanel($('btnWorkspacePanelEdgeToggle'));
+  closeWorkspacePanel(_workspacePanelInvokerForBand());
 }
 function toggleWorkspacePanel(force){
   const {panel}= _workspacePanelEls();

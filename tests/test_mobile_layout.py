@@ -947,10 +947,14 @@ def test_workspace_toggle_close_race_guard_present():
         assert selector in fn, f"toggle guard must also cover {selector}"
     assert fn.index("if(t) return;") < fn.index("closeWorkspacePanel("), \
         "the guard must return before closeWorkspacePanel() runs"
-    # The explicit-dismiss path hands focus back to the edge toggle that opened
-    # the drawer; a bare close() would strand focus on the now-hidden panel.
-    assert "closeWorkspacePanel($('btnWorkspacePanelEdgeToggle'))" in fn, \
-        "tapping outside the drawer must return focus to the invoker"
+    # The explicit-dismiss path hands focus back to the control that opened the
+    # drawer in the band the code is running in (the edge toggle above 900px, the
+    # composer's workspace toggle at or below it, where the edge toggle is
+    # display:none). A bare close() would strand focus on the now-hidden panel.
+    assert "closeWorkspacePanel(_workspacePanelInvokerForBand())" in fn, \
+        "tapping outside the drawer must pass the invoker through to the close"
+    assert "function _workspacePanelInvokerForBand(" in BOOT, \
+        "the band-aware invoker picker must be shared by both dismiss paths"
 
 
 def test_executed_sidebar_tests_skip_cleanly_without_node():
