@@ -534,7 +534,7 @@ def _run_sidebar_lifecycle(start_width, start_drawer_open, end_width, pref):
     helpers = _extract_boot_js_functions(
         'closeMobileSidebar', '_isDesktopWidth', '_isCompactWorkspaceViewport',
         '_sidebarShouldCollapse', '_syncSidebarAria', '_applySidebarState',
-        '_isPhoneWidthViewport', '_isFocusableControl',
+        '_isPhoneWidthViewport', '_setPanelInert', '_isFocusableControl',
         '_releaseFocusFromClosedPanel')
     pref_js = 'null' if pref is None else repr(pref)
     script = f"""
@@ -624,7 +624,7 @@ def _run_sidebar_open_then_resize(width, pref, opener, clicks=1):
     helpers = _extract_boot_js_functions(
         'closeMobileSidebar', '_isDesktopWidth', '_isCompactWorkspaceViewport',
         '_sidebarShouldCollapse', '_syncSidebarAria', '_applySidebarState',
-        '_isPhoneWidthViewport', '_isFocusableControl',
+        '_isPhoneWidthViewport', '_setPanelInert', '_isFocusableControl',
         '_releaseFocusFromClosedPanel',
         '_isSidebarCollapsed', 'toggleSidebar', 'expandSidebar',
         'toggleMobileSidebar', 'mobileSwitchPanel')

@@ -3089,8 +3089,10 @@
        walks off-screen into an invisible tree, and on the left edge that tree
        holds the session list, the new-chat button and the file actions.
        visibility:hidden, delayed past the slide-out so the closing animation
-       still runs, removes the subtree from the tab order while — unlike
-       display:none — still letting the transform transition play.
+       still runs, removes the subtree from the tab order once the animation
+       ends; closeMobileSidebar() additionally sets the inert HTML attribute the
+       moment the panel closes, so the 250ms slide-out window is inert too.
+       Both leave the transform transition running — unlike display:none.
        pointer-events:none stops the parked panel swallowing clicks aimed at
        the chat underneath it. */
     .sidebar{position:fixed;left:0;top:0;bottom:0;width:100vw;max-width:none;z-index:200;box-sizing:border-box;
@@ -3128,8 +3130,10 @@
        display:flex so the slide can animate, which leaves its controls in the
        keyboard tab order — a keyboard user tabs off-screen into 5 invisible
        buttons and can even fire the hidden file picker. visibility:hidden
-       (delayed past the slide-out) removes the subtree from the tab order
-       while -- unlike display:none -- still letting the right transition run;
+       (delayed past the slide-out) removes the subtree from the tab order once
+       the animation ends, and _setWorkspacePanelMode() sets the inert HTML
+       attribute the moment the drawer closes, so the 250ms slide-out window is
+       inert too. Unlike display:none, neither cuts the right transition.
        pointer-events:none stops the parked panel swallowing clicks aimed at
        the chat underneath it. */
     .rightpanel{display:flex!important;position:fixed;

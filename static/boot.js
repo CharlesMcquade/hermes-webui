@@ -247,6 +247,40 @@ function _hasWorkspacePreviewVisible(){
   return !!(preview&&preview.classList.contains('visible'));
 }
 
+// Take an off-canvas panel out of the tab order (and of AT/hit-testing) while it
+// closes. The closed panels stay laid out so their slide-out can animate, which
+// leaves their whole subtree tabbable during the closing window — the subtree only
+// becomes invisibility:hidden (and therefore untabbable) once the animation ends.
+// A keyboard user who dismisses a drawer and immediately Tabs walks back into the
+// disappearing panel, and when the visibility flip lands the focus they just moved
+// is stranded on an invisible control: the exact failure this series removes.
+// inert closes that window with no delay and -- unlike display:none -- still lets the
+// transition play, so it is set only while the panel is closed (the open state clears
+// it, and content-selection closes that re-open the panel see it cleared too).
+// The CSS property would be the declarative home for this, but it is not yet a
+// computed value in every engine we support; the reflective HTML attribute is.
+function _setPanelInert(panel, open){
+  if(!panel)return;
+  // Arm only inside the panel's own compact drawer band. At wider widths the
+  // panel is a normal, visible pane, and the inert HTML attribute would kill it
+  // there no matter what the CSS says: closeMobileSidebar() runs on desktop too
+  // (opening a session calls it unconditionally, and _applySidebarState() calls
+  // it when leaving phone widths), so arming outside the drawer band would
+  // strand the desktop sidebar — the same trap the focus-rescue phone-band guard
+  // avoids. The open direction always clears, so a panel resized back into its
+  // band recovers.
+  if(!open){
+    const compact = panel.classList.contains('sidebar')
+      ? _isPhoneWidthViewport()
+      : _isCompactWorkspaceViewport();
+    if(!compact)return;
+  }
+  try{
+    if(open)panel.removeAttribute('inert');
+    else panel.setAttribute('inert','');
+  }catch(_){}
+}
+
 // Park focus somewhere real when an off-canvas panel closes out from under it (#7713).
 // The closed drawer/sidebar is visibility:hidden, so the browser keeps reporting the
 // now-invisible control as document.activeElement: a subsequent Tab restarts from that
@@ -312,6 +346,9 @@ function _setWorkspacePanelMode(mode, returnFocusTo){
   layout.classList.toggle('workspace-panel-collapsed',!open);
   if(_isCompactWorkspaceViewport()){
     panel.classList.toggle('mobile-open',open);
+    // Open panels drop inert; closed ones take it for the whole closing window,
+    // not just after the 250ms visibility flip (see _setPanelInert).
+    _setPanelInert(panel, open);
     // returnFocusTo is set only by the explicit-dismiss path (tapping outside the
     // drawer), so focus returns to the edge toggle; automatic mode syncs leave it
     // undefined and keep the plain <body> landing.
@@ -484,6 +521,7 @@ function toggleMobileSidebar(){
   else{
     try{if(typeof _syncMobileSidebarPanelFromMainView==='function')_syncMobileSidebarPanelFromMainView();}catch(_){}
     sidebar.classList.remove('mobile-session-page');sidebar.classList.add('mobile-panel-drawer','mobile-open');
+    _setPanelInert(sidebar, true);
   }
 }
 function closeMobileSidebar(returnFocusTo){
@@ -491,6 +529,9 @@ function closeMobileSidebar(returnFocusTo){
   const overlay=$('mobileOverlay');
   if(sidebar)sidebar.classList.remove('mobile-open','mobile-session-page','mobile-panel-drawer');
   if(overlay)overlay.classList.remove('visible');
+  // Out of the tab order for the whole closing window, not just once the
+  // visibility flip lands 250ms later (see _setPanelInert).
+  _setPanelInert(sidebar, false);
   // The parked sidebar is visibility:hidden (#7713), so rescue the focus if it was
   // inside — otherwise the next Tab restarts from an invisible control. Guard on the
   // phone-width band where the sidebar actually hides: this function also runs on
@@ -549,6 +590,7 @@ function _openMobileSidebarFromGesture(){
   sidebar.classList.remove('mobile-session-page');
   sidebar.classList.add('mobile-panel-drawer');
   sidebar.classList.add('mobile-open');
+  _setPanelInert(sidebar, true);
 }
 
 function _onPwaSidebarSwipeStart(e){

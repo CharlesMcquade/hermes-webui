@@ -399,6 +399,7 @@ def _boot_functions_source() -> str:
     source: list[str] = []
     for name in (
         "function _isPhoneWidthViewport(",
+        "function _setPanelInert(",
         "function _isFocusableControl(",
         "function _releaseFocusFromClosedPanel(",
         "function closeMobileSidebar(",
@@ -531,6 +532,137 @@ def test_tab_to_close_menu_then_enter_lands_focus_on_the_hamburger():
     )
 
 
+def test_the_closing_sidebar_is_inert_before_its_visibility_flip():
+    """The 250ms closing window must not re-admit the sidebar to the tab order.
+
+    The closed sidebar delays its visibility flip past the 0.25s slide-out so the
+    animation still runs (pinned by
+    test_closed_sidebar_slide_animation_is_not_cut_short), and until that flip the
+    subtree is still laid out and tabbable. A user who dismisses the drawer and
+    immediately Tabs walks straight back into the panel that is disappearing, and
+    when the flip lands the focus it just moved is stranded on an invisible
+    control — the exact failure this PR series removes.
+
+    The inert CSS property closes the window: it takes the subtree out of the tab
+    order the moment the panel closes, with no delay, and still lets the transform
+    transition play. The walk below drives a Tab into the window (immediately after
+    Enter, with no wait) and asserts it lands on the composer rather than back on
+    the drawer's controls.
+    """
+    playwright, browser = _chromium()
+    page = browser.new_page()
+    try:
+        page.set_viewport_size({"width": 390, "height": 780})
+        page.set_content(_dismiss_page_html())
+        page.evaluate("window.__openSidebar()")
+        page.evaluate("document.getElementById('btnCloseMenu').focus()")
+        page.keyboard.press("Enter")
+        # No wait_for_timeout here on purpose: this is the walk inside the 250ms
+        # slide-out window, before visibility has flipped to hidden.
+        page.keyboard.press("Tab")
+        during_transition = page.evaluate("window.__activeId()")
+        still_visible = page.evaluate(
+            "() => getComputedStyle(document.querySelector('.sidebar')).visibility"
+        )
+    finally:
+        browser.close()
+        playwright.stop()
+
+    assert still_visible == "visible", (
+        "the probe must have Tabbed inside the 250ms slide-out window, before the "
+        f"delayed visibility flip (got {still_visible!r}) — waiting longer here would "
+        "silently turn this test into a copy of the settled-state walk"
+    )
+    assert during_transition == "msg", (
+        "a Tab during the closing animation must skip the sidebar and continue from "
+        "the hamburger into the composer — landing on a sidebar control means the "
+        f"panel is back in the tab order mid-slide (got {during_transition!r})"
+    )
+
+
+def test_the_closed_panels_are_marked_inert_when_they_close():
+    """The closing-window coverage above only proves the browser honours inert in
+    this Chromium. This pins the boot.js wiring itself, comment-stripped, so the
+    250ms window cannot reopen: every close path must set the inert attribute, and
+    every open path must clear it — a missing clear would leave a closed-then-
+    reopened panel permanently unusable.
+
+    The static half is deliberate: the attribute is the contract, and a browser
+    probe cannot see a path boot.js never takes."""
+    closed_call = "_setPanelInert(sidebar, false);"
+    open_calls = (
+        "_setPanelInert(sidebar, true);",
+        "_setPanelInert(panel, open);",
+    )
+    assert "function _setPanelInert(" in BOOT_JS, (
+        "_setPanelInert() is missing from boot.js"
+    )
+    for call in (closed_call, *open_calls):
+        assert call in BOOT_JS, f"{call} is missing from boot.js"
+    # The inert setter must arm on close by default and only clear on open: the
+    # helper itself is what decides, so an inverted call site cannot ship silently.
+    setter = BOOT_JS[BOOT_JS.index("function _setPanelInert(") :]
+    setter = setter[: setter.index("\n}")]
+    assert "removeAttribute('inert')" in setter, (
+        "an open panel must clear the inert attribute, or a reopened drawer stays "
+        f"inert — got {setter!r}"
+    )
+    assert "setAttribute('inert'" in setter, (
+        "a closed panel must take the inert attribute, or the closing window stays "
+        f"tabbable — got {setter!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("band", "arms"),
+    [
+        ({"width": 390, "height": 780}, True),
+        ({"width": 1280, "height": 800}, False),
+    ],
+    ids=["390px", "1280px"],
+)
+def test_inert_arms_only_inside_the_panels_own_drawer_band(band, arms):
+    """inert is an HTML attribute: unlike the CSS panel states it does not become
+    harmless outside the drawer band — it kills the visible desktop pane outright.
+
+    closeMobileSidebar() runs at every width (opening a session calls it
+    unconditionally, and _applySidebarState() calls it when leaving phone widths),
+    so arming without a band guard would strand the whole desktop sidebar. The
+    guard is pinned here rather than assumed: the 1280px case below fails if the
+    band check is ever dropped, which no existing probe would otherwise see."""
+    playwright, browser = _chromium()
+    page = browser.new_page()
+    try:
+        page.set_viewport_size(band)
+        page.set_content(_dismiss_page_html())
+        page.evaluate("window.__openSidebar()")
+        page.evaluate("document.getElementById('btnCloseMenu').focus()")
+        page.evaluate("dismissMobileSidebar()")
+        inert_armed = page.evaluate(
+            "() => document.getElementById('sidebar').hasAttribute('inert')"
+        )
+        page.evaluate("document.getElementById('btnCloseMenu').focus()")
+        sidebar_still_focusable = page.evaluate("window.__activeId()") == "btnCloseMenu"
+    finally:
+        browser.close()
+        playwright.stop()
+
+    if arms:
+        assert inert_armed, (
+            f"at {band['width']}px the compact drawer must take the inert attribute "
+            "on close, or the 250ms closing window stays tabbable"
+        )
+    else:
+        assert not inert_armed, (
+            f"at {band['width']}px the sidebar is a normal visible pane: inert would "
+            "kill it outright, so the band guard must skip arming it"
+        )
+        assert sidebar_still_focusable, (
+            f"the sidebar must stay usable at {band['width']}px after a close — "
+            "inert had stranded the desktop pane"
+        )
+
+
 def test_a_content_selection_close_still_lands_on_body():
     """The other half of the contract: picking a session or a panel item already moves
     focus to the composer, so the plain close must NOT pull it back to the hamburger.
@@ -647,6 +779,7 @@ def _workspace_functions_source() -> str:
         "function _hasWorkspacePreviewVisible(",
         "function _isCompactWorkspaceViewport(",
         "function _isPhoneWidthViewport(",
+        "function _setPanelInert(",
         "function _isFocusableControl(",
         "function _releaseFocusFromClosedPanel(",
         "function _setButtonTooltip(",
@@ -872,6 +1005,7 @@ def _close_x_drawer_page_html() -> str:
         for name in (
             "function _workspacePanelEls(",
             "function _hasWorkspacePreviewVisible(",
+            "function _setPanelInert(",
             "function _isFocusableControl(",
             "function _releaseFocusFromClosedPanel(",
             "function _setButtonTooltip(",
