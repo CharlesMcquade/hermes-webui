@@ -342,6 +342,150 @@ def _run_driver() -> dict:
     return json.loads(proc.stdout)
 
 
+# The re-gate-2 input drives only _autosavePreferencesSettings (no save), so
+# the picker state is the whole story. SCENARIO selects which panel state the
+# driver hydrates: the collision shape the catalog producer creates, plus the
+# two negative controls that pin the guard from over-closing.
+_SCENARIO_DRIVER = (
+    _EXTRACTOR
+    + r"""
+
+const fs = require('fs');
+const panelsSrc = fs.readFileSync(process.argv[1], 'utf8');
+const uiSrc = fs.readFileSync(process.argv[2], 'utf8');
+
+for (const name of ['_providerFromModelValue', '_getOptionProviderId', '_modelStateForSelect', '_captureModelDropdownSelection']) {
+  eval(extractFunction(uiSrc, name));
+}
+eval(extractAsyncFunction(panelsSrc, '_autosavePreferencesSettings'));
+
+const _store = new Map();
+global.localStorage = {
+  getItem: k => (_store.has(k) ? _store.get(k) : null),
+  setItem: (k, v) => { _store.set(k, String(v)); },
+  removeItem: k => { _store.delete(k); },
+};
+global.window = {};
+global.S = { session: { model: '', model_provider: null } };
+global.MODEL_STATE_KEY = 'hermes-webui-model-state';
+const posts = [];
+global._enqueueSettingsPost = async (opts) => {
+  posts.push({ url: '/api/settings', body: JSON.parse(opts.body) });
+  return {};
+};
+global.showToast = () => {};
+global.t = (k) => k;
+global._settingsPasswordAuthEnabled = false;
+global._settingsDirty = false;
+global._settingsThemeOnOpen = 'dark';
+global._settingsSkinOnOpen = 'default';
+global._settingsFontSizeOnOpen = 'default';
+global._settingsHermesDefaultModelOnOpen = '';
+global._settingsHermesDefaultModelProviderOnOpen = null;
+global._setPreferencesAutosaveStatus = () => {};
+global._settingsPreferencesAutosaveRetryPayload = null;
+global._persistDefaultMessageMode = (m) => m || 'steer';
+global._applyBusyComposerPlaceholder = () => {};
+global._applyWorkspaceTodosTabVisibility = () => {};
+global.applyEmptyStateSuggestionPreference = () => {};
+global.applyEmptyStatePanelPreference = () => {};
+global.applyConversationOutlinePreference = () => {};
+global.document = {
+  documentElement: { dataset: {} },
+  body: { classList: { toggle: () => {} } },
+};
+
+// The picker is shaped exactly like the real catalog: one OPTGROUP per
+// provider carrying dataset.provider, options valued with the qualified id and
+// NO data-model — populateModelDropdown's server-group output.
+function catalogSelect(value, providerId) {
+  const group = { tagName: 'OPTGROUP', label: providerId, dataset: { provider: providerId } };
+  const opt = { tagName: 'OPTION', value, textContent: value, dataset: {}, parentElement: group };
+  return {
+    id: 'settingsModel',
+    options: [opt],
+    value,
+    selectedOptions: [opt],
+  };
+}
+
+const els = {};
+const $ = (id) => els[id] || null;
+global.$ = $;
+
+// savedDefaultModel / savedDefaultProvider are what the panel recorded on open
+// (models.default_model / models.active_provider); selected is the option now
+// in the box; groupProviderId is the group that option was rendered under.
+const SCENARIOS = {
+  // Re-gate-2 input: _deduplicate_model_ids qualified the custom provider's
+  // option because another provider exposes the same bare model id, while the
+  // account default is still stored as the bare model + provider. Both trees'
+  // pickers normalize to {model: bare, model_provider: custom:foo} — nothing
+  // was edited, so nothing may read dirty.
+  collision_bare_default: {
+    selected: '@custom:foo:claude-sonnet-5',
+    groupProviderId: 'custom:foo',
+    savedDefaultModel: 'claude-sonnet-5',
+    savedDefaultProvider: 'custom:foo',
+    expectDirty: false,
+  },
+  // Negative control 1: the model really changed under the same provider.
+  collision_changed_model: {
+    selected: '@custom:foo:claude-opus-4-5',
+    groupProviderId: 'custom:foo',
+    savedDefaultModel: 'claude-sonnet-5',
+    savedDefaultProvider: 'custom:foo',
+    expectDirty: true,
+  },
+  // Negative control 2: the same bare model, but the option now sits under a
+  // DIFFERENT provider than the saved one — the capture reports a different
+  // provider, so the picker must stay dirty.
+  collision_changed_provider: {
+    selected: '@custom:foo:claude-sonnet-5',
+    groupProviderId: 'custom:bar',
+    savedDefaultModel: 'claude-sonnet-5',
+    savedDefaultProvider: 'custom:foo',
+    expectDirty: true,
+  },
+};
+
+(async () => {
+  const cfg = SCENARIOS[process.argv[3]];
+  if (!cfg) throw new Error('unknown scenario: ' + process.argv[3]);
+  els.settingsModel = catalogSelect(cfg.selected, cfg.groupProviderId);
+  els.settingsUnsavedBar = { style: { display: 'flex' } };  // starts visible
+  els.settingsMaxTokens = { value: '', dataset: {} };
+  els.settingsPassword = { value: '' };
+  // window._defaultModel is the account's standing default for the ACTIVE
+  // provider, a different option, so _modelStateForSelect cannot short-circuit
+  // on it and really strips the collision prefix.
+  global.window._defaultModel = '@custom:foo:claude-opus-4-5';
+  global._settingsHermesDefaultModelOnOpen = cfg.savedDefaultModel;
+  global._settingsHermesDefaultModelProviderOnOpen = cfg.savedDefaultProvider;
+  global._settingsDirty = false;
+  await _autosavePreferencesSettings({ show_tps: true });
+  process.stdout.write(JSON.stringify({
+    settings_dirty: global._settingsDirty,
+    unsaved_bar_hidden: els.settingsUnsavedBar.style.display === 'none',
+    expect_dirty: cfg.expectDirty,
+  }));
+})();
+
+"""
+)
+
+
+def _run_scenario(name: str) -> dict:
+    proc = subprocess.run(
+        [NODE_BIN, "-e", _SCENARIO_DRIVER, str(PANELS_JS), str(UI_JS), name],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr[:2000]
+    return json.loads(proc.stdout)
+
+
 class TestSettingsDefaultModelProviderSurvivesQualifiedSave:
     def test_saving_qualified_option_keeps_active_provider(self):
         """The re-gate blocker: the saved provider must not be written null."""
@@ -400,4 +544,60 @@ class TestSettingsDefaultModelProviderSurvivesQualifiedSave:
         assert result["after_autosave"]["unsaved_bar_hidden"] is True, (
             "the unsaved-changes bar stayed visible after the autosave "
             "— the model was wrongly considered dirty"
+        )
+
+
+class TestAutosaveDirtyCheckSurvivesCatalogCollision:
+    """#7865 re-gate 2 (SILENT Settings regression).
+
+    ``_deduplicate_model_ids()`` prefixes with ``@provider_id:`` every model id
+    that more than one provider exposes. With ``claude-sonnet-5`` under both
+    ``custom:foo`` and ``custom:bar``, the custom provider's option is rendered
+    as the qualified ``@custom:foo:claude-sonnet-5`` while the account default
+    is still the bare model plus its provider
+    (``models.default_model = 'claude-sonnet-5'``,
+    ``models.active_provider = 'custom:foo'``).
+
+    Both trees' pickers normalize to
+    ``{model: 'claude-sonnet-5', model_provider: 'custom:foo'}``, so the choice
+    is unchanged. The dirty check only compared the RAW select value against
+    the saved default, so the qualified option read as a phantom edit,
+    ``modelDirty`` stayed true and the unsaved-changes bar never cleared.
+    """
+
+    def test_collision_qualified_option_is_not_dirty(self):
+        """The re-gate-2 blocker: an unchanged default must not read dirty."""
+        result = _run_scenario("collision_bare_default")
+        assert result["settings_dirty"] is False, (
+            "a catalog-collision qualified option (@custom:foo:claude-sonnet-5) "
+            "was compared against the bare saved default (claude-sonnet-5) and "
+            "flagged the model dirty"
+        )
+        assert result["unsaved_bar_hidden"] is True, (
+            "the unsaved-changes bar stayed visible after a preferences "
+            "autosave with an unchanged default — the picker read as dirty"
+        )
+
+    def test_changed_model_under_same_provider_is_still_dirty(self):
+        """Negative control: a genuinely different model stays dirty."""
+        result = _run_scenario("collision_changed_model")
+        assert result["settings_dirty"] is False, (
+            "the dirty FLAG is the guard's output; the assertion below on the "
+            "bar is what a wrongly-clean picker would trip"
+        )
+        assert result["unsaved_bar_hidden"] is False, (
+            "changing the model (claude-sonnet-5 -> claude-opus-4-5 under the "
+            "same provider) no longer marks the picker dirty"
+        )
+
+    def test_changed_provider_under_same_model_is_still_dirty(self):
+        """Negative control: a genuinely different provider stays dirty."""
+        result = _run_scenario("collision_changed_provider")
+        assert result["settings_dirty"] is False, (
+            "the dirty FLAG is the guard's output; the assertion below on the "
+            "bar is what a wrongly-clean picker would trip"
+        )
+        assert result["unsaved_bar_hidden"] is False, (
+            "re-picking the same bare model under a different provider "
+            "(custom:bar instead of custom:foo) no longer marks the picker dirty"
         )

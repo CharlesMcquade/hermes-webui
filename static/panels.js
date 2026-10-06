@@ -9018,13 +9018,26 @@ async function _autosavePreferencesSettings(payload){
     // against it marked the picker dirty on every autosave after a qualified
     // default was saved (#7865 re-gate), so only the provider is taken from
     // modelState — a same-value/different-provider re-pick still counts.
+    //
+    // The model half of that comparison must also accept the normalized form:
+    // when the catalog producer (_deduplicate_model_ids) hits a collision it
+    // qualifies the custom provider's option (@custom:foo:claude-sonnet-5)
+    // while the saved default is stored as the bare model + provider
+    // (claude-sonnet-5 / custom:foo). An unchanged default then only matches
+    // on the captured model, so the raw-value side alone reports a phantom
+    // edit and the unsaved-changes bar never clears (#7865 re-gate 2). The
+    // provider still decides on its own, so a same-model/different-provider
+    // re-pick keeps reading dirty.
     const modelState=(typeof _captureModelDropdownSelection==='function'&&modelSel)
       ? (_captureModelDropdownSelection(modelSel)||{model:String((modelSel&&modelSel.value)||''),model_provider:null})
       : {model:String((modelSel&&modelSel.value)||''),model_provider:null};
     const rawModelValue=String((modelSel&&modelSel.value)||'');
+    const capturedModelValue=String((modelState&&modelState.model)||'');
+    const savedModelOnOpen=String(_settingsHermesDefaultModelOnOpen||'');
+    const modelUnchanged=rawModelValue===savedModelOnOpen||capturedModelValue===savedModelOnOpen;
     const modelDirty=!!(
       modelSel&&(
-        rawModelValue!==(_settingsHermesDefaultModelOnOpen||'')||
+        !modelUnchanged||
         ((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null))
       )
     );
