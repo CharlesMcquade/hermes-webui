@@ -702,7 +702,16 @@ def _relay_gateway_run_events(
     surfaced_approval_ids=None, output_is_authoritative=False, approval_is_current=None,
     watchdog_secs=None,
 ):
-    """Relay one /v1/runs/{id}/events stream; returns (text or None if cancelled, usage, outcome).
+    """Relay one /v1/runs/{id}/events stream.
+
+    Returns ``(text or None if cancelled, usage, outcome, accepted_frame)``,
+    where ``accepted_frame`` is True when THIS connection accepted and
+    relayed any real frame (delta, reasoning, tool, approval — some accepted
+    frames carry no seq, so a cursor compare alone misses them); the
+    streaming caller uses it to reset the clean-EOF reconnect backoff
+    (round-7 review: cumulative text cannot drive the reset, because the
+    relay is seeded from the turn-wide buffer).
+
 
     outcome is "ended", "eof", "truncated" (the gateway dropped events after our cursor;
     only returned with ``stop_on_truncated``, otherwise the retained events keep relaying),
@@ -726,6 +735,11 @@ def _relay_gateway_run_events(
     outcome = "eof"
     seq = None
     sse_event = "message"
+    # True when this connection accepted and relayed any real frame (delta,
+    # reasoning, tool, approval). Round-7 review: the streaming caller's
+    # clean-EOF backoff reset must key on per-connection progress, not on
+    # the cumulative turn text (which seeds every reconnect non-empty).
+    accepted_frame = False
     # Keepalives are liveness, not progress: a stream that emits nothing but
     # comment frames past watchdog_secs is treated as stalled even though the
     # socket read never blocks past its timeout.
@@ -754,7 +768,7 @@ def _relay_gateway_run_events(
         # burning a status-probe round trip first.
         if cancel_event.is_set():
             put_gateway_event("cancel", {"message": "Cancelled by user"})
-            return None, usage, "ended"
+            return None, usage, "ended", False
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line.startswith("data:"):
             # Blank / "event:" / "id:" / comment-keepalive frames carry no
@@ -799,9 +813,15 @@ def _relay_gateway_run_events(
             continue
         payload_event = str(payload.get("event") or payload.get("type") or sse_event).strip() or "message"
         seq = payload.get("seq") if isinstance(payload.get("seq"), int) else None
+        # Any parsed, non-replay-control frame counts as per-connection
+        # progress for the clean-EOF backoff (round-7 review): delta,
+        # reasoning, tool, approval and terminal frames all qualify — some
+        # carry no seq, so this is deliberately not a cursor compare.
+        if payload_event != "replay.truncated":
+            accepted_frame = True
         if payload_event == "replay.truncated":
             if stop_on_truncated:
-                return final_text, usage, "truncated"
+                return final_text, usage, "truncated", False
             logger.info("Gateway replay for run %s truncated; relaying retained events", run_id)
             sse_event = "message"
             continue
@@ -878,7 +898,7 @@ def _relay_gateway_run_events(
                 reason="Gateway run was cancelled before approval resolution",
             )
             put_gateway_event("cancel", {"message": "Cancelled by gateway"})
-            return None, usage, "ended"
+            return None, usage, "ended", False
         reasoning_delta = _gateway_sse_reasoning_delta(payload)
         if reasoning_delta:
             if stream_id in STREAM_REASONING_TEXT:
@@ -891,7 +911,7 @@ def _relay_gateway_run_events(
         usage.update({k: v for k, v in _gateway_stream_usage(payload).items() if v})
         commit()
     commit()
-    return final_text, usage, outcome
+    return final_text, usage, outcome, accepted_frame
 
 
 def _admit_gateway_run(url_runs, headers, run_body, stream_id) -> str:
@@ -1112,6 +1132,7 @@ def _run_gateway_runs_api_streaming(
         outcome = "eof"
         events_unreachable = False
         stream_text = None
+        accepted_frame = False
         try:
             resp = _open_gateway_run_events(
                 base_url, headers, run_id, last_seq[0],
@@ -1133,7 +1154,7 @@ def _run_gateway_runs_api_streaming(
         if resp is not None:
             try:
                 with resp:
-                    stream_text, stream_usage, outcome = _relay_gateway_run_events(
+                    stream_text, stream_usage, outcome, accepted_frame = _relay_gateway_run_events(
                         resp, session_id, stream_id, run_id, base_url, api_key,
                         put_gateway_event=put_gateway_event, cancel_event=cancel_event,
                         # Cursor commit: the internal reconnect cursor ALWAYS
@@ -1174,11 +1195,13 @@ def _run_gateway_runs_api_streaming(
             # Terminal frame relayed (or the user/gateway cancelled); the
             # caller settles the turn from the returned text.
             return final_text, usage
-        # A data frame was relayed on this connection (or its outcome was
-        # otherwise not a bare clean EOF): real progress — reset the
-        # clean-EOF reconnect backoff so a healthy-but-chatty stream is
-        # never paced.
-        if outcome != "eof" or stream_text:
+        # Per-connection progress (any real frame accepted on THIS
+        # connection) resets the clean-EOF reconnect backoff. Round-7
+        # review: this must NOT key on cumulative turn text — the relay is
+        # seeded from the turn-wide buffer, so after the first delta every
+        # clean EOF would return non-empty text and the backoff would
+        # never double (a flat 0.5s forever, ~110 reconnects/minute).
+        if accepted_frame:
             clean_eof_reconnects = 0
         # ---- durable status probe: the only success arbiter (Fix 1) ----
         # Round-3 review: the 404 grace re-probe lives HERE, inside status
@@ -1271,8 +1294,14 @@ def _run_gateway_runs_api_streaming(
                 # wait. The status probe still runs every cycle, so a run
                 # that completes while we are backed off is still observed.
                 clean_eof_reconnects += 1
+                # Bound the EXPONENT before multiplying: unbounded,
+                # 2 ** 1024 overflows float conversion at reconnect ~1,025
+                # (~8.5h into a stuck turn) and kills the turn with
+                # OverflowError (round-7 review, CORE). 6 * ln2 doubling
+                # steps (x64) already exceed the 30s cap from the 0.5s base.
                 backoff = min(
-                    _CLEAN_EOF_BACKOFF_BASE_SECS * (2 ** (clean_eof_reconnects - 1)),
+                    _CLEAN_EOF_BACKOFF_BASE_SECS
+                    * (2 ** min(clean_eof_reconnects - 1, 6)),
                     _CLEAN_EOF_BACKOFF_MAX_SECS,
                 )
                 cancel_event.wait(backoff)
@@ -1469,7 +1498,7 @@ def _await_gateway_run_result(
         if streaming and probed:
             try:
                 with _open_gateway_run_events(base_url, _gateway_run_headers(session_id, api_key), run_id, last_seq[0]) as resp:
-                    text, usage, outcome = _relay_gateway_run_events(
+                    text, usage, outcome, _accepted = _relay_gateway_run_events(
                         resp, session_id, stream_id, run_id, base_url, api_key,
                         put_gateway_event=put_gateway_event, cancel_event=cancel_event,
                         on_seq=lambda seq: last_seq.__setitem__(0, seq), final_text=STREAM_PARTIAL_TEXT.get(stream_id, ""),

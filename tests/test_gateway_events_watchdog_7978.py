@@ -2012,10 +2012,12 @@ def test_r8_clean_eof_reconnect_backoff_bounds_reconnect_rate():
 
 
 def test_r8_real_progress_resets_clean_eof_backoff():
-    """A data frame committing a new seq is REAL progress: the backoff must
-    reset so a healthy-but-chatty stream is never paced. Two clean EOFs ->
-    a delta (seq 2) -> two more clean EOFs: the reconnect after the delta
-    must be immediate (zero clock advance across it), proving the reset."""
+    """Round-7 review fix: the backoff reset must key on per-connection
+    progress, not cumulative turn text. Two clean EOFs -> a data frame
+    connection -> TWO more clean EOFs: the reset must persist across both
+    (gaps [0.5, 1.0, 0.5, 1.0]). RED pre-fix: after the data frame the
+    relay's seeded text made every later clean EOF reset too, so gaps ran
+    [0.5, 1.0, 0.5, 0.5, ...] flat forever."""
     clock = FakeClock()
     harness = run_turn(
         clock=clock,
@@ -2025,22 +2027,43 @@ def test_r8_real_progress_resets_clean_eof_backoff():
             # clean EOF 3 carrying a DATA frame: real progress
             FakeSseResponse(sse_frame(2, {"event": "message.delta", "delta": "Hello"}), end="eof"),
             FakeSseResponse(b"", end="eof"),                      # clean EOF 4
+            FakeSseResponse(b"", end="eof"),                      # clean EOF 5
             FakeSseResponse(
                 sse_frame(3, {"event": "run.completed", "output": "Hello"}), end="eof"),
         ],
-        status_script=[{"status": "running"}] * 5,
+        status_script=[{"status": "running"}] * 6,
     )
     assert harness["result"][0] == "Hello"
-    # Probe-gap timeline: connect 1 -> base 0.5s; connect 2 -> 1.0s
-    # (doubling); connect 3 delivered a data frame — REAL progress, so the
-    # backoff RESETS and connect 4's clean EOF waits only the base 0.5s
-    # again. Without the reset the third gap would be 2.0s (the accrued
-    # doubling continuing). The final connect's terminal frame returns
-    # before any further probe.
     probes = [t for (kind, t) in harness["trace"] if kind == "status"]
     gaps = [round(b - a, 2) for a, b in zip(probes, probes[1:], strict=False)]
-    assert gaps == [0.5, 1.0, 0.5], (
-        f"backoff must reset on real progress (gaps {gaps!r})")
+    assert gaps == [0.5, 1.0, 0.5, 1.0], (
+        f"reset must apply per-connection (gaps {gaps!r})")
+
+
+def test_r8_reasoning_only_connection_resets_backoff():
+    """A connection that delivers only a reasoning frame (new seq, no
+    answer text) is REAL progress and must reset the backoff (round-7
+    review converse case: accepted frames can carry no answer text)."""
+    clock = FakeClock()
+    harness = run_turn(
+        clock=clock,
+        urlopen_script=[
+            FakeSseResponse(b"", end="eof"),                      # clean EOF 1
+            FakeSseResponse(b"", end="eof"),                      # clean EOF 2
+            FakeSseResponse(b"", end="eof"),                      # clean EOF 3
+            # clean EOF 4 carrying ONLY a reasoning frame
+            FakeSseResponse(sse_frame(1, {"event": "reasoning.available", "text": "thinking"}), end="eof"),
+            FakeSseResponse(b"", end="eof"),                      # clean EOF 5
+            FakeSseResponse(
+                sse_frame(2, {"event": "run.completed", "output": "done"}), end="eof"),
+        ],
+        status_script=[{"status": "running"}] * 6,
+    )
+    assert harness["result"][0] == "done"
+    probes = [t for (kind, t) in harness["trace"] if kind == "status"]
+    gaps = [round(b - a, 2) for a, b in zip(probes, probes[1:], strict=False)]
+    assert gaps == [0.5, 1.0, 2.0, 0.5], (
+        f"reasoning-only connection must reset the backoff (gaps {gaps!r})")
 
 
 def test_r8_stop_during_clean_eof_backoff_cancels_promptly():
@@ -2063,6 +2086,31 @@ def test_r8_stop_during_clean_eof_backoff_cancels_promptly():
         "Stop during the backoff must prevent the second connect")
     assert len(harness["trace"]) == 2, (
         f"no status probe may follow the cancelled wait, trace={harness['trace']!r}")
+
+
+def test_r8_overflow_bounded_exponent_survives_long_clean_eof_runs():
+    """Round-7 review CORE: unbounded, `0.5 * (2 ** (n - 1))` overflows
+    float conversion at reconnect ~1,025 (~8.5h into a stuck turn) and the
+    OverflowError escapes the streaming function, ending the turn. The
+    exponent must be bounded BEFORE multiplying; the turn must survive
+    past 1,100 consecutive clean-EOF reconnects (virtual clock) and still
+    complete when the gateway finally delivers the terminal frame."""
+    clock = FakeClock()
+    script = [FakeSseResponse(b"", end="eof") for _ in range(1100)]
+    script.append(FakeSseResponse(
+        sse_frame(1, {"event": "run.completed", "output": "survived"}), end="eof"))
+    harness = run_turn(
+        clock=clock,
+        urlopen_script=script,
+        status_script=[{"status": "running"}] * 1101,
+    )
+    assert harness["result"][0] == "survived", f"turn must survive the long EOF run, got {harness['result']!r}"
+    assert len(harness["urlopen"].requests) == 1101
+    # With the exponent bounded at 6 (x64), every backoff after the 7th
+    # reconnect sits at the 30s cap: 6 * 0.5 + 6 * 1 + ... capped sum.
+    elapsed_floor = 0.5 + 1.0 + 2.0 + 4.0 + 8.0 + 16.0 + (1101 - 7) * 30.0
+    assert clock.now >= elapsed_floor, (
+        f"capped backoffs must accumulate (elapsed {clock.now}s < {elapsed_floor}s)")
 
 
 def main():
@@ -2103,7 +2151,9 @@ def main():
         test_r7_observer_off_reconnect_cursor_unchanged,
         test_r8_clean_eof_reconnect_backoff_bounds_reconnect_rate,
         test_r8_real_progress_resets_clean_eof_backoff,
+        test_r8_reasoning_only_connection_resets_backoff,
         test_r8_stop_during_clean_eof_backoff_cancels_promptly,
+        test_r8_overflow_bounded_exponent_survives_long_clean_eof_runs,
     ]
     failed = 0
     for test in tests:
