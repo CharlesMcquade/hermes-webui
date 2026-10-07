@@ -385,31 +385,38 @@ def persisted_message_count_for_session(session_id: str) -> Optional[int]:
     compares the freshly-(re)subscribed tab's last-known count against this
     persisted count; a server that is AHEAD means a turn landed during the gap.
 
-    Reads the sidecar directly through ``Session.load_metadata_only`` instead
-    of the generic ``get_session`` resolver.  The generic resolver may return a
-    cached metadata stub whose count predates a gateway-backed sidecar rewrite;
-    comparing that stale count with the fresh ``/api/session`` response creates
-    an endless ``session-updated`` reconnect/reload loop.  The direct metadata
-    loader remains cheap and guarantees that both sides compare the same
-    on-disk sidecar generation.
+    Reads the CURRENT on-disk sidecar instead of the generic ``get_session``
+    resolver.  The generic resolver may return a cached metadata stub whose
+    count predates a gateway-backed sidecar rewrite; comparing that stale count
+    with the fresh ``/api/session`` response creates an endless
+    ``session-updated`` reconnect/reload loop (#7672).
 
-    The persisted count is written by ``Session.save`` as
-    ``meta['message_count'] = len(messages)`` — the SAME basis the frontend's
-    ``S.session.message_count`` is built from.  Returns None when the count is
-    unknown (legacy sidecars without a persisted count); the caller treats None
-    as "cannot tell, do nothing", never as a trigger.
+    The read is bounded and count-only (``_prefix_message_count``: a 64 KiB
+    first stage, 1 MiB hard cap, never a full transcript parse).  This runs on
+    every per-session SSE (re)connect, so it must not fall back to
+    ``Session.load()`` the way ``Session.load_metadata_only()`` does for an
+    oversized metadata prefix: on a ~30 MiB sidecar that fallback costs ~0.9 s
+    per subscribe, multiplied by every reconnecting tab.
+
+    The count is trusted only when the writer marker (``_mc_v``) vouches that
+    the same atomic write produced both the count and the messages array; an
+    unvouched count can be stale against its rows, which is exactly the shape
+    that drives the reload loop.  The persisted count is written by
+    ``Session.save`` as ``meta['message_count'] = len(messages)`` -- the SAME
+    basis the frontend's ``S.session.message_count`` is built from.
+
+    Returns None whenever the count cannot be cheaply established (missing,
+    legacy/unmarked, corrupt or oversized metadata); the caller treats None as
+    "cannot tell, do nothing", never as a trigger.
     """
     try:
-        from api.models import Session
+        import api.models as _models
 
-        s = Session.load_metadata_only(session_id)
-        if s is None:
+        if not _models.is_safe_session_id(session_id):
             return None
-        count = getattr(s, "_metadata_message_count", None)
-        if count is None:
-            msgs = getattr(s, "messages", None)
-            count = len(msgs) if isinstance(msgs, list) and msgs else None
-        return int(count) if count is not None else None
+        return _models._prefix_message_count(
+            _models.SESSION_DIR / f"{session_id}.json"
+        )
     except Exception:
         logger.debug(
             "persisted_message_count_for_session lookup failed for %s",
