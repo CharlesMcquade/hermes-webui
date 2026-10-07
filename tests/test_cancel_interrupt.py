@@ -655,6 +655,7 @@ class TestCancelInterrupt:
         mock_session.pending_user_message = "q"
         mock_session.pending_attachments = []
         mock_session.pending_started_at = 1.0
+        mock_session.pending_user_source = "webui"
         mock_session.messages = [_user_msg, _other_partial, _durable_partial]
 
         # Use a real temp file for save/reload verification
