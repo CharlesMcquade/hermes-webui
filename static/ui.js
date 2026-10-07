@@ -9498,6 +9498,12 @@ function _playOpenaiTts(text, btn){
   // the only entry point.
   const gen=_beginTtsPlayback();
   _stopActivePlaybackAudio();
+  // Profile ownership of the whole playback. A chunk ownership gate on the
+  // generation alone survives a profile switch, so the remainder of profile A's
+  // reply would be sent under profile B's provider/credentials. Capture the
+  // profile at playback start and send it with every chunk request; the server
+  // rejects a mismatch with 409 before touching the limiter or config.
+  const playbackProfile=(S&&S.activeProfile)||'default';
   const _fail=function(msg){
     // Terminal failure: invalidate every scheduled/pending callback of this
     // playback (paced prefetch timers, in-flight fetch then-chains) so no
@@ -9526,7 +9532,13 @@ function _playOpenaiTts(text, btn){
     return _sendTtsRequest({
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:chunks[i], engine:'openai'})
+      body:JSON.stringify({
+        text:chunks[i],
+        engine:'openai',
+        // Empty/default is omitted server-side (omitting stays accepted), so
+        // legacy direct callers keep working untouched.
+        profile:(playbackProfile&&playbackProfile!=='default')?playbackProfile:undefined
+      })
     }, function(){ return _ownsTtsPlayback(gen); });
   }
   function _playChunk(i){

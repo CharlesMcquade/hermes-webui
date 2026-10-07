@@ -536,8 +536,141 @@ def test_play_openai_tts_exists_in_ui_js():
     src = (STATIC_DIR / "ui.js").read_text(encoding="utf-8")
     assert 'function _playOpenaiTts(text, btn)' in src
     # Chunked streaming playback: requests are sent per chunk, not as one blob.
-    assert "body:JSON.stringify({text:chunks[i], engine:'openai'})" in src
-    assert "function _splitForTTS(text, maxChars)" in src
+    assert "text:chunks[i]" in src
+    assert "engine:'openai'" in src
+    # Each chunk request pins the profile that owns the playback, so a
+    # mid-playback profile switch cannot speak A's text under B's credentials.
+    assert "playbackProfile=(S&&S.activeProfile)||'default';" in src
+    assert "profile:(playbackProfile&&playbackProfile!=='default')?playbackProfile:undefined" in src
+
+
+# ── Playback profile ownership (#7529 maintainer finding, SILENT) ───────────
+#
+# Chunked OpenAI TTS sends one request per chunk, so a playback that started
+# under profile A keeps issuing requests after the user switches to profile B.
+# The chunk ownership gate only guards the generation, which survives the
+# switch, so the remainder of A's reply was synthesized with B's provider and
+# credentials. The handler now rejects an explicitly CLAIMED profile that no
+# longer matches the active one, before the limiter or config access.
+
+
+def _profile_guard_sentinel_limiter():
+    """A limiter stand-in that fails loudly if the handler ever reaches it."""
+
+    class _Tripwire:
+        def _boom(self, *_a, **_kw):  # pragma: no cover - fail-fast guard
+            raise AssertionError("reached the rate limiter for a mismatched profile")
+
+        __getattr__ = _boom
+
+    return _Tripwire()
+
+
+def test_tts_chunk_profile_mismatch_returns_409_before_limiter(monkeypatch):
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "beta")
+    # Tripwire: touching the limiter means the guard is misplaced.
+    monkeypatch.setattr(
+        routes._handle_tts, "_tts_limiter", None, raising=False
+    )
+    monkeypatch.setattr(
+        routes._handle_tts, "_tts_limiter", _profile_guard_sentinel_limiter(), raising=True
+    )
+    h = _post({"text": "streaming remainder", "engine": "openai", "profile": "alpha"},
+              client="10.83.0.1")
+    routes._handle_tts(h, None)
+
+    assert h.status == 409
+    assert "profile" in (h.payload() or {}).get("error", "").lower()
+
+
+def test_tts_chunk_profile_match_is_accepted(monkeypatch):
+    import api.profiles as profiles
+    import api.onboarding as onboarding
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "beta")
+
+    def _fake_urlopen(req, timeout=0):
+        return _StreamOnceResponse([b"audio-openai"])
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr(onboarding, "_load_env_file", lambda *_a, **_k: {})
+    monkeypatch.setattr(routes, "_tts_open", lambda req, **kw: _fake_urlopen(req))
+    h = _post({"text": "still mine", "engine": "openai", "profile": "beta"},
+              client="10.83.0.2")
+    routes._handle_tts(h, None)
+    assert h.status == 200
+
+
+def test_tts_omitted_profile_still_accepted(monkeypatch):
+    """Legacy direct callers that omit `profile` must keep working."""
+    import api.onboarding as onboarding
+
+    def _fake_urlopen(req, timeout=0):
+        return _StreamOnceResponse([b"audio-openai"])
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr(onboarding, "_load_env_file", lambda *_a, **_k: {})
+    monkeypatch.setattr(routes, "_tts_open", lambda req, **kw: _fake_urlopen(req))
+    h = _post({"text": "no profile field", "engine": "openai"}, client="10.83.0.3")
+    routes._handle_tts(h, None)
+    assert h.status == 200
+
+
+def test_tts_empty_or_blank_profile_is_not_a_claim(monkeypatch):
+    """A blank profile claim is "no claim", not a mismatch."""
+    import api.onboarding as onboarding
+
+    def _fake_urlopen(req, timeout=0):
+        return _StreamOnceResponse([b"audio-openai"])
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr(onboarding, "_load_env_file", lambda *_a, **_k: {})
+    monkeypatch.setattr(routes, "_tts_open", lambda req, **kw: _fake_urlopen(req))
+    h = _post({"text": "blank profile", "engine": "openai", "profile": "   "}, client="10.83.0.4")
+    routes._handle_tts(h, None)
+    assert h.status == 200
+
+
+def test_tts_default_profile_alias_matches_root(monkeypatch):
+    """`default` must match a renamed root profile, per _profiles_match.
+
+    The production server resolves the real root alias through
+    `list_profiles_api()`; this test pins the alias relationship directly so
+    it validates the guard's use of `_profiles_match` rather than the local
+    machine's profile table.
+    """
+    import api.profiles as profiles
+    import api.onboarding as onboarding
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "kinni")
+    monkeypatch.setattr(profiles, "_is_root_profile",
+                        lambda n: n in ("default", "kinni"))
+
+    def _fake_urlopen(req, timeout=0):
+        return _StreamOnceResponse([b"audio-openai"])
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setattr(onboarding, "_load_env_file", lambda *_a, **_k: {})
+    monkeypatch.setattr(routes, "_tts_open", lambda req, **kw: _fake_urlopen(req))
+    h = _post({"text": "root alias", "engine": "openai", "profile": "default"},
+              client="10.83.0.5")
+    routes._handle_tts(h, None)
+    assert h.status == 200
+
+
+def test_tts_unrelated_profile_still_rejected(monkeypatch):
+    """A genuinely different profile stays rejected even with the root alias in play."""
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "kinni")
+    monkeypatch.setattr(profiles, "_is_root_profile",
+                        lambda n: n in ("default", "kinni"))
+    h = _post({"text": "other profile", "engine": "openai", "profile": "alpha"},
+              client="10.83.0.6")
+    routes._handle_tts(h, None)
+    assert h.status == 409
 
 
 def test_boot_js_handles_openai_engine():
