@@ -65,13 +65,15 @@ def normalize_dashboard_browser_url(raw_url: str | None) -> str:
     """Return a safe browser-only dashboard link URL.
 
     Unlike the server-side probe target, this value is only returned to the
-    browser for navigation.  It may point at a public reverse-proxy hostname, but
-    it still rejects credentials, paths, query strings, fragments, and non-HTTP
-    schemes so it cannot hide secrets or script URLs in config.
+    browser for navigation. It may point at a public reverse-proxy hostname, and
+    allows normalized browser sub-paths while rejecting credentials,
+    traversal/non-canonical paths, query strings, fragments, and non-HTTP schemes.
     """
     raw = str(raw_url or "").strip()
     if not raw:
         return ""
+    if "\\" in raw or "%5c" in raw.lower():
+        raise ValueError("invalid dashboard URL path")
     parsed = urlparse(raw)
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("invalid dashboard URL scheme")
@@ -82,7 +84,8 @@ def normalize_dashboard_browser_url(raw_url: str | None) -> str:
     if parsed.params or parsed.query or parsed.fragment:
         raise ValueError("invalid dashboard URL path")
     path = parsed.path or ""
-    if "%2f" in path.lower() or "%2e" in path.lower():
+    path_lower = path.lower()
+    if "\\" in path or "%5c" in path_lower or "%2f" in path_lower or "%2e" in path_lower:
         raise ValueError("invalid dashboard URL path")
     import posixpath as _posixpath
 

@@ -160,6 +160,10 @@ def test_dashboard_browser_url_allows_subpaths_and_rejects_traversal():
         "https://hermes.example.com/dashboard/%2fadmin",
         "https://hermes.example.com/dashboard?q=1",
         "https://hermes.example.com/dashboard#fragment",
+        "https://hermes.example.com/a\\..\\admin",
+        "https://hermes.example.com/\\evil",
+        "https://hermes.example.com/a%5c..%5cadmin",
+        "https://hermes.example.com/%5cevil",
     ):
         with pytest.raises(ValueError, match="invalid dashboard URL path"):
             normalize_dashboard_browser_url(invalid)
