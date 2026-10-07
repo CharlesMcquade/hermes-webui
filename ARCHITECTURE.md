@@ -122,11 +122,30 @@ Log file:
 
 ## 3. Runtime Environment
 
+### Context replay matching
+
+`api/streaming.py::_strip_replayed_context_items` filters replayed model-context
+blocks using longest-match statistics from a suffix automaton over reversed
+replay keys. Its greedy walk still removes only blocks of at least three rows;
+short repeats, row order, and provider-facing `api_content` identity are preserved.
+Long arc-summary identity is normalized once per row and indexed by role, provider
+payload and the existing 1,500-character prefix rule. Malformed unhashable roles
+retain an equality-scan fallback. For ordinary hashable roles/keys, matching uses
+O(existing + candidate) key operations and auxiliary space, in addition to payload
+normalization. All indexes are call-local; no session cache, durable schema, writer
+ownership, or SSE contract changes. Inputs are not mutated and retained rows are
+returned unchanged. All three context-reconciliation branches share this helper.
+
 - Python interpreter: <agent-dir>/venv/bin/python
 - The venv has all Hermes agent dependencies (run_agent, tools/*, cron/*)
 - Server binds to 127.0.0.1:8787 (localhost only, not public internet)
 - Access from Mac: SSH tunnel: ssh -N -L 8787:127.0.0.1:8787 <user>@<your-server>
 - The server imports Hermes modules via sys.path.insert(0, parent_dir)
+
+Suffix/prefix replay matching uses a linear prefix-function scan and constructs
+each comparison key once, preserving the existing replay equality contract.
+Read-side stale-stream maintenance defers when the session writer lock is busy;
+it leaves stream ownership and pending input intact for a later repair pass.
 
 Environment variables controlling behavior:
 

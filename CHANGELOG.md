@@ -35,6 +35,19 @@
 
 ### Performance
 
+- **Very long conversations no longer stall on the model-context step after a reply.** Following #8072, the
+  second comparison during settlement (which keeps the model's context free of replayed blocks and repeated
+  summaries) is now linear too. 2,000 rows take about 0.3 seconds instead of over a minute, and a 66,666-row
+  conversation settles in seconds, with byte-identical results. Thanks @hejuntt1014. (#8076, fixes #8073)
+
+- **Long conversations settle a reply much faster.** Finishing a stream compared the new transcript rows with the
+  saved ones in time that grew with the square of the conversation length, while holding the conversation's lock.
+  A 66,666-message transcript could stay stuck for over 90 minutes, with opening or stopping the chat waiting
+  behind it. That comparison is now linear: 4,000 rows take 0.2 seconds instead of over 5 minutes. Stale-stream
+  cleanup no longer waits on a busy conversation; it skips and retries on the next read, while sending a message
+  still waits briefly instead of reporting a phantom active stream. A second, model-context comparison is still
+  slow on very long conversations (#8073). Thanks @hejuntt1014. (#8072)
+
 - **New Chat, Cmd/Ctrl+K and `/new` focus the composer without waiting for a second session-list read.**
   `newSession()` already refreshes the sidebar (now forced, so the new row paints even while the pointer is over
   the list), but each caller also awaited its own `renderSessionList()` before focusing. That queued a second full
@@ -119,6 +132,80 @@
   run settles from that status, and a running one reconnects from the last event without repeating tokens. A Gateway
   that keeps closing the stream immediately is paced with a capped backoff instead of a reconnect storm, and Stop still
   cancels promptly during a wait. Thanks @Ejmathewp. (#7978 by @Ejmathewp)
+
+- **The Hermes dashboard link works when the dashboard is served under a sub-path.** A dashboard URL such as
+  `https://host/hermes/` is now accepted and opened with its path (and its trailing slash) intact, instead of being
+  rejected or cut back to the host. Backslashes and their encoded forms are still refused, and the server-side
+  reachability probe still targets the host only. Thanks @webtecnica. (#7909, fixes #7844)
+
+- **Work you stopped survives a restart.** When you press Stop, the partial reply and its tool cards are saved, and
+  they now come back intact after the server restarts, on reload, in copies and branches, and in later turns. That
+  includes conversations where Gateway questions were queued around the Stop, and older conversations recovered
+  from the run journal. The cancelled output stays out of the model's history for later turns. Thanks
+  @franksong2702. (#7829)
+
+- **The native Windows launcher starts on Agent-managed installs again.** `start.ps1` found the hermes-agent folder
+  but never passed it to the server process, so the server could not load the Agent's dependencies and exited before
+  it was reachable (`ModuleNotFoundError: yaml`). The launcher now exports the folder it found. Discovery also works
+  with pip-style and sibling-checkout layouts, and no longer stops on a legacy home folder it can't read.
+  Thanks @Yi-111-a. (#7948)
+
+- **Auto-follow holds up during fast streams.** While an agent streams quickly, scrolling up to read no longer yanks
+  you back to the bottom, and scrolling down to catch up re-attaches to the tail even though it keeps moving. A
+  trackpad jiggle near the bottom no longer drops the follow, and on iOS/Android post-render scroll artifacts and
+  portrait reflows are no longer mistaken for your own scrolling. Keyboard scrolling inside a nested pane such as
+  terminal output chains to the transcript at the pane's edge. Thanks @CharlesMcquade. (#7494)
+
+- **A MoA preset picked in the model picker runs its reference models once per call, not twice.** The WebUI also
+  sent a per-turn `moa_config` for these sessions, which made the Agent run a second, independent MoA round on every
+  API call, including each tool iteration, on top of the virtual provider's own. That roughly doubled reference and
+  aggregator calls and latency, and broke the preset's per-turn cache. With an Agent that serves the virtual `moa`
+  provider, the WebUI no longer sends it; older Agents keep the previous behaviour. Thanks @psanger. (#8065)
+
+- **Cron results now raise a browser notification when the WebUI tab is in the background.** The cron completion poll
+  skipped every tick while the tab was hidden, so a job delivering to its origin chat left a transcript entry and an
+  unread dot but never a notification, which is exactly when one is useful (and the Android app relays these). The
+  poll now runs while hidden; a visible tab still shows the toast, and a hidden one sends the browser notification
+  through the existing notification setting and permission. Clicking it focuses the right chat or the Tasks panel.
+  Thanks @happy5318. (#7652, fixes #7257)
+
+- **The update banner's Force update and Clear lock buttons go away once they no longer apply.** After a failed
+  Agent update armed them (a merge conflict, a diverged checkout, an untracked file in the way, or a stale
+  `.git/index.lock`), they stayed until a reload even after the problem was fixed. A fresh update check now clears a
+  button only when it can confirm the condition is gone. A result it can't confirm (for example an untracked nested
+  repository) keeps the button, as does a cached result or an older check that a newer failed update overtook. The
+  check never takes git's index lock. Thanks @pxxD1998. (#8058, follows #8040)
+
+- **Typing `/new` and pressing Enter twice quickly starts the new chat.** The first Enter takes `/new` from the
+  slash-command list. When skills couldn't load (for example on a server without an Agent), a skill request that
+  arrived a moment later re-opened the list, so the second Enter picked `/new` again instead of sending it. Picking a
+  command or pressing Escape now keeps the list closed for that text until you type again; a list that is still open
+  picks up late skills as before. This was also the intermittent `/new` failure in the browser-smoke check. (#8063,
+  fixes #8050)
+
+- **Running the test suite on a machine with Hermes Agent installed no longer fills the disk.** Three tests started
+  the server with a minimal environment that dropped `HERMES_DISABLE_LAZY_INSTALLS`, so each one installed a full
+  Agent environment (about 1.1 GB) into its temp folder, about 16 GB per run, and then failed. They now pass the flag,
+  and a test that installs an Agent environment into its temp folder fails with the fix in the message. (#8064)
+
+- **Links next to Chinese/Japanese punctuation end in the right place, and internationalized domains stay whole.** A URL
+  followed by full-width punctuation (`，`, `）`, `。`, opening brackets and quotes) now ends before it, so the prose after
+  it is no longer pulled into the link, while hosts written with the full-width dots (`https://例子。中国`,
+  `https://www。例子.com`, `https://example。рф`, labels with Indic or Thai vowel signs) still link whole and `．`/`｡`
+  inside a path or query no longer cut it short. Long runs of adjacent URLs still render in linear time. Thanks
+  @pxxD1998. (#7979 by @pxxD1998)
+
+- **CLI conversations no longer vanish from the sidebar when a read fails partway.** A read-only `projects.json`
+  (for example after a Docker UID mismatch), a locked `state.db` during the cron, webhook, kanban, project-recovery or
+  refill reads, or one unavailable profile in the all-profiles view used to throw away every row already loaded, so the
+  CLI sidebar went empty and stayed empty on every poll. Those failures now keep the rows that were read, mark the
+  result incomplete so it isn't cached, and the warning names the profile and database instead of blaming
+  `state.db`. Thanks @martindell. (#7555 by @martindell)
+
+- **Deleting your last conversation resets the model picker to your configured default.** The empty composer used to
+  keep showing the deleted conversation's model even though the next chat starts on the default, so the picker and the
+  model actually used disagreed. Single and batch delete both reset it, and a model you pick while the delete is still
+  in flight is kept. Thanks @MoBluey. (#7324 by @MoBluey)
 
 - **The model picker no longer lists a slash-named model twice under a plugin provider.** With an active provider such
   as Command Code and a configured model id that itself contains a slash (`deepseek/deepseek-v4-flash`), the

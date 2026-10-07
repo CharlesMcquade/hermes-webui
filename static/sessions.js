@@ -1868,6 +1868,55 @@ function _clearEmptyComposerModelOverride(){
   _emptyComposerModelOverrideHost._emptyComposerModelOverride=null;
 }
 
+const _composerModelPickHost=typeof window!=='undefined'?window:globalThis;
+
+// Track explicit picker intent independently of S.session. During deletion the
+// picker can change both before and after the active session is cleared.
+function _rememberComposerModelPick(model, modelProvider){
+  const resolvedModel=String(model||'').trim();
+  if(!resolvedModel) return;
+  const previous=_composerModelPickHost._composerModelPick;
+  _composerModelPickHost._composerModelPick={
+    model:resolvedModel,
+    model_provider:modelProvider||null,
+    revision:(Number(previous&&previous.revision||0)||0)+1,
+  };
+}
+
+function _readComposerModelPick(){
+  const state=_composerModelPickHost._composerModelPick;
+  if(!state||!state.model) return null;
+  return {
+    model:String(state.model||''),
+    model_provider:state.model_provider||null,
+    revision:Number(state.revision||0)||0,
+  };
+}
+
+function _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete){
+  const currentPick=typeof _readComposerModelPick==='function'
+    ? _readComposerModelPick()
+    : null;
+  const currentRevision=Number(currentPick&&currentPick.revision||0)||0;
+  const preservePick=currentPick&&currentRevision!==(Number(modelPickRevisionAtDelete||0)||0);
+  const model=String(preservePick?currentPick.model:(window._defaultModel||'')).trim();
+  const provider=preservePick?currentPick.model_provider:(window._activeProvider||null);
+  if(preservePick){
+    if(typeof _rememberEmptyComposerModelOverride==='function'){
+      _rememberEmptyComposerModelOverride(model,provider);
+    }
+  }else if(typeof _clearEmptyComposerModelOverride==='function'){
+    _clearEmptyComposerModelOverride();
+  }
+  const modelSel=$('modelSelect');
+  if(!model||!modelSel) return null;
+  const applied=typeof _ensureModelOptionInDropdown==='function'
+    ? _ensureModelOptionInDropdown(model,modelSel,provider)
+    : (typeof _applyModelToDropdown==='function'?_applyModelToDropdown(model,modelSel,provider):null);
+  if(applied&&typeof syncReasoningChip==='function') syncReasoningChip();
+  return applied;
+}
+
 let _newSessionWorkspaceAnnouncementClearTimer=null;
 
 function _setNewSessionWorkspaceCue(message){
@@ -4754,6 +4803,63 @@ function _profileQueryIntentFromLocation(){
     };
   }catch(_e){return empty;}
 }
+// #7652 review round 4: a sessionless cron notification carries an explicit
+// panel intent so the click lands on the panel the run belongs to instead of
+// the last chat the user had open. Only panels the main view actually renders
+// are accepted, so a stray parameter can never leave the app on a blank view.
+// Review round 5: a bare `^[a-z0-9][a-z0-9_-]*$` shape check accepted
+// `?panel=doesnotexist` — a valid-looking intent that made boot skip the
+// saved-chat restore and then had switchPanel select nothing. The name is
+// validated against the real panel set instead: the rail's own data-panel
+// attributes when the DOM is available, with the rendered panel views as a
+// headless fallback.
+function _knownPanelNames(){
+  const names=new Set();
+  try{
+    if(typeof document!=='undefined'&&document&&typeof document.querySelectorAll==='function'){
+      document.querySelectorAll('[data-panel]').forEach((el)=>{
+        const n=el&&el.dataset?el.dataset.panel:'';
+        if(n) names.add(String(n));
+      });
+      document.querySelectorAll('.panel-view').forEach((el)=>{
+        if(!el||!el.id) return;
+        const m=/^panel([A-Z][A-Za-z]*)$/.exec(el.id);
+        if(m) names.add(m[1].charAt(0).toLowerCase()+m[1].slice(1));
+      });
+    }
+  }catch(_e){/* fall through to the static set */}
+  if(!names.size){
+    ['chat','tasks','kanban','skills','memory','workspaces','profiles','todos','insights','logs','settings','plugin']
+      .forEach((n)=>names.add(n));
+  }
+  return names;
+}
+function _panelQueryIntentFromLocation(){
+  const empty={hasParam:false,valid:false,name:''};
+  if(typeof window==='undefined'||!window.location) return empty;
+  try{
+    const qs=new URLSearchParams(window.location.search||'');
+    if(!qs.has('panel')) return empty;
+    const name=String(qs.get('panel')||'');
+    return {
+      hasParam:true,
+      valid:/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)&&_knownPanelNames().has(name),
+      name
+    };
+  }catch(_e){return empty;}
+}
+function _consumePanelQueryParamFromLocation(){
+  if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
+  try{
+    const current=new URL(window.location.href);
+    const before=current.searchParams.toString();
+    current.searchParams.delete('panel');
+    const after=current.searchParams.toString();
+    if(after===before) return;
+    const next=current.pathname+(after?`?${after}`:'')+(current.hash||'');
+    window.history.replaceState(window.history.state||null,'',next);
+  }catch(_e){}
+}
 function _consumeProfileQueryParamFromLocation(){
   if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
   try{
@@ -4917,6 +5023,10 @@ function _renderBatchActionBar(){
       danger:true
     });
     if(!ok)return;
+    const modelPickAtDelete=typeof _readComposerModelPick==='function'
+      ? _readComposerModelPick()
+      : null;
+    const modelPickRevisionAtDelete=Number(modelPickAtDelete&&modelPickAtDelete.revision||0)||0;
     try{
       const results=await Promise.all(ids.map(async sid=>{
         const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
@@ -4930,7 +5040,10 @@ function _renderBatchActionBar(){
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions'+_sessionListQueryString());
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
-        else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
+        else{
+          _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
+          $('msgInner').innerHTML='';$('emptyState').style.display='';
+        }
       }
       if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
       else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
@@ -9911,6 +10024,10 @@ async function deleteSession(sid, beforeDelete=null){
     danger:true
   });
   if(!ok)return false;
+  const modelPickAtDelete=typeof _readComposerModelPick==='function'
+    ? _readComposerModelPick()
+    : null;
+  const modelPickRevisionAtDelete=Number(modelPickAtDelete&&modelPickAtDelete.revision||0)||0;
   const reflowPositions=_captureSessionReflowPositions();
   const beforeDeleteHold=beforeDelete?Promise.resolve().then(beforeDelete):null;
   const previousSessions=_allSessions;
@@ -9954,6 +10071,7 @@ async function deleteSession(sid, beforeDelete=null){
     if(remaining.sessions&&remaining.sessions.length){
       await loadSession(remaining.sessions[0].session_id);
     }else{
+      _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
       const _tt=$('topbarTitle');if(_tt)_tt.textContent=assistantDisplayName();
       const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
       $('msgInner').innerHTML='';
