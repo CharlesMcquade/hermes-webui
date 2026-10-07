@@ -15,6 +15,18 @@
 
 ---
 
+## Context replay matching
+
+Run `./scripts/test.sh -q tests/test_context_replay_scaling.py tests/test_large_replay_settlement.py tests/test_issue1217_transcript_compaction.py tests/test_stale_user_context_contamination.py tests/test_context_message_stable_ids.py tests/test_issue6751_api_content_agent_replay.py`.
+The context suite compares serialized output against the former greedy algorithm
+over seeded adversarial sequences, checks summary identity boundaries and all
+three reconciliation branches, and counts normalization/key comparisons for
+disjoint, periodic and near-miss sequences. Operation budgets, not wall-clock
+thresholds, are the regression gate. Benchmark no-overlap histories separately
+from correctness checks; include the shared helper and its reconciliation caller,
+and report row count, interpreter and base revision with timings. Use synthetic
+rows or isolated copies, never production session state.
+
 ## Session-scoped media authorization
 
 Run `./scripts/test.sh tests/test_media_inline.py tests/test_media_session_preview_auth.py`.
