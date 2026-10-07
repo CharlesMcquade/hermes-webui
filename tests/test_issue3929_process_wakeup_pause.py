@@ -2780,7 +2780,10 @@ def test_rotated_session_stream_end_uses_original_stream_owner_id(tmp_path, monk
     end_index = next(i for i, (name, _) in enumerate(events) if name == 'stream_end')
     assert done_index < title_index < end_index
     assert events[done_index][1]['session']['session_id'] == continuation_id
-    assert events[title_index][1]['session_id'] == session_id
+    # The title event targets the continuation (B) directly, while carrying the
+    # original SSE stream owner (A) separately for owner-fenced listeners.
+    assert events[title_index][1]['session_id'] == continuation_id
+    assert events[title_index][1]['stream_owner_session_id'] == session_id
     assert events[title_index][1]['target_session_id'] == continuation_id
     assert events[title_index][1]['title'] == 'Rotated Title Owner'
     assert end_payloads[-1] == session_id, (

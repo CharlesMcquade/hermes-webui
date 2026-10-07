@@ -227,10 +227,13 @@ existed: they re-enter self-heal on the next turn. Manual renames always win;
 recovery never overrides a user-set title. An unfinished latest turn is never
 paired with an older assistant response, including during adaptive refresh.
 
-After compression rotates a session ID, background title events carry the
-original SSE owner in `session_id` and the canonical continuation in
-`target_session_id`. The browser fences on the owner and applies the title to
-the continuation, retaining it through a delayed `done` rebind. `stream_end`
+After compression rotates a session ID (A→B), background title events target
+the continuation directly — `session_id` and `target_session_id` carry B, and
+`stream_owner_session_id` carries the original SSE owner A. The browser
+listener accepts either identifier: a reattached B tab and an A tab that
+rotates to B both apply the title, fencing on `expectedCurrent` so a manual
+rename is kept. A title model that keeps returning unusable output is capped
+at 3 recovery exchanges per session before it stops retrying. `stream_end`
 still closes the original stream.
 
 ## Gateway-backed browser chat

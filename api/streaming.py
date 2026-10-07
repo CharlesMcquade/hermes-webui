@@ -6572,11 +6572,12 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 'llm_language_mismatch',
                 'llm_language_mismatch_aux',
             }
-            # Recovery cap: snapshot the exchange count under the same decision
-            # lock region that validated the retry premise, and accept the local
-            # fallback once the session has this many exchanges — a model that
-            # keeps answering badly must not mint one title call per turn
-            # forever (#7318 re-gate, SHOULD-FIX).
+            # Recovery cap: accept the local fallback once the session has this
+            # many exchanges — a model that keeps answering badly must not mint
+            # one title call per turn forever (#7318 re-gate, SHOULD-FIX). The
+            # count reads the already-materialized session messages snapshot
+            # (no lock held); a concurrently appended message can only make the
+            # cap more permissive by one turn, which is acceptable here.
             try:
                 exchange_count = _count_exchanges(s.messages)
             except Exception:
