@@ -777,3 +777,130 @@ class TestMaintainerFollowUps:
         assert "!_showAllProfiles)returntrue" not in flat
         assert "_allSessionsScope" in gate
         assert "_profileMatchesActiveProfile" in gate
+
+
+# ── Round 3 (nesquena-hermes CHANGES_REQUESTED, 2026-10-07T10:12) ─────────────
+#
+# Two items gated the exact head `a6b93caa`:
+#  1. a modified/middle click on a historical CLI lineage segment opened its
+#     *continuation* in the new tab (a silent regression vs master), and
+#  2. the macOS WKWebView shell silently drops `window.open`, so the gesture
+#     was a dead click there (hermes-swift-mac#102).
+# Each test below is a red-before lock against the pre-fix revision.
+
+
+def test_lineage_segment_excluded_from_new_tab_choke_points():
+    """[Round 3 item 1] A modified/middle click on a lineage segment must keep
+    master's same-tab load: the deep-link page drops `skipLineageResolve`, so
+    the new tab re-resolved the segment to its continuation. Both new-tab
+    choke points must refuse a `.session-lineage-segment` target."""
+    consume = _extract_function(SESSIONS_JS, "_consumeSessionNewTabClick")
+    wire = _extract_function(SESSIONS_JS, "_wireSessionNewTabListeners")
+    assert ".session-lineage-segment" in consume
+    # auxclick + mousedown exclusion lists both carry the segment class.
+    assert wire.count(".session-lineage-segment") >= 2
+    # The segment's own handler still carries the same-tab load + the flag.
+    assert "await _openSidebarSession(seg, {skipLineageResolve:true});" in SESSIONS_JS
+    assert "if(!opts.skipLineageResolve" in SESSIONS_JS
+
+
+def test_open_helper_declines_in_macos_shell():
+    """[Round 3 item 2] The native macOS shell cannot open a second window, so
+    `_openSessionUrlInNewTab` must decline (return false) there and let every
+    tap path fall back to its same-tab load."""
+    opener = _extract_function(SESSIONS_JS, "_openSessionUrlInNewTab")
+    assert "window.webkit" in opener
+    assert "messageHandlers" in opener
+    assert "hermesNotify" in opener and "hermesTheme" in opener
+
+
+class TestRound3FollowUps:
+    def test_segment_target_refused_by_consume_choke_point(self):
+        """[Round 3 item 1] `_consumeSessionNewTabClick` must not open a tab
+        when the event target is inside a lineage segment. Red-before: the
+        exclusion list lacked `.session-lineage-segment`, so it opened."""
+        out = _run_node({
+            "helpers": _helpers(),
+            "driver": r"""
+sandbox.__seg = { closest: (sel) => (String(sel).indexOf('session-lineage-segment') >= 0 ? {} : null) };
+const mid = vm.runInContext(
+  `_consumeSessionNewTabClick(mkEvent({button:1,target:__seg}), "test-session-123")`, sandbox);
+const midOpened = !!sandbox.opened;
+sandbox.opened = null; sandbox.openCalls = 0;
+const ctrl = vm.runInContext(
+  `_consumeSessionNewTabClick(mkEvent({button:0,ctrlKey:true,target:__seg}), "test-session-123")`, sandbox);
+ret.mid = mid; ret.midOpened = midOpened; ret.ctrl = ctrl; ret.ctrlOpened = !!sandbox.opened;
+console.log(JSON.stringify(ret));
+""",
+        })
+        assert out["mid"] is False and out["midOpened"] is False
+        assert out["ctrl"] is False and out["ctrlOpened"] is False
+
+    def test_segment_target_refused_by_wirer_auxclick(self):
+        """[Round 3 item 1] The shared wirer's auxclick must no-op for a
+        segment target instead of opening a tab. Red-before: it opened."""
+        wire = _extract_function(SESSIONS_JS, "_wireSessionNewTabListeners")
+        out = _run_node({
+            "helpers": _helpers(),
+            "driver": (
+                "const wireSrc = " + json.dumps(wire) + r""";
+const seen = {};
+const node = { addEventListener: (t, fn) => { seen[t] = fn; } };
+const getSid = () => "test-session-123";
+const segTarget = { closest: (sel) => (String(sel).indexOf('session-lineage-segment') >= 0 ? {} : null) };
+const runner = new Function('node', 'getSid', 'window', 'document',
+  '_sessionSelectMode', '_renamingSid', '_isSessionActionTarget',
+  '_openSessionUrlInNewTab', '_sessionUrlForSid', '_consumeSessionNewTabClick',
+  wireSrc + '; _wireSessionNewTabListeners(node, getSid);');
+runner(node, getSid, sandbox.window, sandbox.document, false, null, () => false,
+  sandbox._openSessionUrlInNewTab, sandbox._sessionUrlForSid, sandbox._consumeSessionNewTabClick);
+const ev = { button: 1, ctrlKey: false, metaKey: false, target: segTarget,
+  preventDefault() {}, stopPropagation() {} };
+seen['auxclick'](ev);
+ret.segmentOpened = !!sandbox.opened;
+const ev2 = { button: 1, ctrlKey: false, metaKey: false, target: null,
+  preventDefault() {}, stopPropagation() {} };
+seen['auxclick'](ev2);
+ret.plainOpened = !!sandbox.opened;
+console.log(JSON.stringify(ret));
+"""
+            ),
+        })
+        assert out["segmentOpened"] is False
+        assert out["plainOpened"] is True
+
+    def test_macos_shell_declines_new_tab(self):
+        """[Round 3 item 2] With the shell's message handlers present, the
+        opener declines and the gesture is not consumed, so the caller's
+        same-tab path runs. Red-before: it opened a tab."""
+        out = _run_node({
+            "helpers": _helpers(),
+            "driver": r"""
+sandbox.window.webkit = { messageHandlers: { hermesNotify: function(){}, hermesTheme: function(){} } };
+const opened = vm.runInContext(`_openSessionUrlInNewTab("test-session-123")`, sandbox);
+const calls = sandbox.openCalls;
+const consumed = vm.runInContext(
+  `_consumeSessionNewTabClick(mkEvent({button:0,ctrlKey:true,target:null}), "test-session-123")`, sandbox);
+ret.ret = opened; ret.calls = calls; ret.consumed = consumed;
+console.log(JSON.stringify(ret));
+""",
+        })
+        assert out["ret"] is False
+        assert out["calls"] == 0
+        assert out["consumed"] is False
+
+    def test_plain_browser_still_opens_new_tab(self):
+        """Guard against over-blocking: with no shell handlers present, the
+        opener still opens exactly one noopener tab."""
+        out = _run_node({
+            "helpers": _helpers(),
+            "driver": r"""
+ret.ret = vm.runInContext(`_openSessionUrlInNewTab("test-session-123")`, sandbox);
+ret.calls = sandbox.openCalls; ret.opened = sandbox.opened;
+console.log(JSON.stringify(ret));
+""",
+        })
+        assert out["ret"] is True
+        assert out["calls"] == 1
+        assert out["opened"]["u"] == "/session/test-session-123"
+        assert out["opened"]["f"] == "noopener"

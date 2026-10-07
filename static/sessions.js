@@ -4967,6 +4967,15 @@ function _newTabOwningProfileAllowed(session){
 }
 function _openSessionUrlInNewTab(sid, session){
   if(!sid||typeof window==='undefined'||typeof window.open!=='function') return false;
+  // Native macOS shell (hermes-swift-mac): its WKWebView delegate does not
+  // implement webView(_:createWebViewWith:…), so WebKit silently drops
+  // window.open(url,'_blank','noopener'), and `noopener` makes window.open
+  // return null so the drop is undetectable here. Treat the embedded shell as
+  // having no multi-window support and decline, so every tap path falls back
+  // to its same-tab load (hermes-swift-mac#102). Drop this once the app
+  // implements the delegate.
+  const _wkHandlers=(typeof window!=='undefined'&&window.webkit&&window.webkit.messageHandlers)?window.webkit.messageHandlers:null;
+  if(_wkHandlers&&(_wkHandlers.hermesNotify||_wkHandlers.hermesTheme)) return false;
   if(typeof _sessionSelectMode!=='undefined'&&_sessionSelectMode) return false;
   if(typeof _renamingSid!=='undefined'&&_renamingSid) return false;
   // Foreign/unknown owning profile: consume the gesture (return true so callers
@@ -4992,7 +5001,7 @@ function _consumeSessionNewTabClick(e, sid, session){
   if(!isModifiedClick&&!isMiddleClick) return false;
   if(e.target&&e.target.closest){
     try{
-      if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count')) return false;
+      if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count,.session-lineage-segment')) return false;
     }catch(_e){}
   }
   if(typeof _isSessionActionTarget==='function'&&_isSessionActionTarget(e.target)) return false;
@@ -5012,7 +5021,7 @@ function _wireSessionNewTabListeners(node, getSid, getSession){
     if(btn!==1) return;
     if(e.target&&e.target.closest){
       try{
-        if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count')) return;
+        if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count,.session-lineage-segment')) return;
       }catch(_e2){}
     }
     if(typeof _isSessionActionTarget==='function'&&_isSessionActionTarget(e.target)) return;
@@ -5026,7 +5035,7 @@ function _wireSessionNewTabListeners(node, getSid, getSession){
     if(btn!==1) return;
     if(e.target&&e.target.closest){
       try{
-        if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count')) return;
+        if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count,.session-lineage-segment')) return;
       }catch(_e2){}
     }
     // Swallow the middle-button default (autoscroll / back-nav chord) without
