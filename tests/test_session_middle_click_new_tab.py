@@ -597,26 +597,30 @@ def _run_branch_variant(*, gesture_state="dragging", swipe_tracking=True,
                         long_press=False, ctrl=True, select_mode=False,
                         renaming=None, finisher_ret=False, session=None,
                         show_all_profiles=None, active_profile="default",
-                        event_over=None):
+                        event_over=None, scope=None):
     """Drive the verbatim Ctrl/Cmd pointerup branch with a chosen closure state."""
     body = _POINTERUP_BRANCH_BODY.replace("__BRANCH__", _pointerup_branch())
+    all_on = bool(show_all_profiles)
+    if scope is None:
+        scope = {"profile": active_profile, "allProfiles": all_on}
     env = [
         "var _sessionSelectMode = %s;" % ("true" if select_mode else "false"),
         "var _renamingSid = %s;" % json.dumps(renaming),
+        # The shipped gate reads these globals on every call; always declare
+        # them (matching production) so the verbatim source never hits a
+        # ReferenceError path that only exists in the harness.
+        "var _showAllProfiles = %s;" % ("true" if all_on else "false"),
+        "var S = { activeProfile: %s };" % json.dumps(active_profile),
+        "var _profileMatchesActiveProfile = function(p, a){"
+        " var n = (typeof p === 'string' && p.trim()) ? p.trim() : 'default';"
+        " var m = (typeof a === 'string' && a.trim()) ? a.trim() : 'default';"
+        " return n === m; };",
+        "var _sidebarSessionProfileName = function(x){"
+        " return (x && typeof x.profile === 'string') ? x.profile.trim() : ''; };",
+        "var showToast = function(msg){ globalThis.__toast = msg; };",
+        "var t = function(k){ return 'T:' + k; };",
+        "var _allSessionsScope = %s;" % json.dumps(scope),
     ]
-    if show_all_profiles is not None:
-        env += [
-            "var _showAllProfiles = %s;" % ("true" if show_all_profiles else "false"),
-            "var S = { activeProfile: %s };" % json.dumps(active_profile),
-            "var _profileMatchesActiveProfile = function(p, a){"
-            " var n = (typeof p === 'string' && p.trim()) ? p.trim() : 'default';"
-            " var m = (typeof a === 'string' && a.trim()) ? a.trim() : 'default';"
-            " return n === m; };",
-            "var _sidebarSessionProfileName = function(x){"
-            " return (x && typeof x.profile === 'string') ? x.profile.trim() : ''; };",
-            "var showToast = function(msg){ globalThis.__toast = msg; };",
-            "var t = function(k){ return 'T:' + k; };",
-        ]
     ref = {
         "tapTimer": "PENDING-TAP", "lastTap": 111,
         "gestureState": gesture_state, "swipeTracking": swipe_tracking,
@@ -717,3 +721,59 @@ class TestMaintainerFollowUps:
         assert "error" not in out, out.get("error")
         assert out["openCalls"] == 0
         assert out["toast"] == "T:session_new_tab_other_profile"
+
+    # ── Round 2 (nesquena-hermes CHANGES_REQUESTED, 2026-10-07) ──────────────
+
+    def test_foreign_row_refused_after_show_all_toggled_off(self):
+        """[CORE round 2] Switching "show sessions from all profiles" off flips
+        `_showAllProfiles` immediately, but the sidebar keeps rendering the
+        previous scope's foreign rows until the refetch lands. A retained row
+        with a KNOWN foreign owner must still be refused: the shared cookie
+        switch would 409 the source tab. Red-before: the toggle-based
+        `!_showAllProfiles` shortcut waved it through and opened a tab."""
+        out = _run_branch_variant(
+            gesture_state="pressing", swipe_tracking=False,
+            show_all_profiles=False, active_profile="alpha",
+            session={"session_id": "test-session-123", "profile": "beta"})
+        assert "error" not in out, out.get("error")
+        assert out["openCalls"] == 0 and out["opened"] is None
+        assert out["toast"] == "T:session_new_tab_other_profile"
+        assert out["ref"]["chokeRan"] is True  # consumed, not fallen through
+
+    def test_unknown_owner_refused_when_scope_is_all_profiles(self):
+        """[CORE round 2] An ownerless row is only trustworthy when the loaded
+        sidebar cache is a single-profile scope; a scope loaded with
+        `allProfiles:true` leaves the owner unverifiable, so the gesture is
+        refused. Red-before: the toggle shortcut allowed it."""
+        out = _run_branch_variant(
+            gesture_state="pressing", swipe_tracking=False,
+            show_all_profiles=False, active_profile="alpha",
+            scope={"profile": "alpha", "allProfiles": True},
+            session={"session_id": "test-session-123"})
+        assert "error" not in out, out.get("error")
+        assert out["openCalls"] == 0 and out["opened"] is None
+        assert out["toast"] == "T:session_new_tab_other_profile"
+
+    def test_unknown_owner_allowed_when_single_profile_scope_matches(self):
+        """Guard against over-blocking: with show-all off and a single-profile
+        scope for the active profile, an ownerless row (e.g. a lineage segment
+        that has been attributed to its row) still opens."""
+        out = _run_branch_variant(
+            gesture_state="pressing", swipe_tracking=False,
+            show_all_profiles=False, active_profile="alpha",
+            scope={"profile": "alpha", "allProfiles": False},
+            session={"session_id": "test-session-123"})
+        assert "error" not in out, out.get("error")
+        assert out["openCalls"] == 1
+        assert out["opened"]["u"] == "/session/test-session-123"
+        assert out["toast"] is None
+
+    def test_toggle_off_does_not_short_circuit_profile_gate(self):
+        """[CORE round 2] The gate must not contain a `!_showAllProfiles`
+        unconditional allow: a known owner is always compared to the active
+        profile, and an unknown owner consults the loaded cache scope."""
+        gate = _extract_function(SESSIONS_JS, "_newTabOwningProfileAllowed")
+        flat = gate.replace(" ", "")
+        assert "!_showAllProfiles)returntrue" not in flat
+        assert "_allSessionsScope" in gate
+        assert "_profileMatchesActiveProfile" in gate
