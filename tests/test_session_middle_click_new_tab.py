@@ -68,15 +68,16 @@ def test_auxclick_wired_for_all_row_kinds():
     # The auxclick/mousedown listeners live once in _wireSessionNewTabListeners;
     # every row kind (top-level .session-item, fork row, fork main button,
     # plain child button, lineage segment) must call the wirer.
-    assert "_wireSessionNewTabListeners(el, ()=>s.session_id)" in SESSIONS_JS
-    assert SESSIONS_JS.count("_wireSessionNewTabListeners(row, ()=>child.session_id)") == 2
-    assert "_wireSessionNewTabListeners(mainBtn, ()=>child.session_id)" in SESSIONS_JS
-    assert "_wireSessionNewTabListeners(row, ()=>seg.session_id)" in SESSIONS_JS
+    assert "_wireSessionNewTabListeners(el, ()=>s.session_id, ()=>s)" in SESSIONS_JS
+    assert SESSIONS_JS.count("_wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child)") == 2
+    assert "_wireSessionNewTabListeners(mainBtn, ()=>child.session_id, ()=>child)" in SESSIONS_JS
+    assert "_wireSessionNewTabListeners(row, ()=>seg.session_id, ()=>seg)" in SESSIONS_JS
     assert SESSIONS_JS.count("_wireSessionNewTabListeners(") >= 6  # def + 5 call sites
-    # All opens route through the two choke points with the concrete sid.
-    assert "_openSessionUrlInNewTab(getSid())" in SESSIONS_JS
-    assert "_openSessionUrlInNewTab(sid)" in SESSIONS_JS
-    assert "_openSessionUrlInNewTab(childSession.session_id)" in SESSIONS_JS
+    # All opens route through the two choke points with the concrete sid and
+    # the concrete session (so the owning-profile gate can inspect the row).
+    assert "_openSessionUrlInNewTab(getSid(), typeof getSession==='function'?getSession():undefined)" in SESSIONS_JS
+    assert "_openSessionUrlInNewTab(sid, session)" in SESSIONS_JS
+    assert "_openSessionUrlInNewTab(childSession.session_id, childSession)" in SESSIONS_JS
 
 
 def test_middle_mousedown_prevents_autoscroll():
@@ -87,8 +88,8 @@ def test_middle_mousedown_prevents_autoscroll():
     assert "button" in wire and "1" in wire
     assert "preventDefault()" in wire
     # Ctrl/Cmd+click on the tap paths also routes to the new-tab opener.
-    assert "_consumeSessionNewTabClick(e, child.session_id)" in SESSIONS_JS
-    assert "_consumeSessionNewTabClick(e, s.session_id)" in SESSIONS_JS
+    assert "_consumeSessionNewTabClick(e, child.session_id, child)" in SESSIONS_JS
+    assert "_consumeSessionNewTabClick(e, s.session_id, s)" in SESSIONS_JS
 
 
 def test_ctrl_click_opens_new_tab():
@@ -112,7 +113,7 @@ def test_openChildSession_new_tab_flag():
     idx = SESSIONS_JS.index("const openChildSession=async(childSession,")
     window = SESSIONS_JS[idx:idx + 400]
     assert "newTab" in window
-    assert "_openSessionUrlInNewTab(childSession.session_id)" in window
+    assert "_openSessionUrlInNewTab(childSession.session_id, childSession)" in window
 
 
 def test_modified_click_cancels_pending_tap_before_new_tab():
@@ -124,10 +125,10 @@ def test_modified_click_cancels_pending_tap_before_new_tab():
     current tab anyway — the exact stale-state class the review flagged.
     """
     idx = SESSIONS_JS.index("if((e.ctrlKey||e.metaKey)")
-    window = SESSIONS_JS[idx:idx + 1400]
-    assert "_consumeSessionNewTabClick(e, s.session_id)" in window
+    window = SESSIONS_JS[idx:idx + 2400]
+    assert "_consumeSessionNewTabClick(e, s.session_id, s)" in window
     clear_idx = window.index("clearTimeout(_tapTimer)")
-    consume_idx = window.index("_consumeSessionNewTabClick(e, s.session_id)")
+    consume_idx = window.index("_consumeSessionNewTabClick(e, s.session_id, s)")
     assert clear_idx < consume_idx, (
         "pending-tap cancel must run before the new-tab open, not after"
     )
@@ -193,6 +194,7 @@ def _helpers() -> str:
         _extract_function(SESSIONS_JS, name)
         for name in (
             "_sessionUrlForSid",
+            "_newTabOwningProfileAllowed",
             "_openSessionUrlInNewTab",
             "_consumeSessionNewTabClick",
         )
@@ -314,6 +316,10 @@ const runnerSrc =
   'const doc = { baseURI: "http://127.0.0.1:8787/" };' +
   'const _sessionSelectMode = false; const _renamingSid = null;' +
   'const _isSessionActionTarget = () => false;' +
+  // Row is owned by the active profile (single-profile path): the new-tab
+  // owning-profile gate is a no-op here; it is exercised in
+  // TestMaintainerFollowUps.
+  'const _newTabOwningProfileAllowed = () => true;' +
   'let finisherRan = false;' +
   'const _finishSessionGesture = () => { finisherRan = true; return false; };' +
   // Pen-drag-painted row state: the gesture is mid-drag with swipe tracking
@@ -322,6 +328,7 @@ const runnerSrc =
   // (idle + long-press disarm + settle swipe paint when a drag was in
   // flight) so the test observes the same settlement the row gets.
   'let _gestureState = "dragging"; let _swipeTracking = true;' +
+  'let _longPressMenuOpened = false;' +
   'let longPressCleared = false; let settleCalls = 0;' +
   'const removedClasses = [];' +
   'const _clearLongPressTimer = () => { longPressCleared = true; };' +
@@ -334,8 +341,8 @@ const runnerSrc =
   'let loadingRemoved = false;' +
   'const el = { classList: { remove(c) { if(c === "loading") loadingRemoved = true; } } };' +
   branchSrc.replace(/(\W)document(\W)/g, '$1doc$2')
-  .replace(/if\(_consumeSessionNewTabClick\(e, s\.session_id\)\) return;/,
-    'if(_consumeSessionNewTabClick(e, s.session_id)){ globalThis.__capture = { tapTimer: _tapTimer, ref: ref.v, lastTap: _lastTapTime, opened: opened, loadingRemoved: loadingRemoved, finisherRan: finisherRan, gestureState: _gestureState, settleCalls: settleCalls, longPressCleared: longPressCleared }; }') +
+  .replace(/if\(_consumeSessionNewTabClick\(e, s\.session_id, s\)\) return;/,
+    'if(_consumeSessionNewTabClick(e, s.session_id, s)){ globalThis.__capture = { tapTimer: _tapTimer, ref: ref.v, lastTap: _lastTapTime, opened: opened, loadingRemoved: loadingRemoved, finisherRan: finisherRan, gestureState: _gestureState, settleCalls: settleCalls, longPressCleared: longPressCleared }; }') +
   '; globalThis.__capture = globalThis.__capture || { tapTimer: _tapTimer, ref: ref.v, lastTap: _lastTapTime, opened: opened, loadingRemoved: loadingRemoved, finisherRan: finisherRan, gestureState: _gestureState, settleCalls: settleCalls, longPressCleared: longPressCleared };';
 try {
   new Function('ref', runnerSrc)(ref);
@@ -422,9 +429,11 @@ const runnerSrc =
   'const doc = { baseURI: "http://127.0.0.1:8787/" };' +
   'const _sessionSelectMode = true; const _renamingSid = null;' +
   'const _isSessionActionTarget = () => false;' +
+  'const _newTabOwningProfileAllowed = () => true;' +
   'let finisherRan = false;' +
   'const _finishSessionGesture = () => { finisherRan = true; return true; };' +
   'let _gestureState = "pressing"; let _swipeTracking = false;' +
+  'let _longPressMenuOpened = false;' +
   'let chokeRan = false;' +
   'const _clearLongPressTimer = () => {};' +
   'const _settleSessionSwipePaint = () => {};' +
@@ -509,3 +518,202 @@ console.log(JSON.stringify(ret));
         assert out["auxOpened"] is True
         assert out["downPrevented"] is True and out["downOpened"] is False
         assert out["leftIgnored"] is True
+
+
+# ── Maintainer follow-ups (nesquena-hermes CHANGES_REQUESTED, 2026-10-06) ─────
+#
+# The review gated head 85e6bf0fc and asked for one CORE fix (another profile's
+# session must not open in a new tab) and three SHOULD-FIX gesture edges closed
+# by a single extra condition on the Ctrl/Cmd pointerup branch. Each test below
+# is a red-before lock: it executes the *shipped* branch (or the shipped
+# handler text) verbatim, so it fails against the pre-follow-up revision.
+
+
+def test_pointerup_branch_gates_on_gesture_origin_and_long_press():
+    """[SHOULD-FIX] The Ctrl branch must require a press that began on this row
+    (`_gestureState!=='idle'`) and no already-open pen long-press menu
+    (`!_longPressMenuOpened`). Red-before: without both, a Ctrl-release over an
+    untouched row, or on top of an open long-press menu, opened a tab."""
+    idx = SESSIONS_JS.index("if((e.ctrlKey||e.metaKey)")
+    condition = SESSIONS_JS[idx:SESSIONS_JS.index("{", idx)].replace(" ", "")
+    assert "_sessionSelectMode" in condition
+    assert "_renamingSid" in condition
+    assert "_gestureState!=='idle'" in condition
+    assert "!_longPressMenuOpened" in condition
+
+
+def test_ctrl_double_click_does_not_start_rename():
+    """[SHOULD-FIX #1] A Ctrl/Cmd+double-click is two modified clicks (two
+    tabs); the dblclick handler must bail outside select mode instead of also
+    renaming in the current tab. Red-before: it renamed."""
+    idx = SESSIONS_JS.index("el.ondblclick=(e)=>{")
+    handler = SESSIONS_JS[idx:idx + 500].replace(" ", "")
+    assert "if((e.ctrlKey||e.metaKey)&&!_sessionSelectMode)return;" in handler
+
+
+def test_open_session_url_consults_owning_profile():
+    """[CORE] Opening a new tab is gated on the row's owning profile, and every
+    call site threads the concrete session through so the gate can see it."""
+    opener = _extract_function(SESSIONS_JS, "_openSessionUrlInNewTab")
+    assert "_newTabOwningProfileAllowed(session)" in opener
+    assert "session_new_tab_other_profile" in opener
+    assert "_profileMatchesActiveProfile" in _extract_function(
+        SESSIONS_JS, "_newTabOwningProfileAllowed")
+    # Every row kind passes its session to the choke points.
+    assert "_consumeSessionNewTabClick(e, s.session_id, s)" in SESSIONS_JS
+    assert "_consumeSessionNewTabClick(e, child.session_id, child)" in SESSIONS_JS
+    assert "_consumeSessionNewTabClick(e, seg.session_id, seg)" in SESSIONS_JS
+    assert "_openSessionUrlInNewTab(childSession.session_id, childSession)" in SESSIONS_JS
+    assert "_wireSessionNewTabListeners(el, ()=>s.session_id, ()=>s)" in SESSIONS_JS
+
+
+# Executes the verbatim Ctrl/Cmd pointerup branch with caller-controlled
+# closure state. Every free-var the branch reads is either a `ref` field
+# (locals declared below) or a sandbox global passed in as a parameter.
+_POINTERUP_BRANCH_BODY = (
+    "let _tapTimer = ref.tapTimer; let _lastTapTime = ref.lastTap;"
+    "let _gestureState = ref.gestureState; let _swipeTracking = ref.swipeTracking;"
+    "let _longPressMenuOpened = ref.longPress;"
+    "const clearTimeout = (id) => { if (id === _tapTimer) { _tapTimer = null; ref.tapTimer = null; } };"
+    "const el = { classList: { remove(c) { ref.loadingRemoved = true; } } };"
+    "const _clearLongPressTimer = () => { ref.longPressCleared = true; };"
+    "const _settleSessionSwipePaint = () => { ref.settleCalls = (ref.settleCalls || 0) + 1; };"
+    "const _clearPointerDragState = () => {"
+    " const wasDragging = _gestureState === 'dragging' || _swipeTracking;"
+    " _gestureState = 'idle'; _clearLongPressTimer(); ref.chokeRan = true;"
+    " if (wasDragging) { _settleSessionSwipePaint(); } };"
+    "const _finishSessionGesture = () => { ref.finisherRan = true; return !!ref.finisherRet; };"
+    "const e = Object.assign({ button: ref.button, ctrlKey: ref.ctrlKey, metaKey: false,"
+    " clientX: 10, clientY: 20, pointerType: 'mouse', target: null,"
+    " preventDefault() {}, stopPropagation() {} }, ref.eventOver || {});"
+    "const s = ref.session;"
+    "__BRANCH__"
+    "; ref.gestureStateAfter = _gestureState;"
+    "; if (_finishSessionGesture(e.clientX, e.clientY, e.target, e.pointerType)) { ref.stopCalled = true; }"
+)
+
+
+def _run_branch_variant(*, gesture_state="dragging", swipe_tracking=True,
+                        long_press=False, ctrl=True, select_mode=False,
+                        renaming=None, finisher_ret=False, session=None,
+                        show_all_profiles=None, active_profile="default",
+                        event_over=None):
+    """Drive the verbatim Ctrl/Cmd pointerup branch with a chosen closure state."""
+    body = _POINTERUP_BRANCH_BODY.replace("__BRANCH__", _pointerup_branch())
+    env = [
+        "var _sessionSelectMode = %s;" % ("true" if select_mode else "false"),
+        "var _renamingSid = %s;" % json.dumps(renaming),
+    ]
+    if show_all_profiles is not None:
+        env += [
+            "var _showAllProfiles = %s;" % ("true" if show_all_profiles else "false"),
+            "var S = { activeProfile: %s };" % json.dumps(active_profile),
+            "var _profileMatchesActiveProfile = function(p, a){"
+            " var n = (typeof p === 'string' && p.trim()) ? p.trim() : 'default';"
+            " var m = (typeof a === 'string' && a.trim()) ? a.trim() : 'default';"
+            " return n === m; };",
+            "var _sidebarSessionProfileName = function(x){"
+            " return (x && typeof x.profile === 'string') ? x.profile.trim() : ''; };",
+            "var showToast = function(msg){ globalThis.__toast = msg; };",
+            "var t = function(k){ return 'T:' + k; };",
+        ]
+    ref = {
+        "tapTimer": "PENDING-TAP", "lastTap": 111,
+        "gestureState": gesture_state, "swipeTracking": swipe_tracking,
+        "longPress": long_press, "button": 0, "ctrlKey": ctrl,
+        "finisherRet": finisher_ret,
+        "session": session or {"session_id": "test-session-123"},
+    }
+    if event_over:
+        ref["eventOver"] = event_over
+    driver = (
+        "const makeRunner = new Function("
+        "'window','document','_sessionUrlForSid','_newTabOwningProfileAllowed',"
+        "'_openSessionUrlInNewTab','_consumeSessionNewTabClick',"
+        "'_sessionSelectMode','_renamingSid','_isSessionActionTarget','ref',"
+        + json.dumps(body) + ");\n"
+        "vm.runInContext(" + json.dumps("\n".join(env)) + ", sandbox);\n"
+        "const ref = " + json.dumps(ref) + ";\n"
+        "sandbox.opened = null; sandbox.openCalls = 0;\n"
+        "try {\n"
+        "  makeRunner(sandbox.window, sandbox.document, sandbox._sessionUrlForSid,\n"
+        "    sandbox._newTabOwningProfileAllowed, sandbox._openSessionUrlInNewTab,\n"
+        "    sandbox._consumeSessionNewTabClick,\n"
+        "    vm.runInContext('_sessionSelectMode', sandbox),\n"
+        "    vm.runInContext('_renamingSid', sandbox),\n"
+        "    sandbox._isSessionActionTarget, ref);\n"
+        "} catch (err) { ret.error = String(err && err.message || err); }\n"
+        "ret.opened = sandbox.opened; ret.openCalls = sandbox.openCalls;\n"
+        "ret.toast = (typeof sandbox.__toast !== 'undefined') ? sandbox.__toast : null;\n"
+        "ret.ref = ref;\n"
+        "console.log(JSON.stringify(ret));\n"
+    )
+    return _run_node({"helpers": _helpers(), "driver": driver})
+
+
+class TestMaintainerFollowUps:
+    def test_ctrl_release_over_untouched_row_opens_nothing(self):
+        """[SHOULD-FIX #2] A press that never began on this row (idle gesture)
+        must not open a tab; the branch is skipped and the verbatim finisher
+        early-returns. Red-before: any Ctrl-release over a row opened a tab."""
+        out = _run_branch_variant(gesture_state="idle", swipe_tracking=False)
+        assert "error" not in out, out.get("error")
+        assert out["openCalls"] == 0 and out["opened"] is None
+        assert out["ref"].get("chokeRan") is not True
+        assert out["ref"]["gestureStateAfter"] == "idle"
+        assert out["ref"]["finisherRan"] is True
+
+    def test_pen_long_press_menu_then_ctrl_release_opens_nothing(self):
+        """[SHOULD-FIX #3] With the pen long-press menu already open, a
+        Ctrl-release must not stack a tab on top of it (Greptile P1).
+        Red-before: the branch fired regardless of `_longPressMenuOpened`."""
+        out = _run_branch_variant(gesture_state="pressing",
+                                  swipe_tracking=False, long_press=True)
+        assert "error" not in out, out.get("error")
+        assert out["openCalls"] == 0 and out["opened"] is None
+        assert out["ref"].get("chokeRan") is not True
+
+    def test_ctrl_click_with_press_still_opens_one_tab(self):
+        """Guard against over-blocking: a real Ctrl+click (press began, no
+        long-press menu) still opens exactly one new tab."""
+        out = _run_branch_variant(gesture_state="pressing", swipe_tracking=False)
+        assert "error" not in out, out.get("error")
+        assert out["openCalls"] == 1
+        assert out["opened"]["u"] == "/session/test-session-123"
+        assert out["opened"]["f"] == "noopener"
+        assert out["ref"]["chokeRan"] is True
+
+    def test_foreign_profile_session_refused_in_new_tab(self):
+        """[CORE] With "show all profiles" on, a row owned by another profile is
+        refused (no cookie switch, source tab stays valid): the gesture is
+        consumed with a notice. Red-before: it opened a tab and 409'd the
+        source tab's next /api/chat/start."""
+        out = _run_branch_variant(
+            gesture_state="pressing", swipe_tracking=False,
+            show_all_profiles=True, active_profile="alpha",
+            session={"session_id": "test-session-123", "profile": "beta"})
+        assert "error" not in out, out.get("error")
+        assert out["openCalls"] == 0 and out["opened"] is None
+        assert out["toast"] == "T:session_new_tab_other_profile"
+        assert out["ref"]["chokeRan"] is True  # consumed, not fallen through
+
+    def test_same_profile_session_opens_in_new_tab(self):
+        """[CORE] A row owned by the active profile still opens normally."""
+        out = _run_branch_variant(
+            gesture_state="pressing", swipe_tracking=False,
+            show_all_profiles=True, active_profile="alpha",
+            session={"session_id": "test-session-123", "profile": "alpha"})
+        assert "error" not in out, out.get("error")
+        assert out["openCalls"] == 1
+        assert out["toast"] is None
+
+    def test_unknown_profile_owner_refused_when_merging_profiles(self):
+        """[CORE] An unverifiable owner (no profile field while merging
+        profiles) is refused rather than guessed."""
+        out = _run_branch_variant(
+            gesture_state="pressing", swipe_tracking=False,
+            show_all_profiles=True, active_profile="alpha",
+            session={"session_id": "test-session-123"})
+        assert "error" not in out, out.get("error")
+        assert out["openCalls"] == 0
+        assert out["toast"] == "T:session_new_tab_other_profile"

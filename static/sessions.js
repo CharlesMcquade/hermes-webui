@@ -4935,10 +4935,30 @@ function _setActiveSessionUrl(sid){
  * directly on the session. Never fires for the ⋮ action menu, checkboxes,
  * tag chips, lineage/child toggles, while renaming, or in batch select mode.
  */
-function _openSessionUrlInNewTab(sid){
+// Whether the row's owning agent profile can be loaded in a NEW tab without
+// breaking the tab that issued the gesture. A new tab that boots a session
+// owned by another profile switches the shared `hermes_profile` cookie, so the
+// source tab keeps its session but its next /api/chat/start, approval and
+// metadata calls fail with 409 session_profile_mismatch. With "show sessions
+// from all profiles" off every row belongs to the active profile; with it on,
+// an unknown owner is treated as unverifiable and refused.
+function _newTabOwningProfileAllowed(session){
+  if(typeof _showAllProfiles==='undefined'||!_showAllProfiles) return true;
+  const owningProfile=(typeof _sidebarSessionProfileName==='function')?_sidebarSessionProfileName(session):'';
+  if(!owningProfile) return false;
+  const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)?S.activeProfile:'default';
+  return _profileMatchesActiveProfile(owningProfile,activeProfile);
+}
+function _openSessionUrlInNewTab(sid, session){
   if(!sid||typeof window==='undefined'||typeof window.open!=='function') return false;
   if(typeof _sessionSelectMode!=='undefined'&&_sessionSelectMode) return false;
   if(typeof _renamingSid!=='undefined'&&_renamingSid) return false;
+  // Foreign/unknown owning profile: consume the gesture (return true so callers
+  // skip the same-tab path) and surface a notice instead of switching cookies.
+  if(session&&!_newTabOwningProfileAllowed(session)){
+    if(typeof showToast==='function') showToast(t('session_new_tab_other_profile'),3000);
+    return true;
+  }
   let url=null;
   try{url=_sessionUrlForSid(sid);}catch(_e){return false;}
   if(!url) return false;
@@ -4949,7 +4969,7 @@ function _openSessionUrlInNewTab(sid){
 }
 // Shared choke point for the pointer-tap paths below: returns true when the
 // event was consumed as an open-in-new-tab (caller must skip same-tab open).
-function _consumeSessionNewTabClick(e, sid){
+function _consumeSessionNewTabClick(e, sid, session){
   if(!e||!sid) return false;
   const isModifiedClick=!!(e.ctrlKey||e.metaKey);
   const isMiddleClick=(typeof e.button==='number'&&e.button===1)||e.which===2;
@@ -4964,11 +4984,11 @@ function _consumeSessionNewTabClick(e, sid){
   if(typeof _renamingSid!=='undefined'&&_renamingSid) return false;
   if(typeof e.preventDefault==='function') e.preventDefault();
   if(typeof e.stopPropagation==='function') e.stopPropagation();
-  return _openSessionUrlInNewTab(sid);
+  return _openSessionUrlInNewTab(sid, session);
 }
 // `auxclick` fires for the middle button where `click` never does; `mousedown`
 // also preventDefaults button-1 so the browser doesn't start autoscroll.
-function _wireSessionNewTabListeners(node, getSid){
+function _wireSessionNewTabListeners(node, getSid, getSession){
   if(!node||typeof node.addEventListener!=='function'||typeof getSid!=='function') return;
   node.addEventListener('auxclick',(e)=>{
     if(!e) return;
@@ -4982,7 +5002,7 @@ function _wireSessionNewTabListeners(node, getSid){
     if(typeof _isSessionActionTarget==='function'&&_isSessionActionTarget(e.target)) return;
     if(typeof e.preventDefault==='function') e.preventDefault();
     if(typeof e.stopPropagation==='function') e.stopPropagation();
-    _openSessionUrlInNewTab(getSid());
+    _openSessionUrlInNewTab(getSid(), typeof getSession==='function'?getSession():undefined);
   });
   node.addEventListener('mousedown',(e)=>{
     if(!e) return;
@@ -9252,10 +9272,10 @@ function renderSessionListFromCache(){
         row.title=t('session_lineage_segment_open');
         row.onclick=async(e)=>{
           e.stopPropagation();
-          if(_consumeSessionNewTabClick(e, seg.session_id)) return;
+          if(_consumeSessionNewTabClick(e, seg.session_id, seg)) return;
           await _openSidebarSession(seg, {skipLineageResolve:true});
         };
-        _wireSessionNewTabListeners(row, ()=>seg.session_id);
+        _wireSessionNewTabListeners(row, ()=>seg.session_id, ()=>seg);
         lineageList.appendChild(row);
       }
       sessionText.appendChild(lineageList);
@@ -9266,7 +9286,7 @@ function renderSessionListFromCache(){
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
       const sortedChildren=[...s._child_sessions];
       const openChildSession=async(childSession, openOpts={})=>{
-        if(openOpts&&openOpts.newTab) return _openSessionUrlInNewTab(childSession.session_id);
+        if(openOpts&&openOpts.newTab) return _openSessionUrlInNewTab(childSession.session_id, childSession);
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
       const childLabelFor=(child)=>{
@@ -9500,10 +9520,10 @@ function renderSessionListFromCache(){
               return;
             }
             e.stopPropagation();
-            if(_consumeSessionNewTabClick(e, child.session_id)) return;
+            if(_consumeSessionNewTabClick(e, child.session_id, child)) return;
             await openChildSession(child);
           };
-          _wireSessionNewTabListeners(mainBtn, ()=>child.session_id);
+          _wireSessionNewTabListeners(mainBtn, ()=>child.session_id, ()=>child);
           row._startRename=_buildSessionRenameStarter(child, mainBtn, ()=>{
             mainBtn.textContent=childLabelFor(child);
           });
@@ -9554,7 +9574,7 @@ function renderSessionListFromCache(){
             e.stopPropagation();
             _openSessionActionMenu(child, actions||row);
           };
-          _wireSessionNewTabListeners(row, ()=>child.session_id);
+          _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child);
           childList.appendChild(row);
           continue;
         }
@@ -9565,10 +9585,10 @@ function renderSessionListFromCache(){
         row.title='Open child session';
         row.onclick=async(e)=>{
           e.stopPropagation();
-          if(_consumeSessionNewTabClick(e, child.session_id)) return;
+          if(_consumeSessionNewTabClick(e, child.session_id, child)) return;
           await openChildSession(child);
         };
-        _wireSessionNewTabListeners(row, ()=>child.session_id);
+        _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child);
         childList.appendChild(row);
       }
       sessionText.appendChild(childList);
@@ -9932,12 +9952,17 @@ function renderSessionListFromCache(){
     el.onpointerup=(e)=>{
       if(e.pointerType==='touch') return;
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
-      if((e.ctrlKey||e.metaKey) && !_sessionSelectMode && !_renamingSid){
+      if((e.ctrlKey||e.metaKey) && !_sessionSelectMode && !_renamingSid && _gestureState!=='idle' && !_longPressMenuOpened){
         // Ctrl/Cmd+click opens in a new tab; keep the current tab untouched.
         // Gated on select/rename mode: _consumeSessionNewTabClick refuses
         // those modes, and mutating gesture state first would make the
         // fall-through _finishSessionGesture early-return on 'idle',
         // breaking the row (de)select toggle.
+        // Also gated on _gestureState!=='idle' (a press must have begun on
+        // THIS row: a Ctrl-release over a row the user never pressed on must
+        // do nothing, mirroring _finishSessionGesture's own first check) and
+        // on !_longPressMenuOpened (a pen long-press menu is already open, so
+        // don't stack a new tab on top of it — the open Greptile P1).
         // Settle the gesture machine first via the shared choke point: a pen
         // (or touch-emulated) drag may have painted swipe offsets, and a
         // shaky click may have added the 'dragging' class — parking
@@ -9947,14 +9972,18 @@ function renderSessionListFromCache(){
         clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;
         _clearPointerDragState();
         el.classList.remove('loading');
-        if(_consumeSessionNewTabClick(e, s.session_id)) return;
+        if(_consumeSessionNewTabClick(e, s.session_id, s)) return;
       }
       if(_finishSessionGesture(e.clientX,e.clientY,e.target,e.pointerType)) e.stopPropagation();
     };
-    _wireSessionNewTabListeners(el, ()=>s.session_id);
+    _wireSessionNewTabListeners(el, ()=>s.session_id, ()=>s);
     // Add ondblclick for more reliable double-click detection
     el.ondblclick=(e)=>{
       if(e.pointerType==='mouse' && e.button!==0) return;
+      // A Ctrl/Cmd+double-click is two modified clicks: each pointerup opens
+      // one new tab. Don't also start a rename in the current tab (master
+      // only renamed). Outside select mode, bail entirely.
+      if((e.ctrlKey||e.metaKey) && !_sessionSelectMode) return;
       if(_renamingSid) return;
       if(actions&&actions.contains(e.target)) return;
       if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}
