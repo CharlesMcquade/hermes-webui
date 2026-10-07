@@ -153,10 +153,62 @@ def test_stale_watermark_newer_than_sidecar_is_ignored():
         ("user", "q2", 200),
         ("assistant", "a2", 250),
     )
+    # The pre-fix wall-clock advance moved ONLY the watermark; it never wrote
+    # truncation_boundary, so the realistic stale shape has no matching boundary.
     merged = models.merge_session_messages_append_only(
-        sidecar, state, truncation_watermark=9999.0, truncation_boundary=9999.0
+        sidecar, state, truncation_watermark=9999.0, truncation_boundary=None
     )
     assert [m["content"] for m in merged] == ["q1", "a1", "q2", "a2"]
+
+
+def test_stale_watermark_above_an_older_real_boundary_still_heals():
+    """A session that was truncated (boundary = a real kept-row ts) and LATER
+    hit the wall-clock advance still self-heals: the watermark moved away from
+    the persisted boundary, so it is not a recorded cutoff."""
+    sidecar = _rows(("user", "q1", 50), ("assistant", "a1", 100))
+    state = _rows(
+        ("user", "q1", 50),
+        ("assistant", "a1", 100),
+        ("user", "q2", 200),
+        ("assistant", "a2", 250),
+    )
+    merged = models.merge_session_messages_append_only(
+        sidecar, state, truncation_watermark=9999.0, truncation_boundary=100.0
+    )
+    assert [m["content"] for m in merged] == ["q1", "a1", "q2", "a2"]
+
+
+def test_manual_compression_cutoff_above_untimestamped_sidecar_tail_is_kept():
+    """#7946 review (CORE, data-loss direction): manual compression is a
+    LEGITIMATE cutoff that can sit above every timestamped sidecar row.
+
+    It stamps missing timestamps on a compressed COPY with the current time and
+    sets truncation_watermark == truncation_boundary from that copy, leaving
+    session.messages unchanged. When the sidecar's newest row has no timestamp,
+    the real cutoff is newer than every timestamped sidecar row. That must NOT
+    be mistaken for the stale wall-clock shape: the pre-compression state.db
+    row the compression removed has to stay out (#4836), exactly as on master.
+    """
+    t0 = 1000.0
+    sidecar = _rows(
+        ("user", "q1", t0),
+        ("assistant", "a1", t0 + 1),
+        ("user", "q2", t0 + 2),
+        ("assistant", "a2 (no ts)", None),
+    )
+    state = _rows(
+        ("user", "q1", t0),
+        ("assistant", "a1", t0 + 1),
+        ("user", "q2", t0 + 2),
+        ("assistant", "removed by compression", t0 + 3),
+    )
+    merged = models.merge_session_messages_append_only(
+        sidecar, state,
+        truncation_watermark=t0 + 500, truncation_boundary=t0 + 500,
+    )
+    contents = [m["content"] for m in merged]
+    assert "removed by compression" not in contents
+    assert contents[:3] == ["q1", "a1", "q2"]
 
 
 def test_legitimate_edit_watermark_still_filters_replaced_tail():
@@ -263,7 +315,7 @@ def test_frozen_session_signature_recovers_all_later_turns():
     merged = models.merge_session_messages_append_only(
         sidecar, state,
         truncation_watermark=2500.0,   # wall-clock: > every sidecar ts
-        truncation_boundary=2500.0,
+        truncation_boundary=None,      # the wall-clock writer never set it
     )
     assert [m["content"] for m in merged] == [
         "q1", "a1", "last before freeze",

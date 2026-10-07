@@ -13943,11 +13943,29 @@ def _merge_session_messages_append_only_impl(
     # (fail OPEN toward data, matching the intent of session_recovery's
     # watermark guards). The replaced-tail suppression still works via the
     # legitimate boundary/watermark values, which are always <= max_sidecar.
+    #
+    # Provenance guard (#7946 review): manual compression is a LEGITIMATE cutoff
+    # writer that CAN exceed every timestamped sidecar row -- it stamps the
+    # missing timestamps on a compressed COPY with the current time and leaves
+    # session.messages unchanged, so whenever the sidecar's newest row has no
+    # timestamp the real cutoff sits above every timestamped sidecar row.
+    # Every such writer persists truncation_boundary at the SAME value as the
+    # watermark (routes compression, session_ops truncate/retry/undo), while
+    # the pre-fix wall-clock advance never touched the boundary. A watermark
+    # that matches the persisted boundary is therefore a real cutoff and must
+    # keep suppressing the pre-compression rows (#4836); only an unmatched
+    # watermark above the sidecar is the invented wall-clock value.
+    watermark_matches_persisted_boundary = (
+        watermark_timestamp is not None
+        and boundary_ts is not None
+        and boundary_ts == watermark_timestamp
+    )
     watermark_is_stale_wall_clock = (
         watermark_timestamp is not None
         and watermark_timestamp != 0
         and max_sidecar_timestamp is not None
         and watermark_timestamp > max_sidecar_timestamp
+        and not watermark_matches_persisted_boundary
     )
     if watermark_is_stale_wall_clock:
         watermark_timestamp = None
