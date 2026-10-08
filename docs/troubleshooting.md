@@ -331,7 +331,12 @@ python3 scripts/ensure_state_db_read_indexes.py --db ~/.hermes/state.db --confir
 **Why.** Update checks are unattended. WebUI removes inherited askpass, SSH-command, proxy, and Git
 config injection settings; disables checkout-controlled askpass and credential helpers; and forces
 SSH batch mode. Generic and URL-scoped credential helpers from trusted user and system Git config
-remain available when declared directly in the primary system/global files. `include` and
+remain available when declared directly in the primary system/global files.
+Git Credential Manager also receives `GCM_INTERACTIVE=never` and
+`credential.interactive=false`: cached credentials may authenticate a check, but a cache miss
+must fail without opening its GUI or browser login. These controls follow
+[GCM's environment contract](https://github.com/git-ecosystem/git-credential-manager/blob/main/docs/environment.md#gcm_interactive)
+and [configuration contract](https://github.com/git-ecosystem/git-credential-manager/blob/main/docs/configuration.md#credentialinteractive). `include` and
 `includeIf` are not followed for credential helpers, `core.sshCommand`, or `ssh.variant`:
 included files may be checkout-controlled even when Git labels their scope global. Move these
 settings into the main user/system config if needed. The explicit scope reads also work on
