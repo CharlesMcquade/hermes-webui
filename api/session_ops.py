@@ -65,7 +65,20 @@ def _selected_regeneration_turn_owned(session, row) -> bool:
     if session_source == "fork":
         if any(source and not _regeneration_source_allowed(source) for source in raw_sources):
             return False
-        if row_source and not _regeneration_source_allowed(row_source):
+        # A delegation wakeup INSIDE a fork session carries
+        # ``_source: delegation_wakeup`` (the hidden-row predicate keys on it)
+        # plus ``_fork_child_turn`` (the fork ownership proof this gate reads).
+        # Rejecting the row on its source alone — before the ownership proof
+        # is consulted — made regeneration after an async delegation in a fork
+        # return regeneration_read_only in both save modes (#7882 re-gate
+        # must-fix 1). Accept the wakeup source ONLY when the row proves fork
+        # ownership below (parent session + matching child turn); the proof
+        # itself is unchanged.
+        if (
+            row_source
+            and row_source != "delegation_wakeup"
+            and not _regeneration_source_allowed(row_source)
+        ):
             return False
         return bool(
             getattr(session, "parent_session_id", None)
@@ -636,10 +649,11 @@ def _truncate_context_before_row(context_messages, target_row):
             return history[:i]
         if _extract_text(row.get('content', '')) != target_text:
             continue
-        if row_id is None and target_id is not None:
-            # Id-less context row (sanitized compression copy): content is
-            # the only surviving identity; the fresh re-stamped timestamp
-            # must not veto the match.
+        if row_id is None:
+            # Id-less context row (sanitized compression copy, #7882 re-gate
+            # must-fix 1): content is the only surviving identity; the fresh
+            # re-stamped timestamp must not veto the match. The different-id
+            # veto above still applies whenever BOTH rows carry ids.
             return history[:i]
         row_ts = row.get('timestamp')
         if target_ts is not None and row_ts is not None:

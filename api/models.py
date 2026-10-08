@@ -2302,6 +2302,19 @@ class Session:
             'active_stream_id': self.active_stream_id,
             'pending_user_message': self.pending_user_message,
             'has_pending_user_message': has_pending_user_message,
+            # #7882 re-gate: provenance for the pending turn rides to the
+            # sidebar overlay — a pending delegation wakeup is appended to
+            # state.db by the Agent core as a PLAIN user row (no _source
+            # stamp until settle), so the overlay cannot classify the raw
+            # growth without knowing the pending turn's source. Emitted only
+            # for non-default sources (webui/fork pending rows behave as
+            # ordinary visible user rows and keep the old shape).
+            **(
+                {'pending_user_source': self.pending_user_source}
+                if str(self.pending_user_source or '').strip().lower()
+                not in ('', 'webui', 'fork')
+                else {}
+            ),
             'is_cli_session': self.is_cli_session,
             'source_tag': self.source_tag,
             'raw_source': self.raw_source,
@@ -7803,12 +7816,17 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
                 session['actual_message_count'] = max(state_count, existing_actual)
                 # #7882 re-gate should-fix 3 (greptile follow-up): the visible
                 # count must follow state.db growth, but a delegation wakeup
-                # turn adds a hidden row — crediting it as visible would
-                # inflate the detailed sidebar count until the next full
-                # save re-walks. Bump by the delta MINUS the known hidden
-                # rows in that delta (a wakeup turn is user+assistant rows
-                # whose user row is hidden). The bump stays monotone and
-                # never exceeds the raw total.
+                # turn adds a hidden user row the Agent core appends to
+                # state.db WITHOUT its provenance stamp (``_source`` rides
+                # only in the session's pending_user_* fields until settle).
+                # Crediting the whole raw delta as visible reported "4
+                # visible" for three provenance-stamped rows + one pending
+                # wakeup. The pending turn's source arrives on the row via
+                # compact() (pending_user_source, emitted only when set), so
+                # a pending HIDDEN turn credits zero visible rows for its
+                # user row; any other pending turn (webui/fork/unknown) keeps
+                # the monotone raw-delta bump. A settled wakeup re-walk on
+                # the next full save re-derives the exact value either way.
                 try:
                     raw_visible = session.get('visible_message_count')
                     old_visible = int(raw_visible) if raw_visible is not None else None
@@ -7816,9 +7834,18 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
                 except (TypeError, ValueError):
                     current_visible = None
                 if current_visible is not None:
+                    pending_source = str(
+                        session.get('pending_user_source') or ''
+                    ).strip().lower()
+                    # The outer guard already ensures state_count > current_count.
+                    hidden_pending_delta = 1 if pending_source == 'delegation_wakeup' else 0
                     session['visible_message_count'] = min(
                         state_count,
-                        max(current_visible, current_visible + (state_count - current_count)),
+                        max(
+                            current_visible,
+                            current_visible
+                            + max(0, state_count - current_count - hidden_pending_delta),
+                        ),
                     )
                 if state_last > 0:
                     session['last_message_at'] = max(float(session.get('last_message_at') or 0), state_last)
