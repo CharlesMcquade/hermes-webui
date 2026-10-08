@@ -108,7 +108,10 @@ def test_small_markdown_uses_shared_rich_render_helper():
     branch = _markdown_branch()
     # Same widening as above: the fallback's early exit may carry a return value
     # now, so find the first `return ...;` rather than the literal `return;`.
-    m = re.search(r"\breturn(?:\s+[A-Za-z0-9_.]+)?;", branch)
+    # #6710: skip the ownership guard's `return false;` that now precedes the
+    # fallback; the fallback is the first early exit that is not that guard.
+    guard = "if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;"
+    m = re.search(r"\breturn(?:\s+[A-Za-z0-9_.]+)?;", branch.replace(guard, " " * len(guard)))
     assert m, "Large Markdown fallback must return before rich rendering"
     fallback_end = m.start()
 

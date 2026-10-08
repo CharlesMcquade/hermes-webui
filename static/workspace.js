@@ -786,7 +786,11 @@ function _mountMediaPlayer(wrap, html, mode){
  * Only a real `error` event fails closed; a late error after the bound fired is
  * still surfaced through the status line.
  */
-function _awaitMediaReady(el){
+function _awaitMediaReady(el, isOwned){
+  // #6710 (Greptile P2): a cleared or replaced preview keeps its <video>/<audio>
+  // element (clearPreview()/showPreview() only hide it), so a late error must not
+  // surface a "file open failed" status for a preview the user already left.
+  const stillOwned=()=>typeof isOwned!=='function'||isOwned();
   return new Promise(resolve=>{
     let settled=false;
     const detach=()=>{
@@ -798,13 +802,13 @@ function _awaitMediaReady(el){
       settled=true;
       detach();
       clearTimeout(timer);
-      if(!ok) setStatus(t('file_open_failed'));
+      if(!ok&&stillOwned()) setStatus(t('file_open_failed'));
       resolve(ok);
     };
     const onReady=()=>finish(true);
     const onError=()=>finish(false);
     const onLateReady=()=>el.removeEventListener('error', onLateError);
-    const onLateError=()=>setStatus(t('file_open_failed'));
+    const onLateError=()=>{ if(stillOwned()) setStatus(t('file_open_failed')); };
     const timer=setTimeout(()=>{
       if(settled) return;
       settled=true;
@@ -843,12 +847,24 @@ async function openArtifactPath(path){
     else if(rel === ws.replace(/\/+$/,'')) rel = '.';
   }
   if(!rel) rel = '.';
+  // #6710 (Greptile P1 on the release PR): the existence check is a network
+  // await too. A session switch, a newer file open or a cleared preview while it
+  // is in flight must retire this artifact click; otherwise openFile(rel) would
+  // take fresh ownership and open the old path in the new context.
+  const artGen=typeof _previewOpenGen==='number'?_previewOpenGen:null;
+  const artSid=S.session&&S.session.session_id;
+  const artWsGen=typeof _wsTreeGen==='number'?_wsTreeGen:null;
+  const _artifactClickOwned=()=>artGen===null||artWsGen===null
+    ||(typeof _previewOpenOwned==='function'&&_previewOpenOwned(artGen,artSid,artWsGen));
   try{
-    if(!(await _workspacePathExists(rel))){
+    const exists=await _workspacePathExists(rel);
+    if(!_artifactClickOwned()||!_dismissalUnchanged()) return false;
+    if(!exists){
       setStatus(t('file_open_failed'));
       return false;
     }
   }catch(_){
+    if(!_artifactClickOwned()) return false;
     setStatus(t('file_open_failed'));
     return false;
   }
@@ -1401,7 +1417,7 @@ async function openFile(path, opts={}){
       // report it — a dead grant or missing file must not read as a reveal.
       const mediaEl=_mountMediaPlayer(wrap, html, mode);
       if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(wrap);
-      if(mediaEl && !(await _awaitMediaReady(mediaEl))) return false;
+      if(mediaEl && !(await _awaitMediaReady(mediaEl, ()=>_previewOpenOwned(_openGen,_openSid,_openWsGen)))) return false;
       // #6710 (gate re-review, item 1): same ownership rule as the image branch
       // (video shares this branch) — a readiness wait that resolved after the
       // preview was superseded must not be reported as a reveal.

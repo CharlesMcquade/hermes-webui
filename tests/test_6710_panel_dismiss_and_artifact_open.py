@@ -731,3 +731,72 @@ def test_the_close_bookkeeping_separates_the_fence_from_the_resize_guard():
         "a non-compact close no longer advances the action-generation fence — "
         "that is the desktop race the gate found"
     )
+
+
+# ── release gate (Greptile P1 on the release PR): the existence check is fenced ──
+#
+# `openArtifactPath()` awaits `_workspacePathExists(rel)` before calling
+# `openFile(rel)`. If the user switches conversations, opens another file, or
+# clears the preview while that check is in flight, the click is stale: calling
+# `openFile()` would take fresh ownership and open the old path in the new
+# context. The shipped `_previewOpenOwned()` and `openArtifactPath()` run here.
+
+_OWNERSHIP_HARNESS = r"""
+const fn = __FNS__;
+const scenario = __SCENARIO__;
+let _previewOpenGen = 0;
+let _wsTreeGen = 0;
+let _workspacePanelDismissGen = 0;
+const S = { session: { session_id: 's1', workspace: '/ws' } };
+const openFileCalls = [];
+const statuses = [];
+async function openFile(p){ openFileCalls.push(p); return true; }
+function setStatus(s){ statuses.push(s); }
+function t(k){ return k; }
+function switchWorkspacePanelTab(){}
+function _setWorkspacePanelDismissed(){}
+function ensureWorkspacePreviewVisible(){}
+let releaseExists;
+function _workspacePathExists(){ return new Promise((r) => { releaseExists = r; }); }
+eval(fn._previewOpenOwned);
+eval(fn.openArtifactPath);
+(async () => {
+  const pending = openArtifactPath('/ws/dir/old.md');
+  await new Promise((r) => setImmediate(r));
+  if(scenario === 'session_switch') S.session = { session_id: 's2', workspace: '/ws' };
+  if(scenario === 'newer_open') _previewOpenGen++;
+  if(scenario === 'cleared_preview') _previewOpenGen++;
+  if(scenario === 'workspace_change') _wsTreeGen++;
+  releaseExists(scenario === 'stale_missing' ? false : true);
+  if(scenario === 'stale_missing') S.session = { session_id: 's2', workspace: '/ws' };
+  const returned = await pending;
+  console.log(JSON.stringify({ returned, openFileCalls, statuses }));
+})();
+"""
+
+
+def _run_ownership(scenario: str) -> dict:
+    workspace_js = _read(WORKSPACE_JS_PATH)
+    fns = {
+        "_previewOpenOwned": extract_function(workspace_js, "_previewOpenOwned"),
+        "openArtifactPath": extract_function(workspace_js, "openArtifactPath", prefix="async function"),
+    }
+    js = _OWNERSHIP_HARNESS.replace("__FNS__", json.dumps(fns)).replace("__SCENARIO__", json.dumps(scenario))
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, cwd=REPO_ROOT, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize("scenario", ["session_switch", "newer_open", "cleared_preview", "workspace_change"])
+def test_stale_artifact_click_never_reaches_open_file(scenario):
+    result = _run_ownership(scenario)
+    assert result["openFileCalls"] == [], f"{scenario}: a stale artifact click opened {result['openFileCalls']}"
+    assert result["returned"] is False
+    assert result["statuses"] == [], f"{scenario}: a stale click reported {result['statuses']}"
+
+
+def test_owned_artifact_click_still_opens():
+    result = _run_ownership("owned")
+    assert result["openFileCalls"] == ["dir/old.md"]
+    assert result["returned"] is True
+

@@ -413,7 +413,7 @@ def test_raw_probe_treats_a_401_redirect_as_reachable():
         "_awaitMediaReady": _helper("_awaitMediaReady"),
         "_mountMediaPlayer": _helper("_mountMediaPlayer"),
         "_workspaceRawReachable": _helper("_workspaceRawReachable"),
-    })).replace("__PARAMS__", json.dumps({"imageOutcome": "load", "mediaOutcome": "loadedmetadata"})).replace(
+    })).replace("__PARAMS__", json.dumps({"imageOutcome": "load", "mediaOutcome": "loadedmetadata", "redirect401": True})).replace(
         "__CONSTS__", _shipped_const_line("_PREVIEW_LOAD_TIMEOUT_MS")
     )
     js = js.replace("async function api(url, opts){", "async function api(url, opts){ if(params.redirect401){ return undefined; }")
@@ -449,7 +449,7 @@ def test_shipped_preview_branches_await_their_outcome():
     body = _read(WORKSPACE_JS_PATH)
     for needle, message in (
         ("_awaitElementLoad(img", "the image branch no longer awaits its load outcome"),
-        ("_awaitMediaReady(mediaEl)", "the media branch no longer awaits its outcome"),
+        ("_awaitMediaReady(mediaEl, ()=>_previewOpenOwned(_openGen,_openSid,_openWsGen))", "the media branch no longer awaits its owned outcome"),
     ):
         assert needle in body, message
     assert body.count("_workspaceRawReachable(url)") >= 2, (
@@ -915,4 +915,52 @@ def test_every_async_read_branch_checks_preview_ownership_before_committing():
         )
         idx = i + len(read)
     assert reads >= 3, "expected the Markdown, CSV and text read branches"
+
+
+def test_media_wait_stays_silent_once_its_preview_is_no_longer_owned():
+    """Greptile P2 on the release PR: clearPreview()/showPreview() only hide the
+    <video>/<audio> element, so an error that fires after the preview was cleared
+    or replaced must not report "file open failed" for a preview the user left."""
+    body = _read(WORKSPACE_JS_PATH)
+    helper = extract_function(body, "_awaitMediaReady")
+    js = r"""
+    const statuses = [];
+    function setStatus(s){ statuses.push(s); }
+    function t(k){ return k; }
+    const _PREVIEW_LOAD_TIMEOUT_MS = 50;
+    eval(__HELPER__);
+    function fakeEl(){
+      const ls = {};
+      return { readyState: 0,
+        addEventListener(ev, f){ (ls[ev] = ls[ev] || []).push(f); },
+        removeEventListener(ev, f){ ls[ev] = (ls[ev] || []).filter(g => g !== f); },
+        fire(ev){ (ls[ev] || []).slice().forEach(f => f()); } };
+    }
+    (async () => {
+      let owned = true;
+      const a = fakeEl();
+      const pa = _awaitMediaReady(a, () => owned);
+      owned = false; a.fire('error');
+      const early = await pa;
+      const earlyStatuses = statuses.length;
+      owned = true;
+      const b = fakeEl();
+      const pb = _awaitMediaReady(b, () => owned);
+      await pb;                       // the bound released it (resolve true)
+      owned = false; b.fire('error'); // late error after the preview was left
+      const lateStatuses = statuses.length - earlyStatuses;
+      owned = true;
+      const c = fakeEl();
+      const pc = _awaitMediaReady(c, () => owned);
+      c.fire('error');
+      const ownedFail = await pc;
+      console.log(JSON.stringify({ early, earlyStatuses, lateStatuses, ownedFail, total: statuses.length }));
+    })();
+    """.replace("__HELPER__", json.dumps(helper))
+    proc = subprocess.run([NODE, "-e", js], capture_output=True, text=True, cwd=REPO_ROOT, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert out["early"] is False and out["earlyStatuses"] == 0, out
+    assert out["lateStatuses"] == 0, out
+    assert out["ownedFail"] is False and out["total"] == 1, "an owned failure must still report once"
 
