@@ -1455,6 +1455,35 @@ function scenario25() {
 }
 
 const scenario = process.argv[4];
+
+// 26. Release gate (Greptile on #8100): an Edge reply is pinned to the profile
+//     it started on, like the OpenAI path. A profile switch mid-reply must not
+//     move the later chunks to the new profile (the server rejects a mismatch).
+function scenario26() {
+  resetState();
+  S.activeProfile = 'alpha';
+  const btn = fakeBtn();
+  _playEdgeTtsChunked(longText, btn);          // Edge fetch0: immediate
+  return sleep(0).then(() => {
+    if (fetchCalls.length !== 1) throw new Error('s26: first edge request not issued');
+    const p0 = JSON.parse(fetchCalls[0].opts.body).profile;
+    if (p0 !== 'alpha') throw new Error('s26: first chunk sent under profile ' + p0);
+    fetchCalls[0].resolve(okResp());
+    return sleep(30);
+  }).then(() => {
+    if (audioEls.length !== 1) throw new Error('s26: edge audio missing');
+    S.activeProfile = 'beta';                  // user switches profile mid-reply
+    audioEls[0].onended();                     // chunk 0 finishes -> chunk 1
+    return sleep(300);
+  }).then(() => {
+    if (fetchCalls.length < 2) throw new Error('s26: second chunk not requested (calls=' + fetchCalls.length + ')');
+    const p1 = JSON.parse(fetchCalls[1].opts.body).profile;
+    delete S.activeProfile;
+    if (p1 !== 'alpha') throw new Error('s26: later chunk moved to profile ' + p1);
+    return 'PASS';
+  });
+}
+
 const runner = {
   scenario1: scenario1, scenario2: scenario2, scenario3: scenario3, scenario4: scenario4,
   scenario5: scenario5, scenario6: scenario6, scenario7: scenario7, scenario8: scenario8,
@@ -1462,7 +1491,7 @@ const runner = {
   scenario13: scenario13, scenario14: scenario14, scenario15: scenario15, scenario16: scenario16,
   scenario17: scenario17, scenario18: scenario18,
   scenario19: scenario19, scenario20: scenario20, scenario21: scenario21, scenario22: scenario22,
-  scenario23: scenario23, scenario24: scenario24, scenario25: scenario25,
+  scenario23: scenario23, scenario24: scenario24, scenario25: scenario25, scenario26: scenario26,
 }[scenario];
 if (!runner) throw new Error('unknown scenario: ' + scenario);
 let outcome;
@@ -1491,6 +1520,7 @@ if (outcome && typeof outcome.then === 'function') {
     "scenario11", "scenario12", "scenario13", "scenario14", "scenario15",
     "scenario16", "scenario17", "scenario18", "scenario19", "scenario20",
     "scenario21", "scenario22", "scenario23", "scenario24", "scenario25",
+    "scenario26",
 ])
 def test_openai_tts_chunk_chain_race(tmp_path, scenario):
     """Behavioral coverage for the unified TTS request scheduler and the

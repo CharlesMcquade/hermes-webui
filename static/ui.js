@@ -9995,6 +9995,10 @@ function _playEdgeTtsChunked(text, btn){
   _stopActivePlaybackAudio();
   const chunks=_splitForTTS(text);
   const _owns=function(){ return _ownsTtsPlayback(gen); };
+  // #7529 (release gate): pin the whole reply to the profile it started on, as
+  // the OpenAI path does. Reading S.activeProfile per chunk let a mid-reply
+  // profile switch send the remaining chunks under the new profile.
+  const playbackProfile=(S&&S.activeProfile)||'default';
   const _fail=function(msg){
     if(!_owns()) return;
     _ttsSpeaking=false;
@@ -10021,9 +10025,9 @@ function _playEdgeTtsChunked(text, btn){
     // Every Edge chunk goes through the shared /api/tts scheduler: the server
     // limiter is per-client across engines, so a request that follows another
     // engine's fetch (or a replacement inside the window) must wait, not 429.
-    // #7529: the captured profile travels with every chunk — the scheduler can
-    // hold one for up to 2s and re-send it after a 429.
-    const _chunkProfile=(S&&S.activeProfile)||'default';
+    // #7529: the profile captured at playback start travels with every chunk —
+    // the scheduler can hold one for up to 2s and re-send it after a 429.
+    const _chunkProfile=playbackProfile;
     _sendTtsRequest({
       method:'POST',
       headers:{'Content-Type':'application/json'},
