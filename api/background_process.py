@@ -42,10 +42,12 @@ this module routes them to the same listener so the frontend's single
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from typing import Any, Optional
 
 from api.process_event_utils import (
@@ -370,6 +372,12 @@ def active_stream_id_for_session(session_id: str) -> Optional[str]:
     return matches[0] if matches else None
 
 
+# Bounded per-file-version memo for persisted_message_count_for_session().
+_PERSISTED_COUNT_MEMO: "OrderedDict[tuple, Optional[int]]" = OrderedDict()
+_PERSISTED_COUNT_MEMO_LOCK = threading.Lock()
+_PERSISTED_COUNT_MEMO_MAX = 512
+
+
 def persisted_message_count_for_session(session_id: str) -> Optional[int]:
     """Cheap, metadata-only persisted ``message_count`` for *session_id*, or None.
 
@@ -414,9 +422,29 @@ def persisted_message_count_for_session(session_id: str) -> Optional[int]:
 
         if not _models.is_safe_session_id(session_id):
             return None
-        return _models._prefix_message_count(
-            _models.SESSION_DIR / f"{session_id}.json"
-        )
+        path = _models.SESSION_DIR / f"{session_id}.json"
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        # Every sidecar writer publishes through tmp + os.replace, so each
+        # write gets a new inode; (inode, size, mtime_ns) therefore identifies
+        # one file version. Memoizing per version keeps a legacy sidecar whose
+        # metadata overflows the 64 KiB first stage from paying the bounded
+        # 1 MiB scan on every reconnect (#7673 gate); a stale entry can at worst
+        # skip one catch-up emission, which the caller already tolerates.
+        key = (str(path), st.st_ino, st.st_size, st.st_mtime_ns)
+        with _PERSISTED_COUNT_MEMO_LOCK:
+            if key in _PERSISTED_COUNT_MEMO:
+                _PERSISTED_COUNT_MEMO.move_to_end(key)
+                return _PERSISTED_COUNT_MEMO[key]
+        count = _models._prefix_message_count(path)
+        with _PERSISTED_COUNT_MEMO_LOCK:
+            _PERSISTED_COUNT_MEMO[key] = count
+            _PERSISTED_COUNT_MEMO.move_to_end(key)
+            while len(_PERSISTED_COUNT_MEMO) > _PERSISTED_COUNT_MEMO_MAX:
+                _PERSISTED_COUNT_MEMO.popitem(last=False)
+        return count
     except Exception:
         logger.debug(
             "persisted_message_count_for_session lookup failed for %s",

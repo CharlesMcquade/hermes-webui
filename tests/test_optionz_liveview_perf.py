@@ -753,6 +753,84 @@ def test_persisted_message_count_never_parses_the_transcript(
     assert full_reads["n"] == 0
 
 
+def test_persisted_message_count_sees_a_recovery_restored_sidecar(
+    _sse_count_store, monkeypatch
+):
+    """#7673 gate (Codex SILENT): a crash-recovery restore rewrites a sidecar
+    the browser has not seen. The restored payload's count is derived from its
+    own rows, so it must be vouched (``_mc_v``) and readable by the bounded
+    prefix reader; otherwise the SSE catch-up stays silent for that session."""
+    import json
+
+    from api import background_process as bp
+    import api.models as models
+    from api.session_recovery import repair_safe_session_recovery
+
+    sid = "sess-restored"
+    rows = [{"role": "user" if i % 2 == 0 else "assistant", "content": str(i)} for i in range(4)]
+    bak = _sse_count_store / f"{sid}.json.bak"
+    bak.write_text(json.dumps({
+        "session_id": sid, "title": "T", "created_at": 1.0, "updated_at": 1.0,
+        "messages": rows,
+    }), encoding="utf-8")
+    index = _sse_count_store / "_index.json"
+    index.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", index)
+
+    assert bp.persisted_message_count_for_session(sid) is None  # nothing live yet
+    result = repair_safe_session_recovery(_sse_count_store)
+    assert result["repaired"] == 1
+    assert bp.persisted_message_count_for_session(sid) == 4
+
+
+def test_recovery_payload_marks_its_count_before_messages():
+    """Both recovery writers (restore and state.db materialization) go through
+    one helper: the exact row count plus the writer marker sit immediately
+    before ``messages``, so the bounded prefix reader can see them."""
+    import api.models as models
+    from api.session_recovery import _with_marked_message_count
+
+    payload = {"session_id": "s", "title": "T", "message_count": 99,
+               "messages": [{"role": "user", "content": "a"}] * 3, "tool_calls": []}
+    marked = _with_marked_message_count(payload)
+    keys = list(marked)
+    assert keys.index("message_count") + 1 == keys.index("_mc_v")
+    assert keys.index("_mc_v") + 1 == keys.index("messages")
+    assert marked["message_count"] == 3
+    assert marked["_mc_v"] == models._MESSAGE_COUNT_MARKER
+    assert payload["message_count"] == 99  # caller's dict is not mutated
+
+
+def test_persisted_message_count_scans_each_file_version_once(
+    _sse_count_store, monkeypatch
+):
+    """#7673 gate (Codex SILENT): a legacy sidecar whose metadata overflows the
+    64 KiB first stage costs a bounded 1 MiB scan; reconnect storms must not pay
+    it again for the same file version, but a rewrite must be re-read."""
+    from api import background_process as bp
+    import api.models as models
+
+    monkeypatch.setattr(bp, "_PERSISTED_COUNT_MEMO", type(bp._PERSISTED_COUNT_MEMO)())
+    calls = {"n": 0}
+    real = models._prefix_message_count
+
+    def counting(path):
+        calls["n"] += 1
+        return real(path)
+
+    monkeypatch.setattr(models, "_prefix_message_count", counting)
+    sid = "sess-memo"
+    _save_real_session(_sse_count_store, sid, 3)
+    calls["n"] = 0  # save()'s own shrink check also reads the prefix
+    for _ in range(5):
+        assert bp.persisted_message_count_for_session(sid) == 3
+    assert calls["n"] == 1
+    _save_real_session(_sse_count_store, sid, 5)
+    calls["n"] = 0
+    assert bp.persisted_message_count_for_session(sid) == 5
+    assert calls["n"] == 1
+
+
 def test_session_sse_handler_wires_finished_during_gap_self_heal():
     """Source-grep: the per-session SSE handler must (a) parse ?known_count,
     (b) in the live-run-absent branch compare the persisted count against it,
