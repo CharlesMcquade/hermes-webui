@@ -800,6 +800,22 @@ def test_recovery_payload_marks_its_count_before_messages():
     assert marked["_mc_v"] == models._MESSAGE_COUNT_MARKER
     assert payload["message_count"] == 99  # caller's dict is not mutated
 
+    # Legacy layout: scenes before messages -> the count must precede the scenes,
+    # because the bounded prefix reader stops at whichever key comes first.
+    legacy = {"session_id": "s", "title": "T", "created_at": 1.0, "updated_at": 1.0,
+              "anchor_activity_scenes": {"0": {"rows": ["x" * 70000]}},
+              "messages": [{"role": "user", "content": "a"}] * 2}
+    marked = _with_marked_message_count(legacy)
+    keys = list(marked)
+    assert keys.index("_mc_v") + 1 == keys.index("anchor_activity_scenes")
+    import json as _json
+    import pathlib as _pathlib
+    import tempfile as _tempfile
+    with _tempfile.TemporaryDirectory() as d:
+        f = _pathlib.Path(d) / "s.json"
+        f.write_text(_json.dumps(marked), encoding="utf-8")
+        assert models._prefix_message_count(f) == 2
+
 
 def test_persisted_message_count_scans_each_file_version_once(
     _sse_count_store, monkeypatch

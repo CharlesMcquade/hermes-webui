@@ -120,7 +120,7 @@ def _with_marked_message_count(payload: dict) -> dict:
     Recovery writers serialize a payload whose ``messages`` array they just
     derived, so ``len(messages)`` is exact for that same atomic write. Stamping
     it with the current writer marker (``_mc_v``) immediately before
-    ``messages`` lets bounded prefix readers (``_prefix_message_count``: the
+    ``messages`` (or a legacy leading ``anchor_activity_scenes``) lets bounded prefix readers (``_prefix_message_count``: the
     per-subscribe SSE catch-up count, the #1558 save shrink check) trust it
     instead of treating the restored/materialized sidecar as an unvouched
     legacy file (#7673 gate). Every other key keeps its position.
@@ -133,12 +133,16 @@ def _with_marked_message_count(payload: dict) -> dict:
         return payload
     count = len(payload['messages'])
     out: dict = {}
+    placed = False
     for key, value in payload.items():
         if key in ('message_count', '_mc_v'):
             continue
-        if key == 'messages':
+        # The bounded prefix reader stops at whichever of these comes first;
+        # a legacy layout serializes anchor_activity_scenes BEFORE messages.
+        if not placed and key in ('messages', 'anchor_activity_scenes'):
             out['message_count'] = count
             out['_mc_v'] = _MESSAGE_COUNT_MARKER
+            placed = True
         out[key] = value
     return out
 
