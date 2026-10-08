@@ -867,7 +867,10 @@ def _run_outside_tap_focus_landing(width: int) -> str:
     stylesheet, so the pointerdown-guard branch, the band predicate and the fallback
     choice all execute exactly as in production.
     """
-    from playwright.sync_api import sync_playwright
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the sidebar a11y browser test")
 
     playwright = sync_playwright().start()
     browser = playwright.chromium.launch(
