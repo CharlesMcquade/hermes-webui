@@ -1127,3 +1127,46 @@ console.log(JSON.stringify(ret));
         ),
     })
     assert out["menuOpened"] is False
+
+def test_refresh_keeps_exact_marker_on_same_session_but_drops_it_on_switch():
+    """`loadSession()` rewrites the URL through `_setActiveSessionUrl`. On the
+    child's own new tab (`/session/<child>?exact=1`) that rewrite must keep the
+    marker, otherwise a refresh resolves the child to its compressed parent;
+    switching to another session must still drop it (#7429 re-gate c22)."""
+    helpers = "\n".join(
+        _extract_function(SESSIONS_JS, name)
+        for name in (
+            "_sessionIdFromLocation",
+            "_sessionUrlForSid",
+            "_markSessionUrlExact",
+            "_sessionUrlRequestsExactTarget",
+            "_setActiveSessionUrl",
+        )
+    )
+    out = _run_node({
+        "helpers": helpers,
+        "driver": r"""
+const setLoc = (path, search) => vm.runInContext(
+  `window.location.pathname = ${JSON.stringify(path)};
+   window.location.search = ${JSON.stringify(search)};
+   window.location.hash = '';
+   window.location.href = 'http://127.0.0.1:8787' + ${JSON.stringify(path)} + ${JSON.stringify(search)};`, sandbox);
+vm.runInContext(`window.history = { calls: [], pushState(s,t,u){ this.calls.push(u); }, replaceState(s,t,u){ this.calls.push(u); } };`, sandbox);
+setLoc('/session/child-1', '?exact=1');
+vm.runInContext(`_setActiveSessionUrl('child-1')`, sandbox);
+ret.sameCalls = vm.runInContext(`window.history.calls.slice()`, sandbox);
+setLoc('/session/child-1', '?exact=1');
+vm.runInContext(`window.history.calls = []; _setActiveSessionUrl('other-2')`, sandbox);
+ret.switchCalls = vm.runInContext(`window.history.calls.slice()`, sandbox);
+setLoc('/session/old-seg', '');
+vm.runInContext(`window.history.calls = []; _setActiveSessionUrl('tip-3')`, sandbox);
+ret.plainCalls = vm.runInContext(`window.history.calls.slice()`, sandbox);
+console.log(JSON.stringify(ret));
+""",
+    })
+    # Same session: the URL already matches (marker kept), so nothing is pushed.
+    assert out["sameCalls"] == []
+    # Switching sessions drops the one-shot marker.
+    assert out["switchCalls"] == ["/session/other-2"]
+    # Ordinary deep links never gain the marker.
+    assert out["plainCalls"] == ["/session/tip-3"]

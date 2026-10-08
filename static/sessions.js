@@ -4919,7 +4919,13 @@ function _sessionUrlForSid(sid){
 }
 function _setActiveSessionUrl(sid){
   if(typeof window==='undefined'||!window.history||!sid) return;
-  const next=_sessionUrlForSid(sid);
+  let next=_sessionUrlForSid(sid);
+  // Keep the one-shot exact-target marker while this tab stays on the same
+  // session, so a refresh of a child row's new tab still lands on the child
+  // instead of folding into its compressed parent; switching sessions drops it.
+  if(_sessionIdFromLocation()===sid && _sessionUrlRequestsExactTarget()){
+    next=_markSessionUrlExact(next);
+  }
   if(next && next!==(window.location.pathname+window.location.search+window.location.hash)){
     let consumeLaunchAction=false;
     try{
