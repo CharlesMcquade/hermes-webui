@@ -682,14 +682,16 @@ async () => {
 """
 
 
-def _browser_out(drive, arg=None):
+def _browser_out(drive, arg=None, viewport=None):
     """Run a drive against the real page served by the test server."""
     pw = pytest.importorskip("playwright.sync_api")
     from tests._pytest_port import BASE
 
     with pw.sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, args=_BROWSER_ARGS)
-        context = browser.new_context(viewport={"width": 1280, "height": 800})
+        context = browser.new_context(
+            viewport=viewport or {"width": 1280, "height": 800}
+        )
         page = context.new_page()
         page.goto(BASE + "/", wait_until="domcontentloaded")
         page.wait_for_function(
@@ -741,12 +743,147 @@ def test_shipped_preview_ownership_guards_are_wired():
     assert "const _openGen = ++_previewOpenGen;" in body, (
         "openFile() must take a preview generation"
     )
-    assert body.count("_previewOpenOwned(_openGen,_openSid,_openWsGen)") >= 2, (
-        "both iframe-backed branches (pdf + html) must reject a stale completion"
+    assert body.count("_previewOpenOwned(_openGen,_openSid,_openWsGen)") >= 4, (
+        "every branch that reports success after an await must reject a stale "
+        "completion: image, media (video shares it), pdf and html"
+    )
+    assert "statusOnly:true" in body and "opts.statusOnly===true" in body, (
+        "the reachability probe must ask api() for the status line only, "
+        "otherwise it buffers the whole document"
     )
     boot = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
     start = boot.index("function clearPreview(opts={}){")
     end = boot.index("\n}\n", start)
     assert "_previewOpenGen++" in boot[start:end], (
         "clearPreview() must retire in-flight preview opens"
+    )
+
+
+# ── the readiness waits need the same ownership check (re-review item 1) ─────
+#
+# This PR introduced the readiness waits in the image and media branches; both
+# report success AFTER an await, so a stale success reached openArtifactPath()
+# and cleared the user's dismissal. Gate repro: delay a media readiness by
+# 400 ms, switch sessions, run loadDir('.') → this head reopened an empty panel
+# while master stayed closed.
+
+_STALE_READINESS_DRIVE = r"""
+async (spec) => {
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  S.session = {session_id: 'b6710-before-switch', workspace: '/tmp/b6710-ws'};
+  S.currentDir = '.';
+  S.entries = [{name: spec.name, path: spec.name, type: 'file', mtime_ns: 1000}];
+  renderFileTree();
+  openWorkspacePanel('browse');
+  window._workspacePathExists = async () => true;   // entry exists; readiness is slow
+  closeWorkspacePanel();
+  const before = {mode: _workspacePanelMode, dismissed: _workspacePanelUserDismissed};
+
+  // Hold the readiness wait open so the switch happens mid-flight.
+  const gate = {release: null, waits: 0};
+  if (spec.kind === 'image') {
+    window._awaitElementLoad = () => { gate.waits++; return new Promise(r => { gate.release = r; }); };
+  } else {
+    window._mountMediaPlayer = () => ({
+      tagName: spec.tag, readyState: 1,
+      addEventListener(){}, removeEventListener(){},
+    });
+    window._awaitMediaReady = () => { gate.waits++; return new Promise(r => { gate.release = r; }); };
+  }
+
+  const pending = openArtifactPath('/tmp/b6710-ws/' + spec.name);
+  await new Promise(r => setTimeout(r, 80));
+  const waitsIssued = gate.waits;
+  const inFlightPath = _previewCurrentPath;
+
+  // Mid-flight the user switches profile/session; loadDir('.') bumps the
+  // workspace generation the same way switchToProfile() does.
+  S.session = {session_id: 'b6710-after-switch', workspace: '/tmp/b6710-ws'};
+  bumpWorkspaceTreeGen();
+  if (gate.release) gate.release(true);   // the OLD open now resolves "ready"
+
+  const returned = await pending;
+  return {
+    before: before,
+    waitsIssued: waitsIssued,
+    inFlightPath: inFlightPath,
+    returned: returned,
+    after: {mode: _workspacePanelMode, dismissed: _workspacePanelUserDismissed},
+  };
+}
+"""
+
+
+@pytest.mark.parametrize("spec", [
+    {"kind": "image", "name": "slow.png", "tag": "img"},
+    {"kind": "media", "name": "slow.wav", "tag": "audio"},
+    {"kind": "media", "name": "slow.mp4", "tag": "video"},
+])
+def test_a_stale_readiness_success_cannot_reopen_a_closed_panel(spec):
+    """Image/audio/video readiness must not report a reveal it no longer owns."""
+    out = _browser_out(_STALE_READINESS_DRIVE, spec, viewport={"width": 480, "height": 800})
+
+    assert out["waitsIssued"] == 1, f"precondition: readiness was in flight: {out}"
+    assert out["inFlightPath"] == spec["name"], out
+    assert out["before"]["dismissed"] is True, out
+    assert out["returned"] is False, (
+        "a readiness wait that resolved after the session switched reported "
+        f"success, so the caller clears the dismissal and promotes the panel: {out}"
+    )
+    assert out["after"]["dismissed"] is True, (
+        f"the user's dismissal was cleared by a superseded preview: {out}"
+    )
+    assert out["after"]["mode"] == "closed", (
+        f"a superseded preview reopened the panel: {out}"
+    )
+
+
+# ── the probe must not download the document (re-review item 2) ──────────────
+#
+# The inline HTML route answers with the whole document and `Accept-Ranges:
+# none` (api/routes.py `_serve_inline_html_preview`), so buffering the probe
+# response streamed the file once for the probe and again for the iframe.
+# Measured on the real server at a 2 MB/s throttle with a 3.3 MB page: probe
+# 1.80–1.99 s vs 0.06–0.33 s, iframe load 5.42–5.78 s vs 3.43–3.69 s.
+
+_PROBE_NO_BUFFER_DRIVE = r"""
+async () => {
+  const calls = {fetch: 0, text: 0, json: 0, cancel: 0, aborted: false};
+  const realFetch = window.fetch;
+  window.fetch = async (url, opts) => {
+    calls.fetch++;
+    const signal = opts && opts.signal;
+    if (signal) signal.addEventListener('abort', () => { calls.aborted = true; });
+    return {
+      ok: true, status: 200, statusText: 'OK',
+      headers: {get: () => 'text/html'},
+      text: async () => { calls.text++; return 'x'.repeat(4096); },
+      json: async () => { calls.json++; return {}; },
+      body: {cancel: () => { calls.cancel++; }},
+    };
+  };
+  let reachable = null, thrown = null;
+  try {
+    reachable = await _workspaceRawReachable('/api/file/raw?session_id=s1&path=big.html&inline=1');
+  } catch (error) {
+    thrown = String((error && error.message) || error);
+  }
+  window.fetch = realFetch;
+  return {reachable: reachable, thrown: thrown, calls: calls};
+}
+"""
+
+
+def test_the_reachability_probe_does_not_buffer_the_document():
+    """The probe needs the status line only — never the body."""
+    out = _browser_out(_PROBE_NO_BUFFER_DRIVE)
+
+    assert out["thrown"] is None, out
+    assert out["reachable"] is True, out
+    assert out["calls"]["fetch"] == 1, f"precondition: the probe fetched once: {out}"
+    assert out["calls"]["text"] == 0 and out["calls"]["json"] == 0, (
+        f"the probe buffered a response body it never uses: {out}"
+    )
+    assert out["calls"]["aborted"] or out["calls"]["cancel"] > 0, (
+        f"the probe left the body stream running instead of dropping it: {out}"
     )

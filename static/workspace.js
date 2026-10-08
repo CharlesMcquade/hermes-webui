@@ -27,6 +27,7 @@ async function api(path,opts={}){
       delete fetchOpts.retryTimeouts;
       delete fetchOpts.retryStatuses;
       delete fetchOpts.retryDelayMs;
+      delete fetchOpts.statusOnly;
 
       const useTimeout=Number.isFinite(Number(timeoutMs))&&Number(timeoutMs)>0;
       if(useTimeout&&typeof AbortController!=='undefined'){
@@ -76,6 +77,19 @@ async function api(path,opts={}){
           err.statusText=res.statusText;
           err.body=text;
           throw err;
+        }
+        if(opts.statusOnly===true){
+          // #6710 (gate re-review, item 2): the caller only needs the status line
+          // — the preview reachability probe. Drop the body instead of buffering
+          // it: the inline HTML route answers with the whole document and
+          // `Accept-Ranges: none`, so a plain probe streamed the entire file once
+          // for the probe and again for the iframe (measured: probe 1.80–1.99 s
+          // vs 0.06–0.33 s on a 3.3 MB page at 2 MB/s).
+          try{
+            if(controller) controller.abort();
+            else if(res.body&&typeof res.body.cancel==='function') res.body.cancel();
+          }catch(_){}
+          return {status:res.status};
         }
         const ct=res.headers.get('content-type')||'';
         return ct.includes('application/json')?await res.json():await res.text();
@@ -655,7 +669,7 @@ const _PREVIEW_LOAD_TIMEOUT_MS = 8000;
  */
 async function _workspaceRawReachable(url){
   try{
-    await api(url, {headers:{Range:'bytes=0-0'}, retries:0, timeoutMs:8000, timeoutToast:false});
+    await api(url, {headers:{Range:'bytes=0-0'}, retries:0, timeoutMs:8000, timeoutToast:false, statusOnly:true});
     return true;
   }catch(err){
     // #6710 (gate re-review): a probe TIMEOUT is not evidence that the file is
@@ -1368,6 +1382,12 @@ async function openFile(path, opts={}){
     // a broken image fails closed instead of promoting the panel onto a blank
     // preview (see _awaitElementLoad).
     if(!(await _awaitElementLoad(img, ()=>{img.src=url;}, 'image_load_failed'))) return false;
+    // #6710 (gate re-review, item 1): the readiness wait above is an await, so
+    // the preview may have been superseded — a newer open, a session switch, or
+    // a workspace-generation bump while the image was loading. Reporting success
+    // here is what reaches openArtifactPath() and clears the user's dismissal
+    // (Chromium repro: delay the readiness 400 ms, switch sessions, loadDir('.')).
+    if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
   } else if(AUDIO_EXTS.has(ext)||VIDEO_EXTS.has(ext)){
     const mode=VIDEO_EXTS.has(ext)?'video':'audio';
     showPreview(mode);
@@ -1382,6 +1402,10 @@ async function openFile(path, opts={}){
       const mediaEl=_mountMediaPlayer(wrap, html, mode);
       if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(wrap);
       if(mediaEl && !(await _awaitMediaReady(mediaEl))) return false;
+      // #6710 (gate re-review, item 1): same ownership rule as the image branch
+      // (video shares this branch) — a readiness wait that resolved after the
+      // preview was superseded must not be reported as a reveal.
+      if(mediaEl && !_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
     }
   } else if(PDF_EXTS.has(ext)){
     showPreview('pdf');
