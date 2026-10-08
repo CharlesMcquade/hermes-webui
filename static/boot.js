@@ -1967,13 +1967,15 @@ window.renderTranscript=function(container, messages, opts){
     if(engine==="elevenlabs"){
       const gen=_beginTtsPlayback();
       const _owns=function(){ return _ownsTtsPlayback(gen); };
+      // #7529: capture the profile at request-build time (see the openai branch).
+      const _ttsProfile=(S&&S.activeProfile)||'default';
       // Shared /api/tts scheduler: paced across engines/generations with a
       // bounded owner-aware 429 retry — a voice-mode request right after any
       // other engine's fetch waits for the slot instead of hitting 429.
       _sendTtsRequest({
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, engine: 'elevenlabs'})
+        body: JSON.stringify({text: clean, engine: 'elevenlabs', profile: _ttsProfile})
       }, _owns)
       .then(res => {
         if(!_owns()) return;
@@ -2014,12 +2016,17 @@ window.renderTranscript=function(container, messages, opts){
     if(engine==="openai"){
       const gen=_beginTtsPlayback();
       const _owns=function(){ return _ownsTtsPlayback(gen); };
+      // #7529: capture the profile at request-build time. The shared scheduler
+      // can hold this request for up to 2s and re-send it after a 429, where
+      // master sent immediately — a profile switch during that wait would
+      // otherwise send it under the new profile.
+      const _ttsProfile=(S&&S.activeProfile)||'default';
       // Same shared scheduler as the other engines: this request competes for
       // the per-client slot with every other /api/tts call.
       _sendTtsRequest({
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, engine: 'openai'})
+        body: JSON.stringify({text: clean, engine: 'openai', profile: _ttsProfile})
       }, _owns)
       .then(res => {
         if(!_owns()) return;
@@ -2066,10 +2073,12 @@ window.renderTranscript=function(container, messages, opts){
       if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
       const gen=_beginTtsPlayback();
       const _owns=function(){ return _ownsTtsPlayback(gen); };
+      // #7529: capture the profile at request-build time (see the openai branch).
+      const _ttsProfile=(S&&S.activeProfile)||'default';
       _sendTtsRequest({
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text: clean, voice, rate, pitch, engine: 'edge'})
+        body: JSON.stringify({text: clean, voice, rate, pitch, engine: 'edge', profile: _ttsProfile})
       }, _owns)
       .then(res => {
         if(!_owns()) return;

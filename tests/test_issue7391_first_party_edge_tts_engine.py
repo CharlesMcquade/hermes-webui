@@ -74,6 +74,10 @@ let _ttsCurrentUtterance = null;
 let _ttsChunkQueue = [];
 let _ttsChunkIndex = 0;
 let _ttsActiveBtn = null;
+// #7529: the chunked Edge path pins the captured playback profile, so the
+// harness must expose the same global the production code reads.
+const S = { session: { session_id: 'sid-edge' }, activeProfile: 'default' };
+globalThis.S = S;
 __UI_FNS__
 const row = { dataset: { rawText: 'Hello from Edge' } };
 const btn = { dataset: { speaking: '0' }, closest: () => row };
@@ -165,6 +169,11 @@ def test_play_edge_tts_chunked_sends_explicit_engine_when_server_still_elevenlab
     assert requests[0]["body"]["engine"] == "edge"
     assert requests[0]["body"]["text"] == "Hello from Edge"
     assert requests[0]["body"]["voice"] == "en-US-AriaNeural"
+    # #7529: the captured playback profile travels with every chunk, so a switch
+    # while the shared scheduler holds or retries one cannot move it to the new
+    # profile. The harness pins activeProfile='default' and the old code omitted
+    # exactly that value, which is what let the leak through.
+    assert requests[0]["body"].get("profile") == "default"
 
 
 def test_voice_mode_edge_branch_sends_explicit_engine_when_server_still_openai():
@@ -177,3 +186,7 @@ def test_voice_mode_edge_branch_sends_explicit_engine_when_server_still_openai()
     assert requests[0]["body"]["engine"] == "edge"
     assert requests[0]["body"]["text"] == "Hello from Edge"
     assert requests[0]["body"]["voice"] == "en-US-AriaNeural"
+    # #7529: the voice-mode Edge branch pins the captured profile too, so a
+    # switch while the shared scheduler holds or retries the request cannot move
+    # it to the new profile.
+    assert requests[0]["body"].get("profile") == "default"

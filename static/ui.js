@@ -10021,10 +10021,13 @@ function _playEdgeTtsChunked(text, btn){
     // Every Edge chunk goes through the shared /api/tts scheduler: the server
     // limiter is per-client across engines, so a request that follows another
     // engine's fetch (or a replacement inside the window) must wait, not 429.
+    // #7529: the captured profile travels with every chunk — the scheduler can
+    // hold one for up to 2s and re-send it after a 429.
+    const _chunkProfile=(S&&S.activeProfile)||'default';
     _sendTtsRequest({
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch, engine:'edge'})
+      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch, engine:'edge', profile:_chunkProfile})
     }, _owns)
     .then(function(res){
       if(!_owns()) return;
@@ -10135,6 +10138,8 @@ function _playElevenLabsTts(text, btn){
   const gen=_beginTtsPlayback();
   _stopActivePlaybackAudio();
   const _owns=function(){ return _ownsTtsPlayback(gen); };
+  // #7529: capture the profile at request-build time (see _playOpenaiTts).
+  const _ttsProfile=(S&&S.activeProfile)||'default';
   const _fail=function(msg){
     if(!_owns()) return;
     _ttsSpeaking=false;
@@ -10145,7 +10150,7 @@ function _playElevenLabsTts(text, btn){
   _sendTtsRequest({
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({text:text, engine:'elevenlabs'})
+    body:JSON.stringify({text:text, engine:'elevenlabs', profile:_ttsProfile})
   }, _owns)
   .then(function(res){
     if(!_owns()) return;
@@ -10202,9 +10207,15 @@ function _playOpenaiTts(text, btn){
       body:JSON.stringify({
         text:chunks[i],
         engine:'openai',
-        // Empty/default is omitted server-side (omitting stays accepted), so
-        // legacy direct callers keep working untouched.
-        profile:(playbackProfile&&playbackProfile!=='default')?playbackProfile:undefined
+        // #7529: ALWAYS send the captured profile, including 'default'.
+        // S.activeProfile starts as 'default' and _handle_tts only rejects an
+        // explicit mismatch, so a request with no profile is accepted under
+        // whichever profile happens to be active. Starting playback in the
+        // default profile and switching to a named one therefore sent the rest
+        // of the reply under the NAMED profile's TTS config and key.
+        // _profiles_match treats 'default' and a renamed root as the same
+        // profile, so sending it explicitly is safe and closes the leak.
+        profile:playbackProfile||'default'
       })
     }, function(){ return _ownsTtsPlayback(gen); });
   }

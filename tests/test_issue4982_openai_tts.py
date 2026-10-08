@@ -541,7 +541,60 @@ def test_play_openai_tts_exists_in_ui_js():
     # Each chunk request pins the profile that owns the playback, so a
     # mid-playback profile switch cannot speak A's text under B's credentials.
     assert "playbackProfile=(S&&S.activeProfile)||'default';" in src
-    assert "profile:(playbackProfile&&playbackProfile!=='default')?playbackProfile:undefined" in src
+    # #7529 (maintainer finding, SILENT): the profile must ALWAYS be sent,
+    # including 'default'. S.activeProfile starts as 'default' and _handle_tts
+    # rejects only an explicit mismatch, so a request with NO profile field is
+    # accepted under whichever profile happens to be active — starting playback
+    # in the default profile and switching to a named one leaked the rest of the
+    # reply into the named profile's TTS config and key.
+    assert "profile:playbackProfile||'default'" in src
+    # The old omission is exactly what must NOT come back.
+    assert "playbackProfile!=='default'" not in src
+
+
+def test_every_tts_request_body_pins_the_profile():
+    """#7529 (SHOULD-FIX): every /api/tts request must carry the profile.
+
+    The shared scheduler this PR adds can hold a request for up to 2s and
+    re-send it after a 429, where master sent immediately. A profile switch
+    during that window must not move the request to the new profile, so the
+    profile has to be captured at request-build time on EVERY path: the openai
+    chunk stream, the elevenlabs one-shot, the edge chunk stream, and the three
+    voice-mode branches in boot.js.
+    """
+    ui = (STATIC_DIR / "ui.js").read_text(encoding="utf-8")
+    boot = (STATIC_DIR / "boot.js").read_text(encoding="utf-8")
+    import re
+
+    # Every JSON body that sets an engine must also set a profile.
+    bodies = []
+    for src in (ui, boot):
+        for m in re.finditer(r"JSON\.stringify\(\{(.{0,400}?)\}\)", src, re.S):
+            blob = m.group(1)
+            if "engine" in blob:
+                bodies.append((src is boot, blob))
+    assert bodies, "no engine-bearing TTS bodies found — the probe is broken"
+    missing = [b for from_boot, b in bodies if "profile" not in b]
+    assert not missing, (
+        "these /api/tts request bodies omit the profile, so a profile switch "
+        "while the shared scheduler holds or retries them sends them under the "
+        "new profile (#7529): " + repr(missing)
+    )
+
+
+def test_default_to_named_profile_switch_keeps_the_original_profile():
+    """#7529: the default -> named switch is the case that leaked.
+
+    The captured profile is 'default' at playback start. The old code dropped
+    it precisely in that case (it omitted anything equal to 'default'), which
+    is why the leak was invisible until a switch happened.
+    """
+    src = (STATIC_DIR / "ui.js").read_text(encoding="utf-8")
+    # The capture must default to 'default' rather than to a falsy value that
+    # the sender then omits.
+    assert "playbackProfile=(S&&S.activeProfile)||'default';" in src
+    # And the sender must forward it unconditionally.
+    assert "profile:playbackProfile||'default'" in src
 
 
 # ── Playback profile ownership (#7529 maintainer finding, SILENT) ───────────
@@ -676,4 +729,8 @@ def test_tts_unrelated_profile_still_rejected(monkeypatch):
 def test_boot_js_handles_openai_engine():
     src = (STATIC_DIR / "boot.js").read_text(encoding="utf-8")
     assert 'if(engine==="openai")' in src
-    assert "body: JSON.stringify({text: clean, engine: 'openai'})" in src
+    # #7529: the voice-mode openai branch pins the captured profile, so a switch
+    # while the shared scheduler holds or retries the request cannot move it to
+    # the new profile. (The body used to omit the profile entirely.)
+    assert "body: JSON.stringify({text: clean, engine: 'openai', profile: _ttsProfile})" in src
+    assert "const _ttsProfile=(S&&S.activeProfile)||'default';" in src
