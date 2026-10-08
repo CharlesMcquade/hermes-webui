@@ -3402,21 +3402,66 @@ function _modelStateForSelect(sel, modelId){
     // otherwise mis-parse to provider "custom:backup:model-a" (#6221 re-gate).
     const routedProvider=selected?String(_getOptionProviderId(selected)||'').trim():'';
     // Normally-rendered catalog options only carry the qualified
-    // @custom:<slug>:<model> value — data-model is set solely by the fallback
+    // @<provider>:<model> value — data-model is set solely by the fallback
     // injection path (_ensureModelOptionInDropdown). When it is missing, strip
-    // the @custom:<slug>: prefix instead of sending the raw dropdown value as
-    // the model id (#6884). The prefix must come from the option metadata's
-    // authoritative provider (routedProvider), NOT from explicitProvider: the
-    // latter re-parses the value at its LAST colon, so a colon-bearing model
-    // id like @custom:backup:model-a:free would otherwise strip to just
-    // "free" (re-gate on the #6221 family). Only custom providers are
-    // stripped: a non-custom qualified id like @safe:gpt-4o-mini is a real
-    // provider namespace and must be preserved (#1771).
+    // the leading @<provider>: prefix instead of storing the raw dropdown
+    // value as the model id (#6884, #7860).
+    //
+    // The prefix must come from the option metadata's authoritative provider
+    // (routedProvider), NOT from explicitProvider: the latter re-parses the
+    // value at its LAST colon, so a colon-bearing model id like
+    // @custom:backup:model-a:free would otherwise strip to just "free"
+    // (re-gate on the #6221 family).
+    //
+    // The strip is NOT limited to custom providers: any provider that renders
+    // its options as @<provider>:<model> would otherwise persist the provider
+    // twice (once in model, once in model_provider) and the upstream answers
+    // 404 Model-not-found (#7860). A qualified id whose prefix belongs to a
+    // DIFFERENT provider than the option's own metadata is left intact — that
+    // is a real provider namespace (#1771), and stripping it would silently
+    // re-route the selection to the group's provider.
     const effectiveProvider=routedProvider||explicitProvider;
     const effectiveProviderLc=effectiveProvider.toLowerCase();
     const isCustomProvider=effectiveProviderLc==='custom'||effectiveProviderLc.startsWith('custom:');
     const explicitPrefix=`@${effectiveProvider}:`;
-    const strippedModel=isCustomProvider&&value.toLowerCase().startsWith(explicitPrefix.toLowerCase())
+    const valueCarriesPrefix=value.toLowerCase().startsWith(explicitPrefix.toLowerCase());
+    // Two ways the leading @<provider>: prefix is a genuine duplication we must
+    // strip:
+    //  (a) a custom provider's qualified id (#6884, and the value-encoded
+    //      variant where the option is missing from the catalog), or
+    //  (b) the dropdown rendered the option with a provider prefix that the
+    //      option's own metadata repeats (#7860: a non-default provider such
+    //      as @claude-subscription-…:claude-sonnet-5[1m] used to persist the
+    //      provider twice — once in `model`, once in `model_provider` — and
+    //      the upstream answered 404 Model-not-found).
+    // Anything else keeps the qualified form: a namespace like
+    // @safe:gpt-4o-mini is a real provider namespace and must be preserved
+    // (#1771). The account's configured default (window._defaultModel, e.g.
+    // "@safe:gpt-4o-mini") is the canonical standing default of the active
+    // provider — it is the session model on a missing/unknown-model fallback,
+    // not a catalog group's option, so it must NOT be stripped even though its
+    // own prefix happens to match the routed group provider.
+    const configuredDefault=(typeof window!=='undefined'&&window&&window._defaultModel)?String(window._defaultModel||'').trim():'';
+    const isConfiguredDefault=!!configuredDefault&&value.toLowerCase()===configuredDefault.toLowerCase();
+    // #7865 CORE (Codex): the second disjunct is gone. It stripped the
+    // @<provider>: prefix for ANY provider whose dropdown option carried one,
+    // on the reasoning that the prefix was then a duplication of
+    // model_provider. It is not: for a non-custom provider the qualified form is
+    // the session's model, and stripping it persisted the pair
+    // ``mistral-large`` / ``removed`` — a model id no provider owns plus a
+    // provider the account no longer has. The server fast path accepts that
+    // pair unchanged, and the installed Agent then raises
+    // ``AuthError: Unknown provider 'removed'`` on the next send, so a session
+    // whose provider was removed stopped recovering at all.
+    //
+    // Only a CUSTOM provider's qualified id is a genuine duplication: the
+    // custom namespace encodes the provider inside the model id itself, so
+    // keeping both repeats it and the upstream answers 404 Model-not-found.
+    // Non-custom @provider:model qualifiers stay in session state; stripping
+    // belongs at the native/Gateway provider-call boundaries, which is where it
+    // already happens.
+    const prefixIsDuplicated=!isConfiguredDefault&&isCustomProvider&&valueCarriesPrefix;
+    const strippedModel=prefixIsDuplicated
       ?value.slice(explicitPrefix.length)
       :value;
     return {model:routedModel||strippedModel||value,model_provider:effectiveProvider};
@@ -3450,24 +3495,103 @@ function _captureModelDropdownSelection(sel){
   }catch(_){}
   return {model:String(sel.value||''),model_provider:null};
 }
+// #7860/#7865: the picker's own "the user picked this here" evidence, kept
+// SEPARATE from the _pendingSessionModel family (that one is consumed by send()
+// and gone after the first turn). The send-path precedence needs the opposite
+// lifetime: a marker that says "the dropdown selection was authored by the user
+// for THIS session, after this session loaded", so a matching dropdown option
+// may override a loaded session's provider. Without it, any selection that the
+// catalog repaint leaves in the box (e.g. session restore syncs the topbar
+// before the catalog refresh — sessions.js ~2535 — and another provider's
+// identically-valued option ends up selected) would hijack the provider.
+function _pickerExplicitPickKey(sessionId){
+  return 'hermes-webui-explicit-picker-pick:'+String(sessionId||'');
+}
+function _rememberExplicitPickerPick(sessionId, value, provider){
+  const sid=String(sessionId||'').trim();
+  const val=String(value||'').trim();
+  if(!sid||!val) return;
+  try{
+    sessionStorage.setItem(_pickerExplicitPickKey(sid), JSON.stringify({
+      value:val,
+      model_provider:provider?String(provider):null,
+    }));
+  }catch(_){}
+}
+function _readExplicitPickerPick(sessionId){
+  const sid=String(sessionId||'').trim();
+  if(!sid) return null;
+  try{
+    const raw=sessionStorage.getItem(_pickerExplicitPickKey(sid));
+    if(!raw) return null;
+    const parsed=JSON.parse(raw);
+    const value=String(parsed&&parsed.value||'').trim();
+    if(!value) return null;
+    return {
+      value,
+      model_provider:parsed&&parsed.model_provider?String(parsed.model_provider):null,
+    };
+  }catch(_){
+    return null;
+  }
+}
+function _clearExplicitPickerPick(sessionId){
+  const sid=String(sessionId||'').trim();
+  if(!sid) return;
+  try{sessionStorage.removeItem(_pickerExplicitPickKey(sid));}catch(_){}
+}
 function _modelProviderForSend(modelId){
-  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
-  if(sessionProvider) return sessionProvider;
   const model=String(modelId||'').trim();
   if(!model) return null;
+  // An explicit provider embedded in a qualified id (@provider:model) is
+  // authoritative. (#7860, unchanged)
   const explicitProvider=typeof _providerFromModelValue==='function'
     ? _providerFromModelValue(model)
     : '';
   if(explicitProvider) return explicitProvider;
+  // The dropdown's option provider may win over a loaded session's provider
+  // ONLY with evidence the user picked in the dropdown for THIS session —
+  // the session-scoped explicit-pick marker written by the picker's change
+  // handler. A bare dropdown match alone is NOT evidence: after a session
+  // restore the catalog repaint can leave another provider's identically-
+  // valued option selected (e.g. gpt-5.5 offered by both OpenAI and OpenAI
+  // Codex), and letting that win routes the turn to a provider the user
+  // never picked (#7865, maintainer-flagged CORE regression). Always scoped
+  // to the ACTIVE session so a marker left over from another session can't
+  // authorize an override here.
   const sel=typeof $==='function' ? $('modelSelect') : null;
-  if(sel&&String(sel.value||'').trim()===model&&typeof _modelStateForSelect==='function'){
+  const activeSid=(S&&S.session&&S.session.session_id)||null;
+  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
+  const pick=(typeof _readExplicitPickerPick==='function')
+    ? _readExplicitPickerPick(activeSid)
+    : null;
+  // The gate only guards the session's own provider: without a loaded session
+  // provider there is nothing to protect, and master's behavior (the dropdown
+  // wins when its option matches the sent model) is preserved for the empty
+  // composer / new-session case.
+  if(sel&&(!sessionProvider||pick)&&String(sel.value||'').trim()===model
+     &&(!pick||String(pick.value||'').trim()===model)
+     &&typeof _modelStateForSelect==='function'){
     try{
       const dropdownState=_modelStateForSelect(sel,sel.value);
       if(dropdownState&&String(dropdownState.model||'').trim()===model){
-        return dropdownState.model_provider||null;
+        const dropdownProvider=dropdownState.model_provider;
+        // #7865: the marker is evidence of WHICH option the user picked, not
+        // just that some pick happened. A stale marker (surviving a reload, see
+        // the loadSession target-sid clear) authorizes the dropdown only when
+        // the option now selected is still the very provider that was picked.
+        // If the catalog repaint left a different provider's identically-valued
+        // option selected (gpt-5.5 offered by both openai and openai-codex),
+        // the pick must NOT authorize that wrong provider — fall through to the
+        // session's own provider instead.
+        const pickProvider=pick?String(pick.model_provider||'').trim().toLowerCase():'';
+        const dropdownProviderLc=String(dropdownProvider||'').trim().toLowerCase();
+        const pickAuthorizes=!pick||!!dropdownProviderLc&&!!pickProvider&&pickProvider===dropdownProviderLc;
+        if(dropdownProvider&&pickAuthorizes) return dropdownProvider;
       }
     }catch(_){}
   }
+  if(sessionProvider) return sessionProvider;
   if(typeof _readPersistedModelState==='function'){
     try{
       const persisted=_readPersistedModelState();
@@ -9841,13 +9965,99 @@ function _splitForTTS(text, maxChars){
 }
 
 let _ttsSpeaking=false;
+let _ttsGeneration=0;
+// Every playback claims a generation token before it produces audio. Any
+// replacement — and stopTTS() — invalidates all prior tokens, and every
+// asynchronous callback must verify ownership before mutating shared state.
+// `_ttsSpeaking` alone cannot distinguish playback A from playback B.
+function _beginTtsPlayback(){ _ttsSpeaking=true; return ++_ttsGeneration; }
+function _ownsTtsPlayback(gen){ return gen===_ttsGeneration; }
+// Minimum gap between consecutive /api/tts synthesis requests, matching the
+// server-side per-client window in api/routes.py (_TtsRateLimiter, 2 s).
+// Shared by every engine and generation — the server limiter is per-client
+// across ALL /api/tts requests, not per engine. Overridable (small values) by
+// tests that drive playback under node.
+let _ttsRequestMinGapMs=2000;
+// Client-wide timestamp of the last /api/tts request actually sent (any
+// engine, any generation). The server limiter (api/routes.py _TtsRateLimiter)
+// is per-client across ALL TTS requests, so pacing must account for requests
+// issued by any playback — one that starts inside another request's cooldown
+// must wait instead of hitting HTTP 429.
+let _ttsLastRequestTs=0;
+function _noteTtsRequestSent(){ _ttsLastRequestTs=Date.now(); }
+function _ttsRequestWaitMs(){
+  if(_ttsLastRequestTs===0) return 0;
+  const elapsed=Date.now()-_ttsLastRequestTs;
+  return elapsed>=_ttsRequestMinGapMs?0:_ttsRequestMinGapMs-elapsed;
+}
+// ONE scheduler for every server-backed TTS request (any engine, any
+// generation, any entry point — Listen button, auto-read, voice mode). The
+// slot is reserved at send time and re-checked whenever a waiter wakes:
+// several waiters waking together cannot stampede the window — the first
+// reserves, the rest wait again. `owner()` guards abandoned playbacks: a
+// cancelled chain resolves false instead of stealing the slot.
+function _acquireTtsRequestSlot(owner){
+  return new Promise(function(resolve){
+    function _attempt(){
+      if(owner&&!owner()){ resolve(false); return; }
+      const wait=_ttsRequestWaitMs();
+      if(wait<=0){ _noteTtsRequestSent(); resolve(true); return; }
+      setTimeout(_attempt, wait);
+    }
+    _attempt();
+  });
+}
+// Shared /api/tts sender: waits for the shared slot, sends, and applies a
+// bounded, owner-aware retry on HTTP 429 (the server window can outlive this
+// client's clock estimate — e.g. requests from another tab). Settles to
+// {ok:true, buf} / {ok:false, err} so callers never surface abandoned-
+// generation errors as unhandled rejections.
+function _sendTtsRequest(init, owner){
+  let attempt=0;
+  function _dispatch(){
+    return _acquireTtsRequestSlot(owner).then(function(reserved){
+      if(!reserved) return {ok:false, err:new Error('aborted')};
+      return fetch(new URL('api/tts', document.baseURI || location.href).href, init)
+      .then(function(r){
+        if(r.status===429&&attempt<3){
+          attempt++;
+          return _dispatch();
+        }
+        if(!r.ok){
+          return r.json().catch(function(){return {};}).then(function(j){
+            throw new Error((j&&j.error)||('TTS request failed: '+r.status));
+          });
+        }
+        return r.arrayBuffer().then(function(buf){
+          // Keep the audio MIME type the server declared. Callers build a
+          // Blob for an <audio> element, and a Blob with no type loses the
+          // `audio/mpeg` the response carried (master's r.blob() preserved
+          // it) — Safari is the browser that needs it to decode.
+          const ct=(r.headers&&typeof r.headers.get==='function')
+            ? r.headers.get('content-type') : '';
+          return {ok:true, buf:buf, type:(ct||'').split(';')[0].trim()};
+        });
+      })
+      .then(
+        function(res){
+          // A 429-retry settles to an already-settled {ok}/{err} result;
+          // pass it through instead of double-wrapping it as the chunk buf.
+          if(res&&typeof res==='object'&&('ok' in res)) return res;
+          return {ok:true, buf:res};
+        },
+        function(err){ return {ok:false, err:err}; }
+      );
+    });
+  }
+  return _dispatch();
+}
 let _ttsCurrentUtterance=null;
 let _ttsChunkQueue=[];
 let _ttsChunkIndex=0;
 let _ttsActiveBtn=null;
 let _playingEdgeAudio=null;
 
-function _buildBrowserUtterance(text, btn){
+function _buildBrowserUtterance(text, btn, gen){
   const utter=new SpeechSynthesisUtterance(text);
   const savedVoice=localStorage.getItem('hermes-tts-voice');
   const voices=speechSynthesis.getVoices();
@@ -9860,6 +10070,9 @@ function _buildBrowserUtterance(text, btn){
   const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
   if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
   utter.onend=()=>{
+    // A cancelled/replaced utterance's late onend must not advance the
+    // chunk chain — that would resume a stopped playback under a new one.
+    if(!_ownsTtsPlayback(gen)) return;
     _ttsChunkIndex++;
     if(_ttsChunkIndex<_ttsChunkQueue.length){
       const next=new SpeechSynthesisUtterance(_ttsChunkQueue[_ttsChunkIndex]);
@@ -9874,6 +10087,7 @@ function _buildBrowserUtterance(text, btn){
     }
   };
   utter.onerror=()=>{
+    if(!_ownsTtsPlayback(gen)) return;
     _ttsSpeaking=false; _ttsCurrentUtterance=null;
     _ttsChunkQueue=[]; _ttsChunkIndex=0; _ttsActiveBtn=null;
     if(btn) btn.dataset.speaking='0';
@@ -9881,13 +10095,47 @@ function _buildBrowserUtterance(text, btn){
   return utter;
 }
 
+// Stop whatever audio currently owns the shared handle (a Web Audio source,
+// or an Audio element from the Edge/extension paths) and clear it. Every
+// replacement and failure path routes through here so a released playback
+// never keeps sounding over the new one.
+function _stopActivePlaybackAudio(){
+  if(!_playingEdgeAudio) return;
+  try{
+    if(typeof _playingEdgeAudio.stop==='function'){
+      _playingEdgeAudio.stop(); _playingEdgeAudio.disconnect();
+    }else{
+      _playingEdgeAudio.pause(); _playingEdgeAudio.currentTime=0;
+    }
+  }catch(_){}
+  _playingEdgeAudio=null;
+}
+
 function _playEdgeTtsChunked(text, btn){
-  _ttsSpeaking=true;
   if(btn) btn.dataset.speaking='1';
+  // Claim the generation before releasing the previous playback's audio, so
+  // the old generation is already invalid when its stop-fallout callbacks run.
+  const gen=_beginTtsPlayback();
+  _stopActivePlaybackAudio();
   const chunks=_splitForTTS(text);
+  const _owns=function(){ return _ownsTtsPlayback(gen); };
+  // #7529 (release gate): pin the whole reply to the profile it started on, as
+  // the OpenAI path does. Reading S.activeProfile per chunk let a mid-reply
+  // profile switch send the remaining chunks under the new profile.
+  const playbackProfile=(S&&S.activeProfile)||'default';
+  const _fail=function(msg){
+    if(!_owns()) return;
+    _ttsSpeaking=false;
+    _stopActivePlaybackAudio();
+    if(btn) btn.dataset.speaking='0';
+    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+  };
   const _playOne=function(idx){
+    // Ownership gate: a late continuation from a replaced/stopped playback
+    // must not start audio or mutate shared state.
+    if(!_owns()){ return; }
     if(idx>=chunks.length){
-      _ttsSpeaking=false;_playingEdgeAudio=null;
+      _ttsSpeaking=false;
       if(btn) btn.dataset.speaking='0';
       return;
     }
@@ -9898,47 +10146,43 @@ function _playEdgeTtsChunked(text, btn){
     let rate='', pitch='';
     if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
     if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
-    fetch(new URL('api/tts', document.baseURI || location.href).href, {
+    // Every Edge chunk goes through the shared /api/tts scheduler: the server
+    // limiter is per-client across engines, so a request that follows another
+    // engine's fetch (or a replacement inside the window) must wait, not 429.
+    // #7529: the profile captured at playback start travels with every chunk —
+    // the scheduler can hold one for up to 2s and re-send it after a 429.
+    const _chunkProfile=playbackProfile;
+    _sendTtsRequest({
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch, engine:'edge'})
-    })
-    .then(function(r){
-      if(!r.ok){
-        return r.json().catch(function(){return {};}).then(function(j){
-          throw new Error((j&&j.error)||('TTS request failed: '+r.status));
-        });
-      }
-      return r.blob();
-    })
-    .then(function(blob){
-      if(!_ttsSpeaking) return;
-      const url=URL.createObjectURL(blob);
+      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch, engine:'edge', profile:_chunkProfile})
+    }, _owns)
+    .then(function(res){
+      if(!_owns()) return;
+      if(!res.ok){ _fail((res.err&&res.err.message)||'Edge TTS failed'); return; }
+      const url=URL.createObjectURL(new Blob([res.buf],{type:res.type}));
       const audio=new Audio(url);
       _playingEdgeAudio=audio;
       audio.onended=function(){
         URL.revokeObjectURL(url);
-        _playingEdgeAudio=null;
-        if(_ttsSpeaking) _playOne(idx+1);
+        if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+        if(_owns()) _playOne(idx+1);
       };
       audio.onerror=function(){
         URL.revokeObjectURL(url);
-        _playingEdgeAudio=null;
+        if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+        if(!_owns()) return;
         _ttsSpeaking=false;
         if(btn) btn.dataset.speaking='0';
       };
       audio.play().catch(function(e){
         URL.revokeObjectURL(url);
-        _playingEdgeAudio=null;
-        _ttsSpeaking=false;
-        if(btn) btn.dataset.speaking='0';
-        if(typeof showToast==='function') showToast('Edge TTS error: '+(e&&e.message||e));
+        if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+        _fail('Edge TTS error: '+(e&&e.message||e));
       });
     })
     .catch(function(e){
-      _ttsSpeaking=false;_playingEdgeAudio=null;
-      if(btn) btn.dataset.speaking='0';
-      if(typeof showToast==='function') showToast('Edge TTS failed: '+(e&&e.message||e));
+      _fail('Edge TTS failed: '+(e&&e.message||e));
     });
   };
   _playOne(0);
@@ -9972,12 +10216,16 @@ function speakMessage(btn){
     return;
   }
   // Extension-registered TTS engine (window.registerHermesTtsEngine). Synthesize
-  // via the extension, then play through the shared audio-buffer path.
+  // via the extension, then play through the shared audio-buffer path. The
+  // generation token gates the late synth completion: a promise resolved
+  // after a stop/replacement must not start audio or clear newer state.
   if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
+    const gen=_beginTtsPlayback();
     if(btn) btn.dataset.speaking='1';
-    _ttsSpeaking=true;
     const _failReg=function(msg){
-      _ttsSpeaking=false;_playingEdgeAudio=null;
+      if(!_ownsTtsPlayback(gen)) return;
+      _ttsSpeaking=false;
+      _stopActivePlaybackAudio();
       if(btn)btn.dataset.speaking='0';
       if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
     };
@@ -9987,7 +10235,10 @@ function speakMessage(btn){
       pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
     };
     Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
-      .then(function(buf){ return _playAudioBuf(buf, btn, 'TTS'); })
+      .then(function(buf){
+        if(!_ownsTtsPlayback(gen)) return;
+        return _playAudioBuf(buf, btn, 'TTS', gen);
+      })
       .catch(function(e){ _failReg((e&&e.message)||'TTS engine failed'); });
     return;
   }
@@ -10000,66 +10251,181 @@ function speakMessage(btn){
   _ttsChunkQueue=_splitForTTS(clean);
   _ttsChunkIndex=0;
   _ttsActiveBtn=btn;
-  _ttsSpeaking=true;
+  const gen=_beginTtsPlayback();
   if(btn) btn.dataset.speaking='1';
 
-  const utter=_buildBrowserUtterance(_ttsChunkQueue[0], btn);
+  const utter=_buildBrowserUtterance(_ttsChunkQueue[0], btn, gen);
   _ttsCurrentUtterance=utter;
   speechSynthesis.speak(utter);
 }
 
 function _playElevenLabsTts(text, btn){
   if(btn) btn.dataset.speaking='1';
-  _ttsSpeaking=true;
+  // Claim before releasing the previous playback (same ownership contract as
+  // _playOpenaiTts), then route the request through the shared scheduler.
+  const gen=_beginTtsPlayback();
+  _stopActivePlaybackAudio();
+  const _owns=function(){ return _ownsTtsPlayback(gen); };
+  // #7529: capture the profile at request-build time (see _playOpenaiTts).
+  const _ttsProfile=(S&&S.activeProfile)||'default';
   const _fail=function(msg){
-    _ttsSpeaking=false;_playingEdgeAudio=null;
+    if(!_owns()) return;
+    _ttsSpeaking=false;
+    _stopActivePlaybackAudio();
     if(btn)btn.dataset.speaking='0';
     if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
   };
-  fetch(new URL('api/tts', document.baseURI || location.href).href, {
+  _sendTtsRequest({
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({text:text, engine:'elevenlabs'})
-  })
-  .then(function(r){
-    if(!r.ok){
-      return r.json().catch(function(){return {};}).then(function(j){
-        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
-      });
-    }
-    return r.arrayBuffer();
-  })
-  .then(function(buf){
-    return _playAudioBuf(buf, btn, 'ElevenLabs TTS');
+    body:JSON.stringify({text:text, engine:'elevenlabs', profile:_ttsProfile})
+  }, _owns)
+  .then(function(res){
+    if(!_owns()) return;
+    if(!res.ok){ _fail((res.err&&res.err.message)||'ElevenLabs TTS failed'); return; }
+    return _playAudioBuf(res.buf, btn, 'ElevenLabs TTS', gen);
   })
   .catch(function(e){ _fail((e&&e.message)||'ElevenLabs TTS failed'); });
 }
 
 function _playOpenaiTts(text, btn){
   if(btn) btn.dataset.speaking='1';
-  _ttsSpeaking=true;
+  // Generation token: every new playback invalidates all in-flight callbacks
+  // of prior plays (`_ttsSpeaking` alone cannot distinguish playback A from
+  // B). Claim it before releasing the previous playback's audio, so the old
+  // generation is already dead when its stop-fallout callbacks run — direct
+  // callers (auto-read) must not overlap either, since speakMessage() is not
+  // the only entry point.
+  const gen=_beginTtsPlayback();
+  _stopActivePlaybackAudio();
+  // Profile ownership of the whole playback. A chunk ownership gate on the
+  // generation alone survives a profile switch, so the remainder of profile A's
+  // reply would be sent under profile B's provider/credentials. Capture the
+  // profile at playback start and send it with every chunk request; the server
+  // rejects a mismatch with 409 before touching the limiter or config.
+  const playbackProfile=(S&&S.activeProfile)||'default';
   const _fail=function(msg){
-    _ttsSpeaking=false;_playingEdgeAudio=null;
+    // Terminal failure: invalidate every scheduled/pending callback of this
+    // playback (paced prefetch timers, in-flight fetch then-chains) so no
+    // follow-on request can fire after a terminal error, and stop/disconnect
+    // any partially constructed source before dropping the handle.
+    _ttsGeneration++;
+    _ttsSpeaking=false;
+    _stopActivePlaybackAudio();
     if(btn)btn.dataset.speaking='0';
     if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
   };
-  fetch(new URL('api/tts', document.baseURI || location.href).href, {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({text:text, engine:'openai'})
-  })
-  .then(function(r){
-    if(!r.ok){
-      return r.json().catch(function(){return {};}).then(function(j){
-        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
-      });
+  const chunks=_splitForTTS(text,150);
+  if(!chunks.length){ _fail('No text to speak'); return; }
+
+  // Prefetch pipeline: fetch chunk N+1 while playing chunk N.
+  // Uses inline Web Audio playback (not _playAudioBuf) because
+  // _playAudioBuf clears _ttsSpeaking on end, which would break
+  // the chunk chain — we need _ttsSpeaking to stay true between chunks
+  // so src.onended can distinguish natural end (continue) from stopTTS (halt).
+  var _nextBufPromise=null;
+  function _fetchChunk(i){
+    // Route through the shared /api/tts scheduler: the request slot is
+    // paced/reserved across engines and generations (the server limiter is
+    // per-client), with a bounded owner-aware 429 retry. A request whose
+    // generation dies while waiting resolves aborted and never fires.
+    return _sendTtsRequest({
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        text:chunks[i],
+        engine:'openai',
+        // #7529: ALWAYS send the captured profile, including 'default'.
+        // S.activeProfile starts as 'default' and _handle_tts only rejects an
+        // explicit mismatch, so a request with no profile is accepted under
+        // whichever profile happens to be active. Starting playback in the
+        // default profile and switching to a named one therefore sent the rest
+        // of the reply under the NAMED profile's TTS config and key.
+        // _profiles_match treats 'default' and a renamed root as the same
+        // profile, so sending it explicitly is safe and closes the leak.
+        profile:playbackProfile||'default'
+      })
+    }, function(){ return _ownsTtsPlayback(gen); });
+  }
+  function _playChunk(i){
+    if(!_ttsSpeaking||!_ownsTtsPlayback(gen)){ return; }
+    if(i>=chunks.length){
+      _ttsSpeaking=false;_playingEdgeAudio=null;
+      if(btn)btn.dataset.speaking='0';
+      return;
     }
-    return r.arrayBuffer();
-  })
-  .then(function(buf){
-    return _playAudioBuf(buf, btn, 'OpenAI TTS');
-  })
-  .catch(function(e){ _fail((e&&e.message)||'OpenAI TTS failed'); });
+    var bufPromise=_nextBufPromise||_fetchChunk(i);
+    bufPromise
+    .then(function(res){
+      if(!_ttsSpeaking||!_ownsTtsPlayback(gen)) return;
+      if(!res.ok){ _fail((res.err&&res.err.message)||'OpenAI TTS failed'); return; }
+      var ctx=_getTtsAudioCtx();
+      if(!ctx){ _fail('Web Audio API not available'); return; }
+      var buf;
+      try{ buf=res.buf.slice(0); }catch(e){
+        _fail('OpenAI TTS error: '+(e&&e.message||e)); return;
+      }
+      // Prefetch is issued only after the chunk actually starts playing
+      // (inside the decode callback), so a decode/construct/start failure
+      // can never leave a paced prefetch timer behind.
+      ctx.decodeAudioData(buf, function(audioBuffer){
+        if(!_ttsSpeaking||!_ownsTtsPlayback(gen)) return;
+        // A suspended context (autoplay policy) must resume before we start.
+        // Observe the resume() promise: a rejection is a terminal failure
+        // instead of a chain that silently waits forever.
+        var doStart=function(){
+          // Synchronous Web Audio construction (createBufferSource, connect,
+          // start) can throw; route every failure through the generation-aware
+          // terminal handler so speaking state is never left dangling.
+          try{
+            if(!_ttsSpeaking||!_ownsTtsPlayback(gen)) return;
+            var src=ctx.createBufferSource();
+            src.buffer=audioBuffer;
+            src.connect(ctx.destination);
+            _playingEdgeAudio=src;
+            // stopTTS() bumps _ttsGeneration and sets _ttsSpeaking=false, then
+            // calls src.stop(), which fires onended. Natural end keeps both
+            // unchanged, so onended can distinguish continue from halt. The
+            // ownership guard keeps a stale onended from a replaced source
+            // from erasing the new playback's active handle.
+            src.onended=function(){
+              if(_playingEdgeAudio===src){ _playingEdgeAudio=null; }
+              try{ src.disconnect(); }catch(_){}
+              if(_ttsSpeaking&&_ownsTtsPlayback(gen)) _playChunk(i+1);
+            };
+            src.start(0);
+            // Prefetch next chunk while this one is playing (paced via
+            // _fetchChunk). Done only after start succeeds, so a terminal
+            // failure above leaves no scheduled follow-on request.
+            if(i+1<chunks.length){ _nextBufPromise=_fetchChunk(i+1); }
+          }catch(e){
+            if(_ttsSpeaking&&_ownsTtsPlayback(gen)){
+              _fail('OpenAI TTS error: '+(e&&e.message||e));
+            }
+          }
+        };
+        if(ctx.state==='running'){ doStart(); return; }
+        var rp=ctx.resume();
+        if(!rp||typeof rp.then!=='function'){ doStart(); return; }
+        rp.then(doStart).catch(function(e){
+          if(!_ttsSpeaking||!_ownsTtsPlayback(gen)) return;
+          _fail('OpenAI TTS error: '+(e&&e.message||e));
+        });
+      }, function(e){
+        if(!_ttsSpeaking||!_ownsTtsPlayback(gen)) return;
+        _fail('OpenAI TTS error: '+(e&&e.message||e));
+      });
+    })
+    .catch(function(e){
+      // Terminal guard: any unexpected failure in this chunk's chain must
+      // clear speaking state, but only when this generation is still current.
+      if(_ttsSpeaking&&_ownsTtsPlayback(gen)){
+        _fail('OpenAI TTS error: '+(e&&e.message||e));
+      }
+    });
+  }
+  try{ _playChunk(0); }
+  catch(e){ _fail('OpenAI TTS error: '+(e&&e.message||e)); }
 }
 
 // ── Shared AudioContext for TTS playback (no blob URLs needed) ──
@@ -10070,55 +10436,113 @@ function _getTtsAudioCtx(){
     if(!C) return null;
     _ttsAudioCtx=new C();
   }
-  if(_ttsAudioCtx.state==='suspended') _ttsAudioCtx.resume();
+  if(_ttsAudioCtx.state==='suspended'){
+    var rp=_ttsAudioCtx.resume();
+    // Observe the resume promise so shared paths never surface an
+    // unhandled rejection; the OpenAI chunk chain additionally routes a
+    // rejected resume to its generation-aware terminal handler.
+    if(rp&&typeof rp.then==='function') rp.catch(function(){});
+  }
   return _ttsAudioCtx;
 }
 
-function _playAudioBuf(arrayBuffer, btn, label){
+// Shared audio-buffer playback used by the ElevenLabs/extension engines.
+// `gen` is the caller's playback token: only the owning generation may start
+// audio or clear shared state — a replaced playback's late decode/onended
+// must never clobber a newer source, handle, or speaking state.
+function _playAudioBuf(arrayBuffer, btn, label, gen){
+  const _owns=function(){ return _ownsTtsPlayback(gen); };
   const ctx=_getTtsAudioCtx();
   if(!ctx){
-    if(btn)btn.dataset.speaking='0';
-    _ttsSpeaking=false;
-    showToast(label+': Web Audio API not available');
+    if(_owns()){
+      if(btn)btn.dataset.speaking='0';
+      _ttsSpeaking=false;
+      showToast(label+': Web Audio API not available');
+    }
     return;
   }
   return new Promise(function(resolve){
-    ctx.decodeAudioData(arrayBuffer.slice(0), function(audioBuffer){
-      const src=ctx.createBufferSource();
-      src.buffer=audioBuffer;
-      src.connect(ctx.destination);
-      _playingEdgeAudio=src;
-      const _cleanup=function(){
-        _ttsSpeaking=false;_playingEdgeAudio=null;
+    // Terminal settlement shared by every failure path (sync construction
+    // error, resume rejection, decode failure): stop/disconnect any
+    // partially constructed source, clear shared state only while this
+    // generation still owns playback, and always settle the returned
+    // promise so a dead playback can never leave callers hanging.
+    const _settleFailure=function(msg, partialSrc){
+      if(partialSrc){
+        try{ partialSrc.onended=null; partialSrc.stop(); partialSrc.disconnect(); }catch(_){}
+        if(_playingEdgeAudio===partialSrc) _playingEdgeAudio=null;
+      }
+      if(_owns()){
+        _ttsSpeaking=false;
         if(btn)btn.dataset.speaking='0';
-        try{src.stop();src.disconnect();}catch(_){}
-        resolve();
+        if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+      }
+      resolve();
+    };
+    const _onDecoded=function(audioBuffer){
+      if(!_owns()){ resolve(); return; }
+      // Synchronous Web Audio construction (createBufferSource, connect,
+      // start) can throw; route every failure through the generation-aware
+      // settlement so no partial source survives and the promise is never
+      // left pending.
+      const _start=function(){
+        if(!_owns()){ resolve(); return; }
+        var src=null;
+        try{
+          src=ctx.createBufferSource();
+          src.buffer=audioBuffer;
+          src.connect(ctx.destination);
+          _playingEdgeAudio=src;
+          const _cleanup=function(){
+            try{src.stop();src.disconnect();}catch(_){}
+            if(_owns()){
+              _ttsSpeaking=false;
+              if(_playingEdgeAudio===src) _playingEdgeAudio=null;
+              if(btn)btn.dataset.speaking='0';
+            }
+            resolve();
+          };
+          src.onended=_cleanup;
+          src.start(0);
+        }catch(e){
+          _settleFailure(label+' error: '+(e&&e.message||e), src);
+        }
       };
-      src.onended=_cleanup;
-      src.start(0);
-    }, function(e){
-      _ttsSpeaking=false;
-      if(btn)btn.dataset.speaking='0';
-      showToast(label+' error: '+(e&&e.message||e));
-      resolve(); // prevent permanently pending Promise on decode failure
-    });
+      // A suspended context (autoplay policy) must resume before start.
+      // Observe the resume promise: rejection is a terminal failure instead
+      // of playback that waits forever with the Listen button stuck (same
+      // owner-aware settlement as the OpenAI chunk path).
+      if(ctx.state==='running'){ _start(); return; }
+      var rp=null;
+      try{ rp=ctx.resume(); }catch(e){ _settleFailure(label+' error: '+(e&&e.message||e), null); return; }
+      if(!rp||typeof rp.then!=='function'){ _start(); return; }
+      rp.then(function(){ _start(); }).catch(function(e){ _settleFailure(label+' error: '+(e&&e.message||e), null); });
+    };
+    try{
+      ctx.decodeAudioData(arrayBuffer.slice(0), _onDecoded, function(e){
+        if(_owns()){
+          _ttsSpeaking=false;
+          if(btn)btn.dataset.speaking='0';
+          showToast(label+' error: '+(e&&e.message||e));
+        }
+        resolve(); // prevent permanently pending Promise on decode failure
+      });
+    }catch(e){
+      _settleFailure(label+' error: '+(e&&e.message||e), null);
+    }
   });
 }
 function stopTTS(){
+  // Invalidate every in-flight generation (all engines, all chains) before
+  // clearing state, so a late fetch/onended/decode callback can neither
+  // resume a stopped chain nor clobber a later playback.
+  _ttsGeneration++;
   if('speechSynthesis' in window){
     speechSynthesis.cancel();
   }
-  // Stop Web Audio API playback (AudioBufferSourceNode)
-  if(_playingEdgeAudio){
-    try{
-      if(typeof _playingEdgeAudio.stop==='function'){
-        _playingEdgeAudio.stop(); _playingEdgeAudio.disconnect();
-      }else{
-        _playingEdgeAudio.pause(); _playingEdgeAudio.currentTime=0;
-      }
-    }catch(_){}
-    _playingEdgeAudio=null;
-  }
+  // Stop whatever engine currently owns the audio handle (Web Audio source
+  // or Audio element).
+  _stopActivePlaybackAudio();
   _ttsSpeaking=false;
   _ttsCurrentUtterance=null;
   _ttsChunkQueue=[];
@@ -10126,6 +10550,13 @@ function stopTTS(){
   _ttsActiveBtn=null;
   // Reset all speaking buttons
   document.querySelectorAll('[data-speaking="1"]').forEach(btn=>{ btn.dataset.speaking='0'; });
+  // Voice-mode closure: the generation above just invalidated every playback,
+  // so any rearm a terminal callback scheduled earlier is now stale (it will
+  // defer, not reopen the mic). Notify voice mode — while it is still
+  // speaking, boot.js schedules the owner-aware rearm that hands the mic back
+  // once the audio it now owns has gone quiet. This covers a cancel that
+  // lands before the cancelled playback's own terminal callback.
+  if(typeof window._hermesTtsVoiceClosure==='function') window._hermesTtsVoiceClosure();
 }
 
 function autoReadLastAssistant(){
@@ -10141,6 +10572,13 @@ function autoReadLastAssistant(){
   if(!text.trim()) return;
   const clean=_stripForTTS(text);
   if(!clean) return;
+  // Canonical replacement boundary: auto-read replaces any active playback,
+  // whichever engine produced it. stopTTS() invalidates in-flight chains,
+  // cancels browser speech, stops Web Audio, and resets every
+  // [data-speaking="1"] button — the same boundary speakMessage() uses.
+  // Without it, a new auto-read could overlap the previous engine's audio
+  // and leave a manual button visibly stuck in the speaking state.
+  stopTTS();
   if(engine==='openai'){
     _playOpenaiTts(clean, null);
     return;
@@ -10157,15 +10595,18 @@ function autoReadLastAssistant(){
   // the extension, then play through the shared audio-buffer path. Mirrors the
   // registered-engine branch in speakMessage() so auto-read honors the selection.
   if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
-    _ttsSpeaking=true;
+    const gen=_beginTtsPlayback();
     const _opts={
       voice: localStorage.getItem('hermes-tts-voice')||'',
       rate: parseFloat(localStorage.getItem('hermes-tts-rate')),
       pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
     };
     Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
-      .then(function(buf){ return _playAudioBuf(buf, null, 'TTS'); })
-      .catch(function(){ _ttsSpeaking=false; _playingEdgeAudio=null; });
+      .then(function(buf){
+        if(!_ownsTtsPlayback(gen)) return;
+        return _playAudioBuf(buf, null, 'TTS', gen);
+      })
+      .catch(function(){ if(_ownsTtsPlayback(gen)){ _ttsSpeaking=false; _playingEdgeAudio=null; } });
     return;
   }
   // Unknown/unregistered engine (e.g. an extension engine that's no longer
@@ -10174,8 +10615,8 @@ function autoReadLastAssistant(){
   // Use chunked playback for browser TTS
   _ttsChunkQueue=_splitForTTS(clean);
   _ttsChunkIndex=0;
-  _ttsSpeaking=true;
-  const utter=_buildBrowserUtterance(_ttsChunkQueue[0], null);
+  const gen=_beginTtsPlayback();
+  const utter=_buildBrowserUtterance(_ttsChunkQueue[0], null, gen);
   _ttsCurrentUtterance=utter;
   speechSynthesis.speak(utter);
 }
