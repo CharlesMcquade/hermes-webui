@@ -68,6 +68,20 @@ def _open_edge_voice_picker(page):
     if onboarding.is_visible():
         page.locator("#onboardingSkipBtn").click()
         onboarding.wait_for(state="hidden", timeout=15000)
+    # Saved server settings win over localStorage once a speech key is persisted
+    # (`persisted_speech_keys`), and each case's select_option loop below autosaves
+    # a different voice ~350 ms later. Seed the server with the expected engine and
+    # voice so every viewport case starts from the same state whatever an earlier
+    # case persisted (release review of #8091).
+    page.evaluate(
+        """async ([engine, voice]) => {
+            await api('/api/settings', {
+                method: 'POST',
+                body: JSON.stringify({tts_engine: engine, tts_voice: voice}),
+            });
+        }""",
+        ["edge", SELECTED_VOICE],
+    )
     # Persist engine + voice BEFORE the settings panel loads, the way a user
     # who previously picked them would arrive at the screen.
     page.evaluate(
@@ -158,6 +172,10 @@ def test_edge_french_voice_picker_usable_across_viewports(label, width, height):
             for voice in FRENCH_VOICES:
                 picker.select_option(voice)
                 assert picker.input_value() == voice
+            # Let the debounced (~350 ms) preferences autosave settle before the
+            # browser closes, so no write from this case is still in flight when
+            # the next case seeds the server.
+            page.wait_for_timeout(800)
 
             # (5) The settings field holding the picker has no layout
             # violations (overlap / clipping / off-viewport controls).
