@@ -1436,6 +1436,10 @@ async function openFile(path, opts={}){
       const data=forceRichMarkdown&&path===_previewRawContentPath&&_previewRawContent
         ? {content:_previewRawContent}
         : await api(_workspaceRouteForPath(path, 'read'));
+      // #6710: same ownership rule as the HTML/PDF/media branches -- a read that
+      // resolves after a newer open, a session switch or a closed panel must not
+      // commit or report success (release gate repro: delayed .md + loadDir('.')).
+      if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
       _previewRawContent = data.content;
       _previewRawContentPath = path;
       if(!forceRichMarkdown && shouldRenderMarkdownPreviewAsPlainText(data.content)){
@@ -1473,6 +1477,7 @@ async function openFile(path, opts={}){
   } else if(ext==='.csv'){
     try{
       const data=await api(_workspaceRouteForPath(path, 'read'));
+      if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
       if(data.binary){
         downloadFile(path);
         return false;   // downloaded, nothing previewed
@@ -1487,6 +1492,7 @@ async function openFile(path, opts={}){
     // Plain code / text -- but fall back to download if server signals binary
     try{
       const data=await api(_workspaceRouteForPath(path, 'read'));
+      if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
       if(data.binary){
         // Server flagged this as binary content
         downloadFile(path);

@@ -887,3 +887,32 @@ def test_the_reachability_probe_does_not_buffer_the_document():
     assert out["calls"]["aborted"] or out["calls"]["cancel"] > 0, (
         f"the probe left the body stream running instead of dropping it: {out}"
     )
+
+def test_every_async_read_branch_checks_preview_ownership_before_committing():
+    """Release gate (Codex): delayed Markdown, CSV and text/Office reads reopened an
+    empty workspace panel after a session switch + loadDir('.'), because only the
+    HTML/PDF/image/media branches re-checked ownership after their await. Every
+    `await api(..., 'read')` branch must check `_previewOpenOwned` right after the
+    read resolves, before touching preview state or reporting success."""
+    body = _read(WORKSPACE_JS_PATH)
+    guard = "if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;"
+    read = "await api(_workspaceRouteForPath(path, 'read'));"
+    idx = 0
+    reads = 0
+    while True:
+        i = body.find(read, idx)
+        if i < 0:
+            break
+        reads += 1
+        window = body[i + len(read): i + len(read) + 420]
+        first_stmt = window.lstrip()
+        # Allow explanatory comments between the read and the guard.
+        while first_stmt.startswith("//"):
+            first_stmt = first_stmt.split("\n", 1)[1].lstrip()
+        assert first_stmt.startswith(guard), (
+            "an async read branch commits preview state before re-checking ownership:\n"
+            + window[:200]
+        )
+        idx = i + len(read)
+    assert reads >= 3, "expected the Markdown, CSV and text read branches"
+
