@@ -13960,12 +13960,25 @@ def _merge_session_messages_append_only_impl(
         and boundary_ts is not None
         and boundary_ts == watermark_timestamp
     )
+    # Ambiguous shape (#7946 gate c17, Codex): a recorded cutoff that EQUALS
+    # the newest timestamped sidecar row (a truncate/edit/undo whose post-edit
+    # turn never reached the sidecar with a timestamp). Nothing persisted marks
+    # where the deleted suffix ends, so state.db rows after the cutoff may be
+    # the rows the user deleted; healing would resurrect them. Stay
+    # conservative there (master behaviour); the writer clamp above prevents
+    # new occurrences.
+    cutoff_is_newest_sidecar_row = (
+        boundary_ts is not None
+        and max_sidecar_timestamp is not None
+        and boundary_ts == max_sidecar_timestamp
+    )
     watermark_is_stale_wall_clock = (
         watermark_timestamp is not None
         and watermark_timestamp != 0
         and max_sidecar_timestamp is not None
         and watermark_timestamp > max_sidecar_timestamp
         and not watermark_matches_persisted_boundary
+        and not cutoff_is_newest_sidecar_row
     )
     healed_to_recorded_cutoff = False
     if watermark_is_stale_wall_clock:

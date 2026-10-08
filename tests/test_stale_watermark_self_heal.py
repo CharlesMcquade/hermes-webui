@@ -162,9 +162,10 @@ def test_stale_watermark_newer_than_sidecar_is_ignored():
 
 
 def test_stale_watermark_above_an_older_real_boundary_still_heals():
-    """A session that was truncated (boundary = a real kept-row ts) and LATER
-    hit the wall-clock advance still self-heals: the watermark moved away from
-    the persisted boundary, so it is not a recorded cutoff."""
+    """A session truncated at a real kept-row ts (B=50) whose sidecar then
+    advanced (a1 at 100) and LATER hit the wall-clock advance still self-heals:
+    the watermark moved away from the persisted boundary and the cutoff is not
+    the newest sidecar row, so the heal target is unambiguous."""
     sidecar = _rows(("user", "q1", 50), ("assistant", "a1", 100))
     state = _rows(
         ("user", "q1", 50),
@@ -173,9 +174,52 @@ def test_stale_watermark_above_an_older_real_boundary_still_heals():
         ("assistant", "a2", 250),
     )
     merged = models.merge_session_messages_append_only(
-        sidecar, state, truncation_watermark=9999.0, truncation_boundary=100.0
+        sidecar, state, truncation_watermark=9999.0, truncation_boundary=50.0
     )
     assert [m["content"] for m in merged] == ["q1", "a1", "q2", "a2"]
+
+
+def _p7_state():
+    return _rows(
+        ("user", "q1", 50),
+        ("assistant", "a1", 100),
+        ("user", "DELETED-q2", 150),
+        ("assistant", "DELETED-a2", 160),
+        ("user", "q3-new", 300),
+        ("assistant", "a3-new", 310),
+    )
+
+
+def test_ambiguous_cutoff_at_newest_sidecar_row_never_resurrects_deleted_rows():
+    """#7946 gate c17 (Codex CORE): truncate/edit at B=100 == the newest
+    timestamped sidecar row, the post-edit turn absent from the sidecar, then
+    the stale wall-clock watermark. Nothing persisted marks where the deleted
+    suffix ends, so the heal must not run: the deleted 150/160 rows stay out,
+    exactly as on master."""
+    sidecar = _rows(("user", "q1", 50), ("assistant", "a1", 100))
+    merged = models.merge_session_messages_append_only(
+        sidecar, _p7_state(), truncation_watermark=9999.0, truncation_boundary=100.0
+    )
+    contents = [m["content"] for m in merged]
+    assert "DELETED-q2" not in contents
+    assert "DELETED-a2" not in contents
+
+
+def test_ambiguous_cutoff_with_untimestamped_replacement_stays_conservative():
+    """Same ambiguity when the post-edit replacement reached the sidecar but
+    without a timestamp: the newest TIMESTAMPED sidecar row is still the cutoff,
+    so deleted rows must not come back."""
+    sidecar = _rows(
+        ("user", "q1", 50),
+        ("assistant", "a1", 100),
+        ("user", "q3-new", None),
+    )
+    merged = models.merge_session_messages_append_only(
+        sidecar, _p7_state(), truncation_watermark=9999.0, truncation_boundary=100.0
+    )
+    contents = [m["content"] for m in merged]
+    assert "DELETED-q2" not in contents
+    assert "DELETED-a2" not in contents
 
 
 def test_manual_compression_cutoff_above_untimestamped_sidecar_tail_is_kept():
