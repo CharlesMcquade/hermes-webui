@@ -824,8 +824,15 @@ function _awaitMediaReady(el, isOwned){
   });
 }
 
+// #6710 (release gate, Codex c38): every artifact click gets its own generation, so
+// only the most recent click may act when its existence check resolves. Sharing
+// _previewOpenGen was not enough: with two pending clicks, the older one's
+// openFile() bumped it and silently retired the newer click.
+let _artifactClickGen = 0;
 async function openArtifactPath(path){
   if(!path) return false;
+  // typeof guard: harnesses that extract this function alone keep working.
+  const clickGen=typeof _artifactClickGen==='number'?++_artifactClickGen:null;
   switchWorkspacePanelTab('files');
   // Capture the dismissal generation before any await. If the user dismisses the
   // panel while the existence check or the read is in flight, that newer intent
@@ -854,8 +861,9 @@ async function openArtifactPath(path){
   const artGen=typeof _previewOpenGen==='number'?_previewOpenGen:null;
   const artSid=S.session&&S.session.session_id;
   const artWsGen=typeof _wsTreeGen==='number'?_wsTreeGen:null;
-  const _artifactClickOwned=()=>artGen===null||artWsGen===null
-    ||(typeof _previewOpenOwned==='function'&&_previewOpenOwned(artGen,artSid,artWsGen));
+  const _artifactClickOwned=()=>(clickGen===null||clickGen===_artifactClickGen)
+    &&(artGen===null||artWsGen===null
+      ||(typeof _previewOpenOwned==='function'&&_previewOpenOwned(artGen,artSid,artWsGen)));
   try{
     const exists=await _workspacePathExists(rel);
     if(!_artifactClickOwned()||!_dismissalUnchanged()) return false;

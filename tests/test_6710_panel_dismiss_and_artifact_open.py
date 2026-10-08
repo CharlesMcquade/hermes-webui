@@ -747,20 +747,32 @@ const scenario = __SCENARIO__;
 let _previewOpenGen = 0;
 let _wsTreeGen = 0;
 let _workspacePanelDismissGen = 0;
+let _artifactClickGen = 0;
 const S = { session: { session_id: 's1', workspace: '/ws' } };
 const openFileCalls = [];
 const statuses = [];
-async function openFile(p){ openFileCalls.push(p); return true; }
+async function openFile(p){ openFileCalls.push(p); _previewOpenGen++; return true; }
 function setStatus(s){ statuses.push(s); }
 function t(k){ return k; }
 function switchWorkspacePanelTab(){}
 function _setWorkspacePanelDismissed(){}
 function ensureWorkspacePreviewVisible(){}
 let releaseExists;
-function _workspacePathExists(){ return new Promise((r) => { releaseExists = r; }); }
+const releases = [];
+function _workspacePathExists(){ return new Promise((r) => { releaseExists = r; releases.push(r); }); }
 eval(fn._previewOpenOwned);
 eval(fn.openArtifactPath);
 (async () => {
+  if(scenario === 'two_clicks_older_resolves_first'){
+    // Codex c38: click A, then B; A's existence check resolves first.
+    const a = openArtifactPath('/ws/dir/a.md');
+    const b = openArtifactPath('/ws/dir/b.md');
+    await new Promise((r) => setImmediate(r));
+    releases[0](true); const ra = await a;
+    releases[1](true); const rb = await b;
+    console.log(JSON.stringify({ returned: [ra, rb], openFileCalls, statuses }));
+    return;
+  }
   const pending = openArtifactPath('/ws/dir/old.md');
   await new Promise((r) => setImmediate(r));
   if(scenario === 'session_switch') S.session = { session_id: 's2', workspace: '/ws' };
@@ -800,3 +812,13 @@ def test_owned_artifact_click_still_opens():
     assert result["openFileCalls"] == ["dir/old.md"]
     assert result["returned"] is True
 
+
+def test_newest_of_two_pending_artifact_clicks_wins():
+    """Release gate (Codex c38): with two pending clicks sharing `_previewOpenGen`,
+    the older click's `openFile()` bumped it and silently retired the newer click,
+    so the panel showed A after the user clicked B. Each click now has its own
+    generation: the older click retires and the newest one opens."""
+    result = _run_ownership("two_clicks_older_resolves_first")
+    assert result["openFileCalls"] == ["dir/b.md"], result
+    assert result["returned"] == [False, True], result
+    assert result["statuses"] == [], result
