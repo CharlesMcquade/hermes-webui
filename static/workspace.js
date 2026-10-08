@@ -657,7 +657,15 @@ async function _workspaceRawReachable(url){
   try{
     await api(url, {headers:{Range:'bytes=0-0'}, retries:0, timeoutMs:8000, timeoutToast:false});
     return true;
-  }catch(_){
+  }catch(err){
+    // #6710 (gate re-review): a probe TIMEOUT is not evidence that the file is
+    // unreachable. The probe is a 1-byte ranged GET, but the HTML route ignores
+    // `Range` and streams the whole document, so a large or slow file can
+    // outlast the probe while the iframe would have loaded it fine (master
+    // loaded it; this bound turned that into a hard failure). Only a confirmed
+    // HTTP answer — expired grant → 403, removed file → 404 — proves the
+    // preview cannot load, so only that reports failure.
+    if(err&&(err.timeout===true||err.name==='TimeoutError')) return true;
     setStatus(t('file_open_failed'));
     return false;
   }
@@ -1167,6 +1175,20 @@ let _previewSaveRoute = '/api/file/save';  // current save adapter for the open 
 let _previewOfficeFormat = '';  // current claimed Office format, if any
 let _previewPreviewKind = '';  // preview family returned by the backend
 
+// #6710 (gate re-review): every async preview branch awaits its source before
+// touching the DOM, so a SLOWER open can complete after a newer one and paint
+// the old file under the new filename (Chromium repro supplied by the gate:
+// delay `ok.html` by 400 ms, then open `new.html` → the iframe showed ok.html).
+// Each open therefore takes a generation, and any completion whose owner has
+// moved on — newer open, different session, or a profile switch that bumped the
+// workspace-tree generation — is rejected before it can commit anything.
+let _previewOpenGen = 0;
+function _previewOpenOwned(gen, sid, wsGen){
+  return gen === _previewOpenGen
+    && sid === (S.session && S.session.session_id)
+    && wsGen === _wsTreeGen;
+}
+
 function showPreview(mode){
   // mode: 'code' | 'csv' | 'image' | 'md' | 'html' | 'pdf' | 'audio' | 'video'
   $('previewCode').style.display     = mode==='code'  ? '' : 'none';
@@ -1329,6 +1351,12 @@ async function openFile(path, opts={}){
   $('fileTree').style.display='none';
 
   _previewCurrentPath = path;
+  // #6710: this open's ownership token (see _previewOpenOwned). Captured before
+  // the first await of any branch so a slower completion can be recognised as
+  // stale and rejected instead of committing over a newer preview.
+  const _openGen = ++_previewOpenGen;
+  const _openSid = S.session && S.session.session_id;
+  const _openWsGen = _wsTreeGen;
   renderFileBreadcrumb(path);
   if(IMAGE_EXTS.has(ext)){
     // Image: load via raw endpoint, show as <img>
@@ -1365,6 +1393,10 @@ async function openFile(path, opts={}){
       // report failure. Probe the route instead and commit the frame only once
       // it is known to serve.
       if(!(await _workspaceRawReachable(url))) return false;
+      // #6710: the probe awaited, so a newer open — or a session/workspace
+      // change — may own the preview now. Committing the frame here would paint
+      // this file under whatever the user opened since (gate repro).
+      if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
       frame.src=''; // clear first to avoid stale content
       frame.src=url;
       frame.title=`PDF preview: ${path.split('/').pop()||path}`;
@@ -1407,6 +1439,10 @@ async function openFile(path, opts={}){
       // #6710: same iframe limitation as the PDF branch — a failed document
       // still fires `load`, so probe the route before committing the frame.
       if(!(await _workspaceRawReachable(url))) return false;
+      // #6710: same ownership rule as the PDF branch — a completion that lost
+      // the preview to a newer open must not commit (gate repro: ok.html
+      // delayed 400 ms then new.html opened showed ok.html).
+      if(!_previewOpenOwned(_openGen,_openSid,_openWsGen)) return false;
       iframe.src=''; // clear first to avoid stale content
       iframe.src=url;
     }

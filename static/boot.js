@@ -2367,6 +2367,9 @@ $('importFileInput').onchange=async(e)=>{
   }
 };
 // btnRefreshFiles is now panel-icon-btn in header (see HTML)
+// #6710: closing the preview retires any in-flight preview open (the counter is
+// advanced in the body below), so a slow completion cannot repaint the panel
+// after the user closed it — see _previewOpenOwned() in static/workspace.js.
 function clearPreview(opts={}){
   const keepPanelOpen=!!(opts&&opts.keepPanelOpen);
   // Restore directory breadcrumb after closing file preview
@@ -2381,6 +2384,9 @@ function clearPreview(opts={}){
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
+  if(typeof _previewOpenGen==='number') _previewOpenGen++;
+  // #6710: retire any in-flight preview open (guarded so harnesses that extract
+  // this function alone keep working).
   if(closePanelAfter)closeWorkspacePanel();
   else if(keepPanelOpen&&_workspacePanelMode==='preview')openWorkspacePanel('browse');
   else syncWorkspacePanelUI();

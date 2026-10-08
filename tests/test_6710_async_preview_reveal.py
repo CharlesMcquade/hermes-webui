@@ -72,6 +72,7 @@ let apiCalls = [];
 async function api(url, opts){
   apiCalls.push({url: url, opts: opts || null});
   if(params.apiFails){ const e = new Error('nope'); e.status = params.apiStatus || 404; throw e; }
+  if(params.probeTimeout){ const e = new Error('Request timed out. Please try again.'); e.name = 'TimeoutError'; e.timeout = true; throw e; }
   return '';
 }
 // The 401 path in the real api() returns undefined instead of throwing.
@@ -273,7 +274,7 @@ const el = {
 
 
 def _run_harness(*, image_outcome="load", media_outcome="loadedmetadata",
-                 api_fails=False, api_status=404) -> dict:
+                 api_fails=False, api_status=404, probe_timeout=False) -> dict:
     helpers = {
         "_awaitElementLoad": _helper("_awaitElementLoad"),
         "_awaitMediaReady": _helper("_awaitMediaReady"),
@@ -285,6 +286,7 @@ def _run_harness(*, image_outcome="load", media_outcome="loadedmetadata",
         "mediaOutcome": media_outcome,
         "apiFails": api_fails,
         "apiStatus": api_status,
+        "probeTimeout": probe_timeout,
     }
     js = _HARNESS.replace("__HELPERS__", json.dumps(helpers)).replace(
         "__PARAMS__", json.dumps(payload)
@@ -422,7 +424,24 @@ def test_raw_probe_treats_a_401_redirect_as_reachable():
     assert out["probeOk"] is True, out
 
 
-# ── the shipped branches must actually use the outcome ──────────────────────
+def test_raw_probe_treats_a_probe_timeout_as_reachable():
+    """Gate re-review [CORE]: the 8 s probe abort must not read as a broken file.
+
+    The probe is a 1-byte ranged GET, but the HTML route ignores `Range` and
+    streams the whole document, so a large or slow file can outlast the probe
+    while the iframe would have loaded it — master loaded it. A timeout is
+    therefore "unknown", not "unreachable"; only a confirmed HTTP answer may
+    report failure.
+    """
+    out = _run_harness(probe_timeout=True)
+    assert out["probeCalls"], out
+    assert out["probeOk"] is True, (
+        "a probe timeout was reported as an unreachable file; a healthy slow "
+        f"HTML preview then never opens: {out}"
+    )
+    assert out["probeStatuses"] == [], (
+        f"a timeout must not surface the open-failed status: {out}"
+    )
 
 
 def test_shipped_preview_branches_await_their_outcome():
@@ -595,4 +614,139 @@ def test_browser_broken_image_fails_closed():
     )
     assert out["after"]["mode"] == "closed", (
         f"the panel was force-opened onto a failed preview: {out}"
+    )
+
+
+# ── stale completions: a slower open must not commit over a newer one ────────
+#
+# Gate re-review [SILENT]: both iframe-backed branches await the raw probe
+# before committing the frame, so nothing stopped a slower open from landing
+# after a newer one. The gate's Chromium repro: delay `ok.html` by 400 ms, then
+# open `new.html` → this head showed `ok.html` under the `new.html` filename
+# while master showed `new.html`. These drives run the REAL openFile() against a
+# probe whose timing the test controls, so the ordering is deterministic.
+
+_STALE_OPEN_DRIVE = r"""
+async (paths) => {
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  S.session = {session_id: 'b6710-stale', workspace: '/tmp/b6710-ws'};
+  S.currentDir = '.';
+  const probes = [];
+  window._workspaceRawReachable = (url) => new Promise(resolve => {
+    probes.push(String(url));
+    const slow = String(url).indexOf(paths.old) !== -1;
+    setTimeout(() => resolve(true), slow ? 400 : 0);
+  });
+  const first = openFile(paths.old);
+  await new Promise(r => setTimeout(r, 60));
+  const second = openFile(paths.new);
+  const firstReturned = await first;
+  const secondReturned = await second;
+  const frame = paths.new.slice(-4) === '.pdf'
+    ? document.getElementById('previewPdfFrame')
+    : document.getElementById('previewHtmlIframe');
+  return {
+    probes: probes.length,
+    firstReturned: firstReturned,
+    secondReturned: secondReturned,
+    frameSrc: frame ? String(frame.getAttribute('src') || '') : null,
+    previewPath: _previewCurrentPath,
+  };
+}
+"""
+
+_CLOSE_WHILE_PENDING_DRIVE = r"""
+async () => {
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  S.session = {session_id: 'b6710-close', workspace: '/tmp/b6710-ws'};
+  S.currentDir = '.';
+  const probes = [];
+  window._workspaceRawReachable = () => new Promise(resolve => {
+    probes.push(1);
+    setTimeout(() => resolve(true), 300);
+  });
+  const pending = openFile('slow.html');
+  await new Promise(r => setTimeout(r, 60));
+  const inFlightPath = _previewCurrentPath;
+  clearPreview({keepPanelOpen: true});
+  const returned = await pending;
+  const frame = document.getElementById('previewHtmlIframe');
+  return {
+    probes: probes.length,
+    inFlightPath: inFlightPath,
+    returned: returned,
+    frameSrc: frame ? String(frame.getAttribute('src') || '') : null,
+    previewPath: _previewCurrentPath,
+  };
+}
+"""
+
+
+def _browser_out(drive, arg=None):
+    """Run a drive against the real page served by the test server."""
+    pw = pytest.importorskip("playwright.sync_api")
+    from tests._pytest_port import BASE
+
+    with pw.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        context = browser.new_context(viewport={"width": 1280, "height": 800})
+        page = context.new_page()
+        page.goto(BASE + "/", wait_until="domcontentloaded")
+        page.wait_for_function(
+            "() => typeof S !== 'undefined' && S._bootReady === true", timeout=15000
+        )
+        page.wait_for_function("() => typeof openFile === 'function'", timeout=15000)
+        out = page.evaluate(drive) if arg is None else page.evaluate(drive, arg)
+        context.close()
+        browser.close()
+    return out
+
+
+@pytest.mark.parametrize("ext", ["html", "pdf"])
+def test_a_slower_open_cannot_commit_over_a_newer_one(ext):
+    """The older open must return false and leave the newer frame in place."""
+    old, new = f"ok.{ext}", f"new.{ext}"
+    out = _browser_out(_STALE_OPEN_DRIVE, {"old": old, "new": new})
+
+    assert out["probes"] >= 2, f"precondition: both opens must really probe: {out}"
+    assert out["secondReturned"] is True, out
+    assert out["firstReturned"] is False, (
+        f"the superseded open claimed success, so its caller promotes the panel: {out}"
+    )
+    assert old not in (out["frameSrc"] or ""), (
+        f"the older open committed its frame over the newer one: {out}"
+    )
+    assert new in (out["frameSrc"] or ""), out
+    assert out["previewPath"] == new, out
+
+
+def test_a_close_retires_an_in_flight_preview_open():
+    """A close advances the preview generation, so the pending open cannot
+    repaint the panel the user just closed."""
+    out = _browser_out(_CLOSE_WHILE_PENDING_DRIVE)
+
+    assert out["probes"] == 1, f"precondition: the probe really was in flight: {out}"
+    assert out["inFlightPath"] == "slow.html", out
+    assert out["returned"] is False, (
+        f"an open that outlived the user's close still reported success: {out}"
+    )
+    assert out["frameSrc"] in (None, ""), (
+        f"the closed preview was repainted by the pending open: {out}"
+    )
+
+
+def test_shipped_preview_ownership_guards_are_wired():
+    """Code-shape guard: the ownership checks must not disappear silently."""
+    body = _read(WORKSPACE_JS_PATH)
+    assert "const _openGen = ++_previewOpenGen;" in body, (
+        "openFile() must take a preview generation"
+    )
+    assert body.count("_previewOpenOwned(_openGen,_openSid,_openWsGen)") >= 2, (
+        "both iframe-backed branches (pdf + html) must reject a stale completion"
+    )
+    boot = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+    start = boot.index("function clearPreview(opts={}){")
+    end = boot.index("\n}\n", start)
+    assert "_previewOpenGen++" in boot[start:end], (
+        "clearPreview() must retire in-flight preview opens"
     )
