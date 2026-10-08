@@ -835,13 +835,29 @@ def test_persisted_message_count_scans_each_file_version_once(
         return real(path)
 
     monkeypatch.setattr(models, "_prefix_message_count", counting)
+    import os
+    import time
+
+    def _age(path, seconds=10.0):
+        past = time.time() - seconds
+        os.utime(path, (past, past))
+
     sid = "sess-memo"
+    path = _sse_count_store / f"{sid}.json"
     _save_real_session(_sse_count_store, sid, 3)
     calls["n"] = 0  # save()'s own shrink check also reads the prefix
+    # A version written moments ago is never memoized (its mtime may not have
+    # settled: a same-tick same-size rewrite must not be served stale).
+    for _ in range(3):
+        assert bp.persisted_message_count_for_session(sid) == 3
+    assert calls["n"] == 3
+    _age(path)
+    calls["n"] = 0
     for _ in range(5):
         assert bp.persisted_message_count_for_session(sid) == 3
     assert calls["n"] == 1
     _save_real_session(_sse_count_store, sid, 5)
+    _age(path)
     calls["n"] = 0
     assert bp.persisted_message_count_for_session(sid) == 5
     assert calls["n"] == 1

@@ -376,6 +376,7 @@ def active_stream_id_for_session(session_id: str) -> Optional[str]:
 _PERSISTED_COUNT_MEMO: "OrderedDict[tuple, Optional[int]]" = OrderedDict()
 _PERSISTED_COUNT_MEMO_LOCK = threading.Lock()
 _PERSISTED_COUNT_MEMO_MAX = 512
+_PERSISTED_COUNT_MEMO_MIN_AGE_S = 2.0
 
 
 def persisted_message_count_for_session(session_id: str) -> Optional[int]:
@@ -427,23 +428,27 @@ def persisted_message_count_for_session(session_id: str) -> Optional[int]:
             st = os.stat(path)
         except OSError:
             return None
-        # Every sidecar writer publishes through tmp + os.replace, so each
-        # write gets a new inode; (inode, size, mtime_ns) therefore identifies
-        # one file version. Memoizing per version keeps a legacy sidecar whose
-        # metadata overflows the 64 KiB first stage from paying the bounded
-        # 1 MiB scan on every reconnect (#7673 gate); a stale entry can at worst
-        # skip one catch-up emission, which the caller already tolerates.
+        # Memoize per file version so a legacy sidecar whose metadata overflows
+        # the 64 KiB first stage does not pay the bounded 1 MiB scan on every
+        # reconnect (#7673 gate). Sidecar writers publish through tmp +
+        # os.replace, so (path, inode, size, mtime_ns) changes on every write in
+        # practice. The one theoretical collision -- several same-size rewrites
+        # inside one mtime tick -- could serve a stale-HIGH count and re-emit
+        # session-updated on each reconnect until the next write (the #7672
+        # shape), so a version younger than _PERSISTED_COUNT_MEMO_MIN_AGE_S is
+        # never memoized: the mtime must be settled before its count is cached.
         key = (str(path), st.st_ino, st.st_size, st.st_mtime_ns)
         with _PERSISTED_COUNT_MEMO_LOCK:
             if key in _PERSISTED_COUNT_MEMO:
                 _PERSISTED_COUNT_MEMO.move_to_end(key)
                 return _PERSISTED_COUNT_MEMO[key]
         count = _models._prefix_message_count(path)
-        with _PERSISTED_COUNT_MEMO_LOCK:
-            _PERSISTED_COUNT_MEMO[key] = count
-            _PERSISTED_COUNT_MEMO.move_to_end(key)
-            while len(_PERSISTED_COUNT_MEMO) > _PERSISTED_COUNT_MEMO_MAX:
-                _PERSISTED_COUNT_MEMO.popitem(last=False)
+        if time.time() - st.st_mtime >= _PERSISTED_COUNT_MEMO_MIN_AGE_S:
+            with _PERSISTED_COUNT_MEMO_LOCK:
+                _PERSISTED_COUNT_MEMO[key] = count
+                _PERSISTED_COUNT_MEMO.move_to_end(key)
+                while len(_PERSISTED_COUNT_MEMO) > _PERSISTED_COUNT_MEMO_MAX:
+                    _PERSISTED_COUNT_MEMO.popitem(last=False)
         return count
     except Exception:
         logger.debug(
