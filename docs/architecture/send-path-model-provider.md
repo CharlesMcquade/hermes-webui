@@ -31,10 +31,14 @@ field `model_provider` is therefore resolved in the browser by
 2. **The dropdown's option provider — only with session-scoped pick evidence.**
    When the currently selected picker option describes the model being sent,
    its provider wins over the session's stored provider **only if** the picker's
-   session-scoped "explicit pick" marker exists (see below). The session's
-   `model_provider` is refreshed on apply/pending paths but not on plain picker
-   changes, so without the marker a stale session field would pin the turn to
-   the previous provider (#7860).
+   session-scoped "explicit pick" marker exists (see below) and still names the
+   option that is selected. A bare dropdown match is not evidence of a pick:
+   after a session restore, the catalog repaint can leave another provider's
+   identically-valued option selected (for example `gpt-5.5`, offered by both
+   OpenAI and OpenAI Codex), and letting that option win would route the turn to
+   a provider the user never picked (#7865). The marker is written by the
+   picker's change handler for the active session and cleared on session
+   load/switch, so a restored session keeps its own provider (#7860).
 
 3. **The session's stored `model_provider`.** Always authoritative for a loaded
    session whose provider the session record itself holds — including every
