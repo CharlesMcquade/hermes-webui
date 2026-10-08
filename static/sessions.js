@@ -4904,6 +4904,10 @@ function _sessionUrlForSid(sid){
     current.searchParams.delete('q');
     current.searchParams.delete('prompt');
     current.searchParams.delete('send');
+    // `exact` is a one-shot child-row new-tab hint (see _markSessionUrlExact),
+    // not a durable page parameter: drop it so it cannot leak into the next
+    // session URL this tab navigates to.
+    current.searchParams.delete('exact');
     const retained=new URLSearchParams();
     current.searchParams.forEach((value,key)=>{
       if(key!=='action'||value!=='new-chat') retained.append(key,value);
@@ -4978,7 +4982,31 @@ function _newTabOpenSupported(){
   if(wk&&(wk.hermesNotify||wk.hermesTheme)) return false; // hermes-swift-mac#102
   return true;
 }
-function _openSessionUrlInNewTab(sid, session){
+// Mark a `/session/<id>` deep link as an *exact* target. Boot honors the marker
+// (see `_sessionUrlRequestsExactTarget`) and loads that id without lineage
+// folding, so a nested child row opened in a new tab lands on the child rather
+// than on its compressed parent's lineage row (#7429 review 2026-10-08).
+function _markSessionUrlExact(url){
+  if(!url||typeof url!=='string') return url;
+  if(/([?&])exact=1(\b|$)/.test(url)) return url;
+  const hashIdx=url.indexOf('#');
+  const head=hashIdx>=0?url.slice(0,hashIdx):url;
+  const tail=hashIdx>=0?url.slice(hashIdx):'';
+  return head+(head.indexOf('?')>=0?'&':'?')+'exact=1'+tail;
+}
+// Whether the current deep link carries the exact-target marker. Boot passes
+// `skipLineageResolve` when it does, mirroring a plain child-row same-tab click
+// (`_openSidebarSession(child, {skipLineageResolve:true})`), so the child row's
+// new tab lands on the child and not on its compressed parent's lineage tip.
+// Ordinary deep links keep the lineage-tip landing an old segment URL expects.
+function _sessionUrlRequestsExactTarget(){
+  if(typeof window==='undefined'||!window.location) return false;
+  try{
+    const qs=new URLSearchParams(window.location.search||'');
+    return qs.get('exact')==='1';
+  }catch(_e){return false;}
+}
+function _openSessionUrlInNewTab(sid, session, opts){
   if(!sid||typeof window==='undefined'||typeof window.open!=='function') return false;
   // Native macOS shell (hermes-swift-mac): its WKWebView delegate does not
   // implement webView(_:createWebViewWith:…), so WebKit silently drops
@@ -5000,6 +5028,9 @@ function _openSessionUrlInNewTab(sid, session){
   let url=null;
   try{url=_sessionUrlForSid(sid);}catch(_e){return false;}
   if(!url) return false;
+  // Child-row call sites pass {exact:true}: the deep link declares the child id
+  // authoritative so boot does not fold it into its compressed parent's row.
+  if(opts&&opts.exact) url=_markSessionUrlExact(url);
   try{
     window.open(url,'_blank','noopener');
     return true;
@@ -5007,26 +5038,31 @@ function _openSessionUrlInNewTab(sid, session){
 }
 // Shared choke point for the pointer-tap paths below: returns true when the
 // event was consumed as an open-in-new-tab (caller must skip same-tab open).
-function _consumeSessionNewTabClick(e, sid, session){
+// `opts.exact` (child rows) marks the deep link as the exact target.
+function _consumeSessionNewTabClick(e, sid, session, opts){
   if(!e||!sid) return false;
   const isModifiedClick=!!(e.ctrlKey||e.metaKey);
   const isMiddleClick=(typeof e.button==='number'&&e.button===1)||e.which===2;
   if(!isModifiedClick&&!isMiddleClick) return false;
+  // The class exclusion list below is the authoritative action-target guard:
+  // every row kind's ⋮ menu lives under `.session-actions` (plus the checkbox,
+  // tag, child/lineage count and lineage-segment controls). The per-row closure
+  // `_isSessionActionTarget` is not visible here and its `typeof` probe never
+  // fired, so it was removed rather than left as a dead check.
   if(e.target&&e.target.closest){
     try{
       if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count,.session-lineage-segment')) return false;
     }catch(_e){}
   }
-  if(typeof _isSessionActionTarget==='function'&&_isSessionActionTarget(e.target)) return false;
   if(typeof _sessionSelectMode!=='undefined'&&_sessionSelectMode) return false;
   if(typeof _renamingSid!=='undefined'&&_renamingSid) return false;
   if(typeof e.preventDefault==='function') e.preventDefault();
   if(typeof e.stopPropagation==='function') e.stopPropagation();
-  return _openSessionUrlInNewTab(sid, session);
+  return _openSessionUrlInNewTab(sid, session, opts);
 }
 // `auxclick` fires for the middle button where `click` never does; `mousedown`
 // also preventDefaults button-1 so the browser doesn't start autoscroll.
-function _wireSessionNewTabListeners(node, getSid, getSession){
+function _wireSessionNewTabListeners(node, getSid, getSession, opts){
   if(!node||typeof node.addEventListener!=='function'||typeof getSid!=='function') return;
   node.addEventListener('auxclick',(e)=>{
     if(!e) return;
@@ -5037,10 +5073,9 @@ function _wireSessionNewTabListeners(node, getSid, getSession){
         if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count,.session-lineage-segment')) return;
       }catch(_e2){}
     }
-    if(typeof _isSessionActionTarget==='function'&&_isSessionActionTarget(e.target)) return;
     if(typeof e.preventDefault==='function') e.preventDefault();
     if(typeof e.stopPropagation==='function') e.stopPropagation();
-    _openSessionUrlInNewTab(getSid(), typeof getSession==='function'?getSession():undefined);
+    _openSessionUrlInNewTab(getSid(), typeof getSession==='function'?getSession():undefined, opts);
   });
   node.addEventListener('mousedown',(e)=>{
     if(!e) return;
@@ -9331,7 +9366,9 @@ function renderSessionListFromCache(){
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
       const sortedChildren=[...s._child_sessions];
       const openChildSession=async(childSession, openOpts={})=>{
-        if(openOpts&&openOpts.newTab) return _openSessionUrlInNewTab(childSession.session_id, childSession);
+        // A child row's deep link must land on the child, not on its
+        // compressed parent's lineage tip: mark the new-tab URL exact.
+        if(openOpts&&openOpts.newTab) return _openSessionUrlInNewTab(childSession.session_id, childSession, {exact:true});
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
       const childLabelFor=(child)=>{
@@ -9565,10 +9602,10 @@ function renderSessionListFromCache(){
               return;
             }
             e.stopPropagation();
-            if(_consumeSessionNewTabClick(e, child.session_id, child)) return;
+            if(_consumeSessionNewTabClick(e, child.session_id, child, {exact:true})) return;
             await openChildSession(child);
           };
-          _wireSessionNewTabListeners(mainBtn, ()=>child.session_id, ()=>child);
+          _wireSessionNewTabListeners(mainBtn, ()=>child.session_id, ()=>child, {exact:true});
           row._startRename=_buildSessionRenameStarter(child, mainBtn, ()=>{
             mainBtn.textContent=childLabelFor(child);
           });
@@ -9619,7 +9656,7 @@ function renderSessionListFromCache(){
             e.stopPropagation();
             _openSessionActionMenu(child, actions||row);
           };
-          _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child);
+          _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true});
           childList.appendChild(row);
           continue;
         }
@@ -9630,10 +9667,10 @@ function renderSessionListFromCache(){
         row.title='Open child session';
         row.onclick=async(e)=>{
           e.stopPropagation();
-          if(_consumeSessionNewTabClick(e, child.session_id, child)) return;
+          if(_consumeSessionNewTabClick(e, child.session_id, child, {exact:true})) return;
           await openChildSession(child);
         };
-        _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child);
+        _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true});
         childList.appendChild(row);
       }
       sessionText.appendChild(childList);

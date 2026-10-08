@@ -30,6 +30,7 @@ import pytest
 
 REPO = Path(__file__).parent.parent
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
+BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 NODE = shutil.which("node")
 
 
@@ -69,15 +70,15 @@ def test_auxclick_wired_for_all_row_kinds():
     # every row kind (top-level .session-item, fork row, fork main button,
     # plain child button, lineage segment) must call the wirer.
     assert "_wireSessionNewTabListeners(el, ()=>s.session_id, ()=>s)" in SESSIONS_JS
-    assert SESSIONS_JS.count("_wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child)") == 2
-    assert "_wireSessionNewTabListeners(mainBtn, ()=>child.session_id, ()=>child)" in SESSIONS_JS
+    assert SESSIONS_JS.count("_wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true})") == 2
+    assert "_wireSessionNewTabListeners(mainBtn, ()=>child.session_id, ()=>child, {exact:true})" in SESSIONS_JS
     assert "_wireSessionNewTabListeners(row, ()=>seg.session_id, ()=>seg)" in SESSIONS_JS
     assert SESSIONS_JS.count("_wireSessionNewTabListeners(") >= 6  # def + 5 call sites
     # All opens route through the two choke points with the concrete sid and
     # the concrete session (so the owning-profile gate can inspect the row).
-    assert "_openSessionUrlInNewTab(getSid(), typeof getSession==='function'?getSession():undefined)" in SESSIONS_JS
-    assert "_openSessionUrlInNewTab(sid, session)" in SESSIONS_JS
-    assert "_openSessionUrlInNewTab(childSession.session_id, childSession)" in SESSIONS_JS
+    assert "_openSessionUrlInNewTab(getSid(), typeof getSession==='function'?getSession():undefined, opts)" in SESSIONS_JS
+    assert "_openSessionUrlInNewTab(sid, session, opts)" in SESSIONS_JS
+    assert "_openSessionUrlInNewTab(childSession.session_id, childSession, {exact:true})" in SESSIONS_JS
 
 
 def test_middle_mousedown_prevents_autoscroll():
@@ -88,7 +89,7 @@ def test_middle_mousedown_prevents_autoscroll():
     assert "button" in wire and "1" in wire
     assert "preventDefault()" in wire
     # Ctrl/Cmd+click on the tap paths also routes to the new-tab opener.
-    assert "_consumeSessionNewTabClick(e, child.session_id, child)" in SESSIONS_JS
+    assert "_consumeSessionNewTabClick(e, child.session_id, child, {exact:true})" in SESSIONS_JS
     assert "_consumeSessionNewTabClick(e, s.session_id, s)" in SESSIONS_JS
 
 
@@ -98,22 +99,29 @@ def test_ctrl_click_opens_new_tab():
 
 
 def test_action_menu_and_select_mode_untouched():
-    """New-tab must not fire from the ⋮ menu, checkboxes, or select mode."""
+    """New-tab must not fire from the ⋮ menu, checkboxes, or select mode.
+
+    The action-menu guard is the shared ``.session-actions`` class in the
+    helpers' exclusion list: the per-row ``_isSessionActionTarget`` predicate
+    lives inside the row render closure and is invisible to the top-level
+    helpers, so it cannot be consulted here (checked in the behavioral test
+    below against a real ``.session-actions`` target).
+    """
     consume = _extract_function(SESSIONS_JS, "_consumeSessionNewTabClick")
-    assert "_isSessionActionTarget" in consume
+    assert ".session-actions" in consume
     assert "_sessionSelectMode" in consume
     assert "_renamingSid" in consume
     wire = _extract_function(SESSIONS_JS, "_wireSessionNewTabListeners")
-    assert "_isSessionActionTarget" in wire
+    assert ".session-actions" in wire
     assert "session-actions" in wire
 
 
 def test_openChildSession_new_tab_flag():
     """Child-row programmatic path supports open-in-new-tab without a same-tab switch."""
     idx = SESSIONS_JS.index("const openChildSession=async(childSession,")
-    window = SESSIONS_JS[idx:idx + 400]
+    window = SESSIONS_JS[idx:idx + 500]
     assert "newTab" in window
-    assert "_openSessionUrlInNewTab(childSession.session_id, childSession)" in window
+    assert "_openSessionUrlInNewTab(childSession.session_id, childSession, {exact:true})" in window
 
 
 def test_modified_click_cancels_pending_tap_before_new_tab():
@@ -159,7 +167,6 @@ _VM_PRELUDE = r"""
 const ret = {};
 const sandbox = { opened: null, openCalls: 0, stopped: 0, prevented: 0,
   _sessionSelectMode: false, _renamingSid: null,
-  _isSessionActionTarget: () => false,
   mkEvent: null };
 sandbox.window = { open: (u, t, f) => { sandbox.opened = { u, t, f }; sandbox.openCalls++; return null; } };
 sandbox.document = { baseURI: 'http://127.0.0.1:8787/' };
@@ -194,6 +201,8 @@ def _helpers() -> str:
         _extract_function(SESSIONS_JS, name)
         for name in (
             "_sessionUrlForSid",
+            "_markSessionUrlExact",
+            "_sessionUrlRequestsExactTarget",
             "_newTabOwningProfileAllowed",
             "_openSessionUrlInNewTab",
             "_consumeSessionNewTabClick",
@@ -243,6 +252,13 @@ console.log(JSON.stringify(ret));
         assert out["plain"] is False and out["plainOpened"] is False
 
     def test_ctrl_click_consumed_select_mode_and_menu_blocked(self):
+        """Ctrl/Cmd+click opens; select mode and the ⋮ action menu refuse.
+
+        The action-target guard is the real ``.session-actions`` class in the
+        shared exclusion list — the per-row ``_isSessionActionTarget`` predicate
+        is closure-local and unreachable from the helper — so a target whose
+        ``closest('.session-actions', …)`` matches must not open a tab.
+        """
         out = _run_node({
             "helpers": _helpers(),
             "driver": r"""
@@ -253,9 +269,10 @@ sandbox.opened = null;
 vm.runInContext(`_sessionSelectMode = true;`, sandbox);
 const blockedSelect = vm.runInContext(
   `_consumeSessionNewTabClick(mkEvent({button:1,target:null}), "test-session-123")`, sandbox);
-vm.runInContext(`_sessionSelectMode = false; _isSessionActionTarget = () => true;`, sandbox);
+vm.runInContext(`_sessionSelectMode = false;`, sandbox);
+sandbox.__menuTarget = { closest: (sel) => (String(sel).indexOf('session-actions') >= 0 ? {} : null) };
 const blockedMenu = vm.runInContext(
-  `_consumeSessionNewTabClick(mkEvent({button:1,target:{}}), "test-session-123")`, sandbox);
+  `_consumeSessionNewTabClick(mkEvent({button:1,target:__menuTarget}), "test-session-123")`, sandbox);
 ret.ctrl = ctrl; ret.ctrlOpened = ctrlOpened;
 ret.blockedSelect = blockedSelect; ret.blockedMenu = blockedMenu;
 ret.stillClosed = !sandbox.opened;
@@ -315,7 +332,6 @@ const runnerSrc =
   'window.location = { href: "http://127.0.0.1:8787/", pathname: "/", search: "", hash: "", origin: "http://127.0.0.1:8787" };' +
   'const doc = { baseURI: "http://127.0.0.1:8787/" };' +
   'const _sessionSelectMode = false; const _renamingSid = null;' +
-  'const _isSessionActionTarget = () => false;' +
   // Row is owned by the active profile (single-profile path): the new-tab
   // owning-profile gate is a no-op here; it is exercised in
   // TestMaintainerFollowUps.
@@ -428,7 +444,6 @@ const runnerSrc =
   'window.location = { href: "http://127.0.0.1:8787/", pathname: "/", search: "", hash: "", origin: "http://127.0.0.1:8787" };' +
   'const doc = { baseURI: "http://127.0.0.1:8787/" };' +
   'const _sessionSelectMode = true; const _renamingSid = null;' +
-  'const _isSessionActionTarget = () => false;' +
   'const _newTabOwningProfileAllowed = () => true;' +
   'let finisherRan = false;' +
   'const _finishSessionGesture = () => { finisherRan = true; return true; };' +
@@ -492,10 +507,10 @@ const mkLocalEvent = (over) => Object.assign(
   { button: 0, ctrlKey: false, metaKey: false, target: null,
     preventDefault() { sandbox.prevented++; }, stopPropagation() { sandbox.stopped++; } }, over || {});
 const runner = new Function('node', 'getSid', 'window', 'document',
-  '_sessionSelectMode', '_renamingSid', '_isSessionActionTarget',
+  '_sessionSelectMode', '_renamingSid',
   '_openSessionUrlInNewTab', '_sessionUrlForSid', '_consumeSessionNewTabClick',
   wireSrc + '; _wireSessionNewTabListeners(node, getSid);');
-runner(node, getSid, sandbox.window, sandbox.document, false, null, () => false,
+runner(node, getSid, sandbox.window, sandbox.document, false, null,
   sandbox._openSessionUrlInNewTab, sandbox._sessionUrlForSid, sandbox._consumeSessionNewTabClick);
 ret.hasAux = typeof seen['auxclick'] === 'function';
 ret.hasDown = typeof seen['mousedown'] === 'function';
@@ -559,11 +574,12 @@ def test_open_session_url_consults_owning_profile():
     assert "session_new_tab_other_profile" in opener
     assert "_profileMatchesActiveProfile" in _extract_function(
         SESSIONS_JS, "_newTabOwningProfileAllowed")
-    # Every row kind passes its session to the choke points.
+    # Every row kind passes its session to the choke points; child rows also
+    # mark their deep link exact so the new tab lands on the child.
     assert "_consumeSessionNewTabClick(e, s.session_id, s)" in SESSIONS_JS
-    assert "_consumeSessionNewTabClick(e, child.session_id, child)" in SESSIONS_JS
+    assert "_consumeSessionNewTabClick(e, child.session_id, child, {exact:true})" in SESSIONS_JS
     assert "_consumeSessionNewTabClick(e, seg.session_id, seg)" in SESSIONS_JS
-    assert "_openSessionUrlInNewTab(childSession.session_id, childSession)" in SESSIONS_JS
+    assert "_openSessionUrlInNewTab(childSession.session_id, childSession, {exact:true})" in SESSIONS_JS
     assert "_wireSessionNewTabListeners(el, ()=>s.session_id, ()=>s)" in SESSIONS_JS
 
 
@@ -648,7 +664,7 @@ def _run_branch_variant(*, gesture_state="dragging", swipe_tracking=True,
         "const makeRunner = new Function("
         "'window','document','_sessionUrlForSid','_newTabOwningProfileAllowed',"
         "'_openSessionUrlInNewTab','_consumeSessionNewTabClick',"
-        "'_sessionSelectMode','_renamingSid','_isSessionActionTarget','ref',"
+        "'_sessionSelectMode','_renamingSid','ref',"
         "'_newTabOpenSupported',"
         + json.dumps(body) + ");\n"
         "vm.runInContext(" + json.dumps("\n".join(env)) + ", sandbox);\n"
@@ -661,7 +677,7 @@ def _run_branch_variant(*, gesture_state="dragging", swipe_tracking=True,
         "    sandbox._consumeSessionNewTabClick,\n"
         "    vm.runInContext('_sessionSelectMode', sandbox),\n"
         "    vm.runInContext('_renamingSid', sandbox),\n"
-        "    sandbox._isSessionActionTarget, ref, " + nt_arg + ");\n"
+        "    ref, " + nt_arg + ");\n"
         "} catch (err) { ret.error = String(err && err.message || err); }\n"
         "ret.opened = sandbox.opened; ret.openCalls = sandbox.openCalls;\n"
         "ret.toast = (typeof sandbox.__toast !== 'undefined') ? sandbox.__toast : null;\n"
@@ -886,10 +902,10 @@ const node = { addEventListener: (t, fn) => { seen[t] = fn; } };
 const getSid = () => "test-session-123";
 const segTarget = { closest: (sel) => (String(sel).indexOf('session-lineage-segment') >= 0 ? {} : null) };
 const runner = new Function('node', 'getSid', 'window', 'document',
-  '_sessionSelectMode', '_renamingSid', '_isSessionActionTarget',
+  '_sessionSelectMode', '_renamingSid',
   '_openSessionUrlInNewTab', '_sessionUrlForSid', '_consumeSessionNewTabClick',
   wireSrc + '; _wireSessionNewTabListeners(node, getSid);');
-runner(node, getSid, sandbox.window, sandbox.document, false, null, () => false,
+runner(node, getSid, sandbox.window, sandbox.document, false, null,
   sandbox._openSessionUrlInNewTab, sandbox._sessionUrlForSid, sandbox._consumeSessionNewTabClick);
 const ev = { button: 1, ctrlKey: false, metaKey: false, target: segTarget,
   preventDefault() {}, stopPropagation() {} };
@@ -969,3 +985,145 @@ console.log(JSON.stringify(ret));
         assert out["opened"]["u"] == "/session/test-session-123"
         assert out["opened"]["f"] == "noopener"
         assert out["ref"]["chokeRan"] is True
+
+
+# ── Round 5 (nesquena-hermes CHANGES_REQUESTED, 2026-10-08T04:22) ─────────────
+#
+# A nested child row's new-tab link loads `/session/<child>`. Boot resolves the
+# URL session through `_resolveSessionIdFromSidebarLineage`, which maps an id
+# found in a lineage-like row's `_child_sessions` back to that row — so once the
+# sidebar had loaded, a child of a compressed parent opened its PARENT in the new
+# tab. A plain child-row same-tab click already avoids this with
+# `skipLineageResolve:true`; the fix carries the same choice through the link
+# (`?exact=1`) and boot honors it. Each test below is a red-before lock against
+# the pre-fix revision `9f44e8d2`.
+
+
+def test_child_rows_mark_new_tab_link_exact():
+    """Child-row new-tab call sites brand the deep link exact so boot loads the
+    child itself, not its compressed parent's lineage row. Red-before: none of
+    them passed the marker, so the new tab resolved to the parent."""
+    # Every child-row path carries {exact:true}: the Ctrl/Cmd choke point (fork
+    # main button + plain child button), the auxclick wirer (fork row body, fork
+    # main button, plain child button) and the programmatic path.
+    assert SESSIONS_JS.count(
+        "_consumeSessionNewTabClick(e, child.session_id, child, {exact:true})") == 2
+    assert SESSIONS_JS.count(
+        "_wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true})") == 2
+    assert "_wireSessionNewTabListeners(mainBtn, ()=>child.session_id, ()=>child, {exact:true})" in SESSIONS_JS
+    assert "_openSessionUrlInNewTab(childSession.session_id, childSession, {exact:true})" in SESSIONS_JS
+    # Top-level rows and lineage segments keep the ordinary (tip-resolving) deep
+    # link — the review asked not to change boot for those.
+    assert "_consumeSessionNewTabClick(e, s.session_id, s)" in SESSIONS_JS
+    assert "_consumeSessionNewTabClick(e, seg.session_id, seg)" in SESSIONS_JS
+    assert "_wireSessionNewTabListeners(row, ()=>seg.session_id, ()=>seg)" in SESSIONS_JS
+    assert "_wireSessionNewTabListeners(el, ()=>s.session_id, ()=>s)" in SESSIONS_JS
+
+
+def test_exact_marker_helper_preserves_query_and_fragment():
+    """`_markSessionUrlExact` appends the marker before the fragment, keeps an
+    existing query string, and is idempotent."""
+    out = _run_node({
+        "helpers": _helpers(),
+        "driver": r"""
+const plain = vm.runInContext(`_markSessionUrlExact('/session/abc')`, sandbox);
+const withQuery = vm.runInContext(`_markSessionUrlExact('/session/abc?keep=1')`, sandbox);
+const withHash = vm.runInContext(`_markSessionUrlExact('/session/abc#frag')`, sandbox);
+const both = vm.runInContext(`_markSessionUrlExact('/session/abc?keep=1#frag')`, sandbox);
+const idem = vm.runInContext(`_markSessionUrlExact('/session/abc?exact=1')`, sandbox);
+ret.plain = plain; ret.withQuery = withQuery; ret.withHash = withHash;
+ret.both = both; ret.idem = idem;
+console.log(JSON.stringify(ret));
+""",
+    })
+    assert out["plain"] == "/session/abc?exact=1"
+    assert out["withQuery"] == "/session/abc?keep=1&exact=1"
+    assert out["withHash"] == "/session/abc?exact=1#frag"
+    assert out["both"] == "/session/abc?keep=1&exact=1#frag"
+    assert out["idem"] == "/session/abc?exact=1"
+
+
+def test_exact_target_helper_reads_the_marker():
+    """`_sessionUrlRequestsExactTarget` is true only for `?exact=1`."""
+    out = _run_node({
+        "helpers": _helpers(),
+        "driver": r"""
+vm.runInContext(`window.location.search = '?exact=1';`, sandbox);
+ret.on = vm.runInContext(`_sessionUrlRequestsExactTarget()`, sandbox);
+vm.runInContext(`window.location.search = '';`, sandbox);
+ret.off = vm.runInContext(`_sessionUrlRequestsExactTarget()`, sandbox);
+vm.runInContext(`window.location.search = '?exact=0';`, sandbox);
+ret.zero = vm.runInContext(`_sessionUrlRequestsExactTarget()`, sandbox);
+console.log(JSON.stringify(ret));
+""",
+    })
+    assert out["on"] is True
+    assert out["off"] is False
+    assert out["zero"] is False
+
+
+def test_boot_skips_lineage_resolve_only_for_exact_deep_link():
+    """Boot passes `skipLineageResolve` only when the deep link is marked exact,
+    so an ordinary deep link (e.g. an old lineage-segment URL) still lands on
+    its lineage tip. Red-before: boot always resolved through the lineage row."""
+    exact_call = "await loadSession(saved, {preserveActiveInput:true, skipLineageResolve:true})"
+    assert exact_call in BOOT_JS
+    # The marker condition guards the exact call (within its preceding lines).
+    idx = BOOT_JS.index(exact_call)
+    guard = BOOT_JS[idx - 700:idx]
+    assert "_sessionUrlRequestsExactTarget()" in guard
+    assert "urlSession" in guard
+    # An ordinary deep link keeps the plain restore call.
+    assert "await loadSession(saved, {preserveActiveInput:true});" in BOOT_JS
+
+
+def test_child_new_tab_opens_child_deep_link_exact():
+    """Driving the shipped opener for a child row yields the exact-marked child
+    URL, while a top-level row yields the plain URL. Red-before: the child URL
+    carried no marker, so boot folded it into the compressed parent."""
+    out = _run_node({
+        "helpers": _helpers(),
+        "driver": r"""
+const child = vm.runInContext(`_openSessionUrlInNewTab("child-1", undefined, {exact:true})`, sandbox);
+const childUrl = sandbox.opened && sandbox.opened.u;
+sandbox.opened = null; sandbox.openCalls = 0;
+const plain = vm.runInContext(`_openSessionUrlInNewTab("top-1")`, sandbox);
+const plainUrl = sandbox.opened && sandbox.opened.u;
+ret.child = child; ret.childUrl = childUrl; ret.plain = plain; ret.plainUrl = plainUrl;
+console.log(JSON.stringify(ret));
+""",
+    })
+    assert out["child"] is True
+    assert out["childUrl"] == "/session/child-1?exact=1"
+    assert out["plain"] is True
+    assert out["plainUrl"] == "/session/top-1"
+
+
+def test_action_menu_target_refused_by_wirer_auxclick():
+    """[cleanup] The shared wirer refuses a target inside the row's
+    `.session-actions` container — the real class check, not the closure-local
+    `_isSessionActionTarget` the top-level helper could never see."""
+    wire = _extract_function(SESSIONS_JS, "_wireSessionNewTabListeners")
+    out = _run_node({
+        "helpers": _helpers(),
+        "driver": (
+            "const wireSrc = " + json.dumps(wire) + r""";
+const seen = {};
+const node = { addEventListener: (t, fn) => { seen[t] = fn; } };
+const getSid = () => "test-session-123";
+const menuTarget = { closest: (sel) => (String(sel).indexOf('session-actions') >= 0 ? {} : null) };
+const runner = new Function('node', 'getSid', 'window', 'document',
+  '_sessionSelectMode', '_renamingSid',
+  '_openSessionUrlInNewTab', '_sessionUrlForSid', '_consumeSessionNewTabClick',
+  wireSrc + '; _wireSessionNewTabListeners(node, getSid);');
+runner(node, getSid, sandbox.window, sandbox.document, false, null,
+  sandbox._openSessionUrlInNewTab, sandbox._sessionUrlForSid, sandbox._consumeSessionNewTabClick);
+const ev = { button: 1, ctrlKey: false, metaKey: false, target: menuTarget,
+  preventDefault() {}, stopPropagation() {} };
+seen['auxclick'](ev);
+ret.menuOpened = !!sandbox.opened;
+console.log(JSON.stringify(ret));
+"""
+        ),
+    })
+    assert out["menuOpened"] is False
