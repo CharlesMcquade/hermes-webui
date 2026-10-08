@@ -4965,6 +4965,19 @@ function _newTabOwningProfileAllowed(session){
   if(!scopeProfile) return false;
   return _profileMatchesActiveProfile(scopeProfile,activeProfile);
 }
+// Whether this environment can actually open a session in a second window.
+// The native macOS shell (hermes-swift-mac) exposes `window.open` but its
+// WKWebView delegate does not implement `webView(_:createWebViewWith:…)`, so
+// WebKit silently drops the tab (hermes-swift-mac#102). Callers that mutate
+// gesture state before opening must consult this *first*: otherwise they park
+// the gesture to idle and the fall-through _finishSessionGesture early-returns,
+// turning the click into a dead click instead of master's same-tab load.
+function _newTabOpenSupported(){
+  if(typeof window==='undefined'||typeof window.open!=='function') return false;
+  const wk=(window.webkit&&window.webkit.messageHandlers)?window.webkit.messageHandlers:null;
+  if(wk&&(wk.hermesNotify||wk.hermesTheme)) return false; // hermes-swift-mac#102
+  return true;
+}
 function _openSessionUrlInNewTab(sid, session){
   if(!sid||typeof window==='undefined'||typeof window.open!=='function') return false;
   // Native macOS shell (hermes-swift-mac): its WKWebView delegate does not
@@ -9984,7 +9997,7 @@ function renderSessionListFromCache(){
     el.onpointerup=(e)=>{
       if(e.pointerType==='touch') return;
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
-      if((e.ctrlKey||e.metaKey) && !_sessionSelectMode && !_renamingSid && _gestureState!=='idle' && !_longPressMenuOpened){
+      if((e.ctrlKey||e.metaKey) && !_sessionSelectMode && !_renamingSid && _gestureState!=='idle' && !_longPressMenuOpened && (typeof _newTabOpenSupported!=='function'||_newTabOpenSupported())){
         // Ctrl/Cmd+click opens in a new tab; keep the current tab untouched.
         // Gated on select/rename mode: _consumeSessionNewTabClick refuses
         // those modes, and mutating gesture state first would make the
@@ -10015,7 +10028,11 @@ function renderSessionListFromCache(){
       // A Ctrl/Cmd+double-click is two modified clicks: each pointerup opens
       // one new tab. Don't also start a rename in the current tab (master
       // only renamed). Outside select mode, bail entirely.
-      if((e.ctrlKey||e.metaKey) && !_sessionSelectMode) return;
+      if(typeof _newTabOpenSupported!=='function'||_newTabOpenSupported()){
+        if((e.ctrlKey||e.metaKey) && !_sessionSelectMode) return;
+      }
+      // On a shell with no second window _newTabOpenSupported() is false, so
+      // the bail above is skipped and master's rename path stays.
       if(_renamingSid) return;
       if(actions&&actions.contains(e.target)) return;
       if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}

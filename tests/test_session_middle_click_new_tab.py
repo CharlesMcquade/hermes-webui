@@ -597,9 +597,23 @@ def _run_branch_variant(*, gesture_state="dragging", swipe_tracking=True,
                         long_press=False, ctrl=True, select_mode=False,
                         renaming=None, finisher_ret=False, session=None,
                         show_all_profiles=None, active_profile="default",
-                        event_over=None, scope=None):
-    """Drive the verbatim Ctrl/Cmd pointerup branch with a chosen closure state."""
+                        event_over=None, scope=None,
+                        new_tab_supported=None, shell=False):
+    """Drive the verbatim Ctrl/Cmd pointerup branch with a chosen closure state.
+
+    ``new_tab_supported`` mirrors the shipped ``_newTabOpenSupported()`` result:
+    ``None`` leaves the helper undefined (the branch's ``typeof`` guard then
+    treats the environment as capable — matching every pre-existing harness),
+    while ``False``/``True`` define it and so exercise the native-shell decline.
+    ``shell`` also puts the WKWebView message handlers on ``window`` so the
+    opener itself declines too.
+    """
     body = _POINTERUP_BRANCH_BODY.replace("__BRANCH__", _pointerup_branch())
+    nt_arg = "undefined" if new_tab_supported is None else (
+        "() => true" if new_tab_supported else "() => false")
+    shell_line = (
+        "sandbox.window.webkit = { messageHandlers: { hermesNotify: function(){},"
+        " hermesTheme: function(){} } };\n" if shell else "")
     all_on = bool(show_all_profiles)
     if scope is None:
         scope = {"profile": active_profile, "allProfiles": all_on}
@@ -635,17 +649,19 @@ def _run_branch_variant(*, gesture_state="dragging", swipe_tracking=True,
         "'window','document','_sessionUrlForSid','_newTabOwningProfileAllowed',"
         "'_openSessionUrlInNewTab','_consumeSessionNewTabClick',"
         "'_sessionSelectMode','_renamingSid','_isSessionActionTarget','ref',"
+        "'_newTabOpenSupported',"
         + json.dumps(body) + ");\n"
         "vm.runInContext(" + json.dumps("\n".join(env)) + ", sandbox);\n"
         "const ref = " + json.dumps(ref) + ";\n"
         "sandbox.opened = null; sandbox.openCalls = 0;\n"
+        + shell_line +
         "try {\n"
         "  makeRunner(sandbox.window, sandbox.document, sandbox._sessionUrlForSid,\n"
         "    sandbox._newTabOwningProfileAllowed, sandbox._openSessionUrlInNewTab,\n"
         "    sandbox._consumeSessionNewTabClick,\n"
         "    vm.runInContext('_sessionSelectMode', sandbox),\n"
         "    vm.runInContext('_renamingSid', sandbox),\n"
-        "    sandbox._isSessionActionTarget, ref);\n"
+        "    sandbox._isSessionActionTarget, ref, " + nt_arg + ");\n"
         "} catch (err) { ret.error = String(err && err.message || err); }\n"
         "ret.opened = sandbox.opened; ret.openCalls = sandbox.openCalls;\n"
         "ret.toast = (typeof sandbox.__toast !== 'undefined') ? sandbox.__toast : null;\n"
@@ -814,6 +830,27 @@ def test_open_helper_declines_in_macos_shell():
     assert "hermesNotify" in opener and "hermesTheme" in opener
 
 
+def test_new_tab_supported_helper_gates_state_mutating_callers():
+    """[Round 4] The shell capability check is a shared helper consulted by both
+    state-mutating callers *before* they mutate: the Ctrl/Cmd pointerup branch
+    (before `_clearPointerDragState`) and the modified-double-click suppression.
+    Red-before: neither consulted it, so on the shell the pointerup branch
+    parked the gesture to idle and the fall-through finisher early-returned,
+    turning the click into a dead click (0 tabs, 0 same-tab loads)."""
+    helper = _extract_function(SESSIONS_JS, "_newTabOpenSupported")
+    assert "window.open" in helper
+    assert "window.webkit" in helper
+    assert "hermesNotify" in helper and "hermesTheme" in helper
+    idx = SESSIONS_JS.index("if((e.ctrlKey||e.metaKey)")
+    condition = SESSIONS_JS[idx:SESSIONS_JS.index("{", idx)].replace(" ", "")
+    assert "_newTabOpenSupported" in condition
+    # Modified-double-click suppression is skipped on a shell too (master
+    # renamed there, so the shell must keep the rename path).
+    didx = SESSIONS_JS.index("el.ondblclick=(e)=>{")
+    handler = SESSIONS_JS[didx:didx + 700].replace(" ", "")
+    assert "typeof_newTabOpenSupported!=='function'||_newTabOpenSupported()" in handler
+
+
 class TestRound3FollowUps:
     def test_segment_target_refused_by_consume_choke_point(self):
         """[Round 3 item 1] `_consumeSessionNewTabClick` must not open a tab
@@ -904,3 +941,31 @@ console.log(JSON.stringify(ret));
         assert out["calls"] == 1
         assert out["opened"]["u"] == "/session/test-session-123"
         assert out["opened"]["f"] == "noopener"
+
+    # ── Round 4 (nesquena-hermes CHANGES_REQUESTED, 2026-10-07T22:04) ─────────
+
+    def test_shell_ctrl_click_falls_back_to_same_tab_load(self):
+        """[Round 4 CORE] On the native macOS shell the Ctrl/Cmd pointerup
+        branch must be skipped *before* gesture cleanup, so the gesture stays
+        live and the fall-through `_finishSessionGesture` runs master's
+        same-tab load. Red-before: the branch parked state to idle, the opener
+        declined, and the finisher early-returned — a dead click (0 tabs opened
+        AND 0 same-tab loads)."""
+        out = _run_branch_variant(gesture_state="pressing", swipe_tracking=False,
+                                  new_tab_supported=False, shell=True)
+        assert "error" not in out, out.get("error")
+        assert out["openCalls"] == 0 and out["opened"] is None
+        assert out["ref"].get("chokeRan") is not True  # branch skipped pre-cleanup
+        assert out["ref"]["finisherRan"] is True       # same-tab load ran
+        assert out["ref"]["gestureStateAfter"] == "pressing"
+
+    def test_capable_environment_ctrl_click_still_opens_one_tab(self):
+        """[Round 4] Guard against over-blocking: where a second window *is*
+        available the branch still fires and opens exactly one noopener tab."""
+        out = _run_branch_variant(gesture_state="pressing", swipe_tracking=False,
+                                  new_tab_supported=True)
+        assert "error" not in out, out.get("error")
+        assert out["openCalls"] == 1
+        assert out["opened"]["u"] == "/session/test-session-123"
+        assert out["opened"]["f"] == "noopener"
+        assert out["ref"]["chokeRan"] is True
