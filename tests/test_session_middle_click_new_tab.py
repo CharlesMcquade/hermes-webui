@@ -1170,3 +1170,44 @@ console.log(JSON.stringify(ret));
     assert out["switchCalls"] == ["/session/other-2"]
     # Ordinary deep links never gain the marker.
     assert out["plainCalls"] == ["/session/tip-3"]
+
+def test_exact_child_tab_skips_lineage_folding_for_back_and_refresh():
+    """Back to the child tab's history entry and same-session refreshes call
+    `loadSession(child)` without `skipLineageResolve`; while the URL names that
+    child with `?exact=1`, lineage folding must leave it alone. Other sessions
+    and unmarked URLs fold as before (#7429 release review, Greptile P1)."""
+    helpers = "\n".join(
+        _extract_function(SESSIONS_JS, name)
+        for name in (
+            "_sessionIdFromLocation",
+            "_sessionUrlRequestsExactTarget",
+            "_sessionUrlTargetsExactSid",
+        )
+    )
+    out = _run_node({
+        "helpers": helpers,
+        "driver": r"""
+const setLoc = (path, search) => vm.runInContext(
+  `window.location.pathname = ${JSON.stringify(path)}; window.location.search = ${JSON.stringify(search)};`, sandbox);
+const exact = (sid) => vm.runInContext(`_sessionUrlTargetsExactSid(${JSON.stringify(sid)})`, sandbox);
+setLoc('/session/child-1', '?exact=1');
+ret.sameSession = exact('child-1');
+ret.otherSession = exact('parent-9');
+setLoc('/session/child-1', '');
+ret.unmarked = exact('child-1');
+console.log(JSON.stringify(ret));
+""",
+    })
+    assert out["sameSession"] is True
+    assert out["otherSession"] is False
+    assert out["unmarked"] is False
+
+
+def test_load_session_keeps_the_exact_child_when_folding_lineage():
+    """`loadSession()` consults the exact-target check inside its lineage block,
+    so boot, popstate (Back) and same-session refreshes all keep the child; the
+    `typeof` guard keeps harnesses that extract loadSession alone working."""
+    body = _extract_function(SESSIONS_JS, "loadSession")
+    assert "if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){" in body
+    assert ("const resolvedSid=(typeof _sessionUrlTargetsExactSid==='function' && _sessionUrlTargetsExactSid(sid))"
+            " ? sid : _resolveSessionIdFromSidebarLineage(sid);") in body

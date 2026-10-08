@@ -2273,7 +2273,7 @@ async function loadSession(sid){
   // notifications so extensions always see the canonical session id, not the
   // raw sidebar click id (which may differ after lineage folding).
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
-    const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
+    const resolvedSid=(typeof _sessionUrlTargetsExactSid==='function' && _sessionUrlTargetsExactSid(sid)) ? sid : _resolveSessionIdFromSidebarLineage(sid);
     if(resolvedSid&&resolvedSid!==sid){
       if(!opts._continuationParentSid) opts={...opts,_continuationParentSid:sid};
       sid=resolvedSid;
@@ -5011,6 +5011,15 @@ function _sessionUrlRequestsExactTarget(){
     const qs=new URLSearchParams(window.location.search||'');
     return qs.get('exact')==='1';
   }catch(_e){return false;}
+}
+// Lineage folding maps a nested child id onto its compressed parent's row. A tab
+// opened on a child via its exact-target link (`/session/<child>?exact=1`) must
+// keep showing that child on every load of it, not only at boot: browser Back
+// to that entry and same-session refreshes (poll, session-updated) also go
+// through loadSession() (#7429 release review). Only the session the URL names
+// is exempt, so navigating elsewhere from that tab folds lineage as usual.
+function _sessionUrlTargetsExactSid(sid){
+  return !!sid && _sessionUrlRequestsExactTarget() && _sessionIdFromLocation()===sid;
 }
 function _openSessionUrlInNewTab(sid, session, opts){
   if(!sid||typeof window==='undefined'||typeof window.open!=='function') return false;
