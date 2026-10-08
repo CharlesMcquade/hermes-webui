@@ -322,3 +322,64 @@ def test_frozen_session_signature_recovers_all_later_turns():
         "q2 after freeze", "a2 after freeze",
         "q3 much later", "a3 much later",
     ]
+
+
+def test_stale_watermark_above_a_compression_cutoff_heals_without_replay():
+    """#7946 gate (Codex CORE + senior review): a session manually compressed at
+    C=1500 and only LATER hit by the pre-fix wall-clock advance (W=2000 > C >
+    every timestamped sidecar row). Clearing the watermark would replay the
+    pre-compression rows the compression discarded (#4836). Healing to the
+    recorded cutoff keeps them hidden and still merges every turn after it."""
+    sidecar = _rows(
+        ("user", "q1", 1000),
+        ("assistant", "a1", 1001),
+        ("user", "q2", 1002),
+        ("assistant", "a2 (no ts)", None),
+    )
+    state = _rows(
+        ("user", "q1", 1000),
+        ("assistant", "a1", 1001),
+        ("user", "q2", 1002),
+        ("assistant", "discarded by compression", 1003),
+        ("user", "discarded user", 1004),
+        ("user", "q3 after compression", 1600),
+        ("assistant", "a3 after compression", 1700),
+    )
+    merged = models.merge_session_messages_append_only(
+        sidecar, state, truncation_watermark=2000.0, truncation_boundary=1500.0
+    )
+    contents = [m["content"] for m in merged]
+    assert "discarded by compression" not in contents
+    assert "discarded user" not in contents
+    assert "q3 after compression" in contents
+    assert "a3 after compression" in contents
+
+
+def test_stale_watermark_after_truncate_keeps_the_deleted_suffix_hidden():
+    """A truncate/edit at B=100 replaced the q2/a2 suffix; the post-edit turn
+    reached the sidecar (newest timestamped row 310); a later handoff turn then
+    stamped the wall-clock watermark. The heal targets the newest real cutoff
+    (310 here), so the replaced suffix stays hidden and only the turns that
+    landed during the freeze merge back."""
+    sidecar = _rows(
+        ("user", "q1", 50),
+        ("assistant", "a1", 100),
+        ("user", "q2-new", 300),
+        ("assistant", "a2-new", 310),
+    )
+    state = _rows(
+        ("user", "q1", 50),
+        ("assistant", "a1", 100),
+        ("user", "replaced-q2", 150),
+        ("assistant", "replaced-a2", 160),
+        ("user", "q2-new", 300),
+        ("assistant", "a2-new", 310),
+        ("user", "q3 during freeze", 400),
+        ("assistant", "a3 during freeze", 410),
+    )
+    merged = models.merge_session_messages_append_only(
+        sidecar, state, truncation_watermark=9999.0, truncation_boundary=100.0
+    )
+    assert [m["content"] for m in merged] == [
+        "q1", "a1", "q2-new", "a2-new", "q3 during freeze", "a3 during freeze",
+    ]

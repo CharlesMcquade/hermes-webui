@@ -13967,8 +13967,25 @@ def _merge_session_messages_append_only_impl(
         and watermark_timestamp > max_sidecar_timestamp
         and not watermark_matches_persisted_boundary
     )
+    healed_to_recorded_cutoff = False
     if watermark_is_stale_wall_clock:
-        watermark_timestamp = None
+        # Heal to the newest REAL cutoff instead of dropping the watermark
+        # (#7946 gate, Codex + senior review): clearing it would replay rows a
+        # recorded cutoff deliberately hid -- e.g. a session manually compressed
+        # at C and only later hit by the wall-clock advance (W > C > every
+        # timestamped sidecar row) would get its discarded pre-compression
+        # state.db rows back (#4836). The newest real cutoff is the later of the
+        # recorded boundary and the newest timestamped sidecar row: unseen
+        # state.db rows at or below it stay suppressed exactly as on master
+        # (compression-discarded rows, a truncate's deleted suffix that predates
+        # the newest sidecar row), and the advance guard below is released so
+        # every state.db turn AFTER it -- the turns the self-lock was hiding --
+        # merges back (#7945).
+        heal_candidates = [max_sidecar_timestamp]
+        if boundary_ts is not None and boundary_ts > 0 and boundary_ts < watermark_timestamp:
+            heal_candidates.append(boundary_ts)
+        watermark_timestamp = max(heal_candidates)
+        healed_to_recorded_cutoff = True
 
     def _state_row_is_truncated(
         msg, key, content_key, timestamp, checkpoint_consumed,
@@ -14003,8 +14020,9 @@ def _merge_session_messages_append_only_impl(
         sidecar_advanced_past_watermark = (
             watermark_timestamp is not None
             and (
-                (max_sidecar_timestamp is not None
-                 and max_sidecar_timestamp > watermark_timestamp)
+                healed_to_recorded_cutoff
+                or (max_sidecar_timestamp is not None
+                    and max_sidecar_timestamp > watermark_timestamp)
                 or (watermark_advanced_by_boundary and checkpoint_consumed)
             )
         )
