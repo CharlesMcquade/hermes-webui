@@ -5491,6 +5491,10 @@ function _invalidateTouchRender(){
     clearTimeout(_pendingTouchDeferredRenderTimer);
     _pendingTouchDeferredRenderTimer=0;
   }
+  if(_strandedTouchRecoveryTimer){
+    clearTimeout(_strandedTouchRecoveryTimer);
+    _strandedTouchRecoveryTimer=0;
+  }
   if(_touchSentinelObserver){_touchSentinelObserver.disconnect();_touchSentinelObserver=null;}
   // Owner-qualified teardown: only remove the listener and cancel the RAF
   // if the current _touchScrollOwner is the one we captured. A stale owner
@@ -8536,6 +8540,119 @@ function _sessionVirtualSpacer(height, where){
   return spacer;
 }
 
+/// Escape hatch for the one touch-layout state the incremental batched window
+/// cannot repair itself: the live scroll position has moved OUTSIDE the
+/// rendered DOM window while no batch is schedulable. Reproduction (#6426
+/// re-gate): with 200 sessions and a deep active session, a jump to
+/// scrollTop=0 leaves the DOM window at [140,200) — zero visible rows, the
+/// top sentinel outside the viewport, and no scroll-driven batch can reach a
+/// position that far outside the window, so the sidebar stays blank even
+/// after a repaint. Master's non-touch window recalculation is disabled here
+/// by the touch early-return (momentum-scroll freeze protection), so
+/// recovery must be explicit.
+///
+/// Deferral contract (mirrors _deferRenderSessionListFromCache): a scroll
+/// event ARMS a one-shot repair; it never rebuilds DOM inline, so an active
+/// momentum gesture is never frozen. At fire time — at least
+/// SESSION_LIST_TOUCH_INTERACTION_IDLE_MS after the last scroll event — the
+/// stranding is revalidated and, if the user is somehow still scrolling, the
+/// repair re-arms instead of firing. Stranding itself is geometric: the
+/// viewport sits entirely inside unpainted spacer space on either side of
+/// the DOM window [start, loaded) AND the sentinel affordances do not cover
+/// the position (a visible directional sentinel means the normal batch
+/// machinery still owns recovery; a missing element carries no signal, same
+/// rule as the continuous scheduler's directional cross-check).
+///
+/// The repair re-anchors the touch bounds to the live scroll position — a
+/// plain from-cache render would PRESERVE the stale deep window (unchanged
+/// scope fingerprint keeps [start, loaded)), which is exactly the stranded
+/// state. Setting the canonical bounds around firstVisible before rendering
+/// makes the unchanged-scope repaint paint a bounded window at the user's
+/// actual position; the active-session anchor is untouched, so it cannot
+/// yank the user back to the deep session they scrolled away from.
+let _strandedTouchRecoveryTimer=0;
+function _sentinelIntersectsViewport(list, sentinel){
+  try{
+    const r=sentinel.getBoundingClientRect&&sentinel.getBoundingClientRect();
+    if(!r||!Number.isFinite(r.top)||!Number.isFinite(r.bottom)) return false;
+    const lr=list.getBoundingClientRect&&list.getBoundingClientRect();
+    if(!lr||!Number.isFinite(lr.top)||!Number.isFinite(lr.bottom)) return false;
+    return r.bottom>lr.top&&r.top<lr.bottom;
+  }catch(_){ return false; }
+}
+function _touchViewportStranding(list){
+  // Returns {stranded, direction} — stranded means no in-flight machinery
+  // can paint the live viewport and the geometry is outside the window.
+  const state=_touchRenderState;
+  if(!state||state.gen!==_sessionTouchGen) return {stranded:false,direction:''};
+  if(!list||list!==_sessionTouchListEl) return {stranded:false,direction:''};
+  if(_touchBatchPending||_touchContinuousBatchOwner) return {stranded:false,direction:''};
+  const start=Number(_sessionTouchStartIndex)||0;
+  const loaded=Number(_sessionTouchLoadedCount)||0;
+  const listTotal=Number(_sessionTouchTotalCount)||0;
+  if(listTotal<=0||loaded<=start) return {stranded:false,direction:''};
+  const direction=_touchNextBatchDirection(list, state, 200);
+  if(direction){
+    // A visible directional sentinel means the normal batch path still
+    // covers this position — recovery must not race it.
+    const topSentinel=list.querySelector('[data-touch-sentinel-top]');
+    const bottomSentinel=list.querySelector('[data-touch-sentinel]');
+    if(direction==='up'&&(!topSentinel||topSentinel.style.display!=='none')) return {stranded:false,direction:direction};
+    if(direction==='down'&&(!bottomSentinel||bottomSentinel.style.display!=='none')) return {stranded:false,direction:direction};
+  }
+  // Belt-and-braces: a sentinel actually intersecting the viewport means the
+  // IntersectionObserver path is live at this position regardless of the
+  // scroll-math direction estimate — the machinery owns recovery. A
+  // display:none affordance never intersects (observer cannot fire on it).
+  const topSentinel=list.querySelector('[data-touch-sentinel-top]');
+  if(topSentinel&&topSentinel.style.display!=='none'&&_sentinelIntersectsViewport(list, topSentinel)){
+    return {stranded:false,direction:direction||'up'};
+  }
+  const bottomSentinel=list.querySelector('[data-touch-sentinel]');
+  if(bottomSentinel&&bottomSentinel.style.display!=='none'&&_sentinelIntersectsViewport(list, bottomSentinel)){
+    return {stranded:false,direction:direction||'down'};
+  }
+  const scrollTop=Math.max(0, Number(list.scrollTop)||0);
+  const itemHeight=Number(state.itemHeight)||SESSION_VIRTUAL_ROW_HEIGHT;
+  const viewportRows=Math.max(1, Math.ceil((Number(list.clientHeight)||520)/itemHeight));
+  const firstVisible=Math.floor(scrollTop/itemHeight);
+  const lastVisible=firstVisible+viewportRows;
+  const strandedAbove=lastVisible<=start;
+  const strandedBelow=firstVisible>=loaded;
+  return {stranded:strandedAbove||strandedBelow,direction:direction,firstVisible:firstVisible};
+}
+function _recoverStrandedTouchViewport(list){
+  if(!list||!_touchRenderState) return;
+  const s=_touchViewportStranding(list);
+  if(!s.stranded){
+    if(_strandedTouchRecoveryTimer){clearTimeout(_strandedTouchRecoveryTimer);_strandedTouchRecoveryTimer=0;}
+    return;
+  }
+  if(_strandedTouchRecoveryTimer) return; // already armed for this stranding
+  _strandedTouchRecoveryTimer=setTimeout(function(){
+    _strandedTouchRecoveryTimer=0;
+    const liveList=_sessionTouchListEl;
+    if(!liveList||!_touchRenderState) return;
+    if(_isSessionListTouchScrolling()){
+      // Gesture still active (scroll events kept arriving): re-arm rather
+      // than rebuild mid-momentum. The next scroll event re-runs the
+      // assessment anyway; this is the belt-and-braces path.
+      _recoverStrandedTouchViewport(liveList);
+      return;
+    }
+    const s2=_touchViewportStranding(liveList);
+    if(!s2.stranded) return;
+    // Re-anchor the canonical touch bounds around the live scroll position.
+    const firstVisible=Math.max(0, Number(s2.firstVisible)||0);
+    const total=Number(_sessionTouchTotalCount)||0;
+    const windowRows=SESSION_TOUCH_INITIAL_BATCH;
+    const nextStart=Math.max(0, Math.min(firstVisible-SESSION_VIRTUAL_BUFFER_ROWS, Math.max(0, total-windowRows)));
+    _sessionTouchStartIndex=nextStart;
+    _sessionTouchLoadedCount=Math.min(total, nextStart+windowRows);
+    renderSessionListFromCache({force:true});
+  }, SESSION_LIST_TOUCH_INTERACTION_IDLE_MS+50);
+}
+
 function _scheduleSessionVirtualizedRender(){
   _sessionListLastScrollAt=Date.now();
   // While a profile-switch skeleton is up, ignore virtual-scroll events: the
@@ -8556,6 +8673,7 @@ function _scheduleSessionVirtualizedRender(){
   // IntersectionObserver on the sentinel div handles appending more rows.
   // No innerHTML wipe happens during scroll — only after scroll settles.
   if(_isTouchPrimary()){
+    _recoverStrandedTouchViewport(list);
     return;
   }
   _sessionVirtualScrollRaf=requestAnimationFrame(()=>{

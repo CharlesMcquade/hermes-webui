@@ -238,6 +238,7 @@ function extractFunc(name) {
   return SESSIONS_JS.slice(start,i);
 }
 let _pendingTouchDeferredRenderTimer=0, _touchSentinelObserver=null;
+let _strandedTouchRecoveryTimer=0;
 let _touchScrollOwner=null, _touchRenderState=null, _sessionTouchListEl=null;
 let _sessionTouchStartIndex=7, _sessionTouchLoadedCount=60, _sessionTouchTotalCount=100;
 let _touchBatchPending=false, _touchContinuousBatchOwner=null;
