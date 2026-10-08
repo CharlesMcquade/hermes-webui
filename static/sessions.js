@@ -4923,7 +4923,9 @@ function _setActiveSessionUrl(sid){
   // Keep the one-shot exact-target marker while this tab stays on the same
   // session, so a refresh of a child row's new tab still lands on the child
   // instead of folding into its compressed parent; switching sessions drops it.
-  if(_sessionIdFromLocation()===sid && _sessionUrlRequestsExactTarget()){
+  if(typeof _sessionUrlRequestsExactTarget==='function' && typeof _markSessionUrlExact==='function'
+     && typeof _sessionIdFromLocation==='function'
+     && _sessionIdFromLocation()===sid && _sessionUrlRequestsExactTarget()){
     next=_markSessionUrlExact(next);
   }
   if(next && next!==(window.location.pathname+window.location.search+window.location.hash)){
@@ -5019,7 +5021,8 @@ function _sessionUrlRequestsExactTarget(){
 // through loadSession() (#7429 release review). Only the session the URL names
 // is exempt, so navigating elsewhere from that tab folds lineage as usual.
 function _sessionUrlTargetsExactSid(sid){
-  return !!sid && _sessionUrlRequestsExactTarget() && _sessionIdFromLocation()===sid;
+  if(!sid || typeof _sessionUrlRequestsExactTarget!=='function' || typeof _sessionIdFromLocation!=='function') return false;
+  return _sessionUrlRequestsExactTarget() && _sessionIdFromLocation()===sid;
 }
 function _openSessionUrlInNewTab(sid, session, opts){
   if(!sid||typeof window==='undefined'||typeof window.open!=='function') return false;
