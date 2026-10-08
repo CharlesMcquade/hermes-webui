@@ -135,6 +135,10 @@
 
 ### Fixed
 
+- **A closed mobile sidebar or workspace drawer is out of the keyboard's way.** Once a drawer has slid closed it is
+  inert and hidden from the tab order and screen readers, so Tab no longer walks into an invisible off-screen list;
+  closing it by tapping outside or with its own close button returns focus to the control that opened it, and the
+  hidden file-upload input is no longer a stray tab stop. Thanks @happy5318. (#7924)
 - **A workspace panel you closed stays closed.** On phones, the on-screen keyboard (a viewport resize) no longer
   reopens the workspace panel after you dismissed it. File and artifact previews are now owned by the open that started
   them: a slow preview that finishes after you switched conversations, opened another file or closed the panel no longer
