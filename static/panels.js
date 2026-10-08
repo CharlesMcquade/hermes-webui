@@ -9077,7 +9077,27 @@ async function _autosavePreferencesSettings(payload){
     const rawModelValue=String((modelSel&&modelSel.value)||'');
     const capturedModelValue=String((modelState&&modelState.model)||'');
     const savedModelOnOpen=String(_settingsHermesDefaultModelOnOpen||'');
-    const modelUnchanged=rawModelValue===savedModelOnOpen||capturedModelValue===savedModelOnOpen;
+    // #7865 SHOULD-FIX (re-gate): a THIRD form. After "Save Settings" the server
+    // stores the bare model while the default-model global still holds the raw
+    // qualified value the picker rendered. Re-opening Settings therefore shows
+    // the qualified option, and _modelStateForSelect now SKIPS the strip for a
+    // configured default — so captured and raw are both
+    // "@custom:foo:claude-sonnet-5" while saved-on-open is the bare
+    // "claude-sonnet-5". Neither of the two comparisons above matches, and the
+    // unsaved-changes bar reappears on the next autosaved edit even though
+    // nothing was changed.
+    //
+    // Accept the raw value with the captured provider's own "@<provider>:"
+    // prefix removed. It is still anchored on the captured provider, so a
+    // same-model/different-provider re-pick keeps reading dirty.
+    const _capturedProvider=String((modelState&&modelState.model_provider)||'').trim();
+    const _ownPrefix=_capturedProvider?`@${_capturedProvider}:`:'';
+    const prefixStrippedValue=(_ownPrefix&&rawModelValue.toLowerCase().startsWith(_ownPrefix.toLowerCase()))
+      ?rawModelValue.slice(_ownPrefix.length)
+      :rawModelValue;
+    const modelUnchanged=rawModelValue===savedModelOnOpen
+      ||capturedModelValue===savedModelOnOpen
+      ||prefixStrippedValue===savedModelOnOpen;
     const modelDirty=!!(
       modelSel&&(
         !modelUnchanged||

@@ -253,16 +253,37 @@ def _run_driver() -> dict:
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_qualified_catalog_id_is_split_into_a_bare_model_and_provider():
-    """Defect 2: selecting ``@provider:model[suffix]`` must store the bare name."""
+    """Defect 2, REVERSED by #7865 re-gate: a non-custom qualifier now STAYS.
+
+    This test originally pinned the opposite behaviour — that selecting
+    ``@provider:model[suffix]`` stores the bare name, on the reasoning that the
+    provider would otherwise be specified twice and the upstream would 404.
+
+    The re-gate found that reasoning does not hold for a non-custom provider: the
+    qualified form IS the session's model, and stripping it persisted a pair like
+    ``mistral-large`` / ``removed`` — a model id no provider owns plus a provider
+    the account no longer has. The server fast path accepted that pair unchanged
+    and the installed Agent then raised ``AuthError: Unknown provider
+    'removed'``, so a session whose provider was removed stopped recovering at
+    all.
+
+    Only a CUSTOM provider's qualified id is a genuine duplication (the custom
+    namespace encodes the provider inside the model id). This provider is
+    ``claude-subscription-…``, so the qualifier must survive.
+    """
     result = _run_driver()
 
-    assert result["stored_model"] == "claude-sonnet-5[1m]", (
-        "the model name must not keep the @provider: prefix — the provider "
-        "would be specified twice and the upstream 404s"
+    assert result["stored_model"] == (
+        "@claude-subscription-directsdk-experimental:claude-sonnet-5[1m]"
+    ), (
+        "a non-custom provider's qualified id must stay in session state; "
+        "stripping it persisted a model id no provider owns alongside a "
+        "provider the account may no longer have, and the next send raised "
+        "AuthError: Unknown provider"
     )
     assert result["stored_provider"] == "claude-subscription-directsdk-experimental"
     assert result["captured"] == {
-        "model": "claude-sonnet-5[1m]",
+        "model": "@claude-subscription-directsdk-experimental:claude-sonnet-5[1m]",
         "model_provider": "claude-subscription-directsdk-experimental",
     }
 
