@@ -5,6 +5,11 @@
 
 ### Added
 
+- **Middle-click or Ctrl/Cmd-click a conversation in the sidebar to open it in a new tab.** Works for top-level rows
+  and for nested sub-conversations (a child of a compressed conversation opens the child itself, also after a refresh),
+  keeps each tab on its own profile, and leaves plain clicks, the action menu and touch gestures unchanged. Thanks
+  @red4711. (#7429)
+
 - **Extensions can add a small action to each message without touching transcript DOM.** A new
   `ext.messages.registerAction({ id, label, icon, roles, getPressed, onInvoke })` on the boot-trusted extension handle
   lets an extension put a Core-rendered `pin`, `bookmark` or `star` button after the built-in actions on settled user
