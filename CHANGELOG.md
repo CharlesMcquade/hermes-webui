@@ -127,6 +127,17 @@
 
 ### Fixed
 
+- **Conversations no longer freeze after compression or an edit and silently hide every later turn.** A turn that
+  committed without a timestamped user message (a Gateway handoff or a background-process notification) stamped the
+  conversation's replay cutoff with the current clock time, newer than everything already saved. From then on the
+  merge hid exactly the new turns that would have moved the conversation past that cutoff, so the transcript stopped at
+  an old snapshot while the session kept running; one real conversation lost several thousand messages from view. The
+  cutoff now only ever moves to a real message time, and an already-frozen conversation heals: it reverts to its last
+  real cutoff (the recorded compression/edit point or the newest saved message), keeps everything that compression or an
+  edit removed hidden, and shows every turn after it. The one ambiguous case, an edit whose replacement turn never
+  reached the saved file with a time, stays as before rather than risk bringing deleted messages back.
+  Thanks @Peytonlukm. (#7946, fixes #7945)
+
 - **The Hermes dashboard link works when the dashboard is served under a sub-path.** A dashboard URL such as
   `https://host/hermes/` is now accepted and opened with its path (and its trailing slash) intact, instead of being
   rejected or cut back to the host. Backslashes and their encoded forms are still refused, and the server-side
