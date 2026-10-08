@@ -267,17 +267,22 @@ function _setPanelInert(panel, open){
   // (opening a session calls it unconditionally, and _applySidebarState() calls
   // it when leaving phone widths), so arming outside the drawer band would
   // strand the desktop sidebar — the same trap the focus-rescue phone-band guard
-  // avoids. The open direction always clears, so a panel resized back into its
-  // band recovers.
-  if(!open){
-    const compact = panel.classList.contains('sidebar')
-      ? _isPhoneWidthViewport()
-      : _isCompactWorkspaceViewport();
-    if(!compact)return;
-  }
+  // avoids.
+  //
+  // #7924: `inert` is a DOM attribute, not a CSS state, so an out-of-band call
+  // must still RECONCILE it rather than return early. Closing at 390px and then
+  // widening to 641/804/1280px (rotation, iPad split view, window resize) used
+  // to leave the desktop sidebar inert forever: the early return skipped the
+  // clear, and neither toggleSidebar() nor _applySidebarState() recovers it.
+  // So compute the armed state and set OR remove accordingly — an out-of-band
+  // close clears, a resize back into the band arms.
+  const compact = panel.classList.contains('sidebar')
+    ? _isPhoneWidthViewport()
+    : _isCompactWorkspaceViewport();
+  const armed = !open && compact;
   try{
-    if(open)panel.removeAttribute('inert');
-    else panel.setAttribute('inert','');
+    if(armed)panel.setAttribute('inert','');
+    else panel.removeAttribute('inert');
   }catch(_){}
 }
 
@@ -344,11 +349,17 @@ function _setWorkspacePanelMode(mode, returnFocusTo){
   // so that toggleWorkspacePanel(false) from the toolbar doesn't clear the setting.
   try{localStorage.setItem('hermes-webui-workspace-panel', open ? 'open' : 'closed');}catch(_){}
   layout.classList.toggle('workspace-panel-collapsed',!open);
+  // #7924: reconcile the inert attribute on EVERY mode change, not just inside
+  // the compact band. `inert` is a DOM attribute, not a CSS state, so closing
+  // the drawer at 800px and then widening to 1280px used to leave it set: the
+  // desktop branch never called the setter, and reopening gave a Files panel
+  // that rejected focus and clicks. Calling it here (armed = !open && compact)
+  // clears an out-of-band close and arms an in-band one.
+  _setPanelInert(panel, open);
   if(_isCompactWorkspaceViewport()){
     panel.classList.toggle('mobile-open',open);
     // Open panels drop inert; closed ones take it for the whole closing window,
     // not just after the 250ms visibility flip (see _setPanelInert).
-    _setPanelInert(panel, open);
     // returnFocusTo is set only by the explicit-dismiss path (tapping outside the
     // drawer), so focus returns to the edge toggle; automatic mode syncs leave it
     // undefined and keep the plain <body> landing.
@@ -818,6 +829,11 @@ function mobileSwitchPanel(name){
     if(sidebar){
       sidebar.classList.remove('mobile-session-page');
       sidebar.classList.add('mobile-panel-drawer','mobile-open');
+      // #7924: an open drawer must never stay inert. A prior close at this
+      // width armed the attribute, and adding mobile-open alone left the
+      // drawer's controls rejecting focus and clicks (a tap on its own nav
+      // tab fell through to the hamburger beneath and closed it).
+      if(typeof _setPanelInert==='function')_setPanelInert(sidebar,true);
     }
   }
 }
