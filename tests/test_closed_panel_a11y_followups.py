@@ -788,6 +788,8 @@ def _workspace_functions_source() -> str:
         "function syncWorkspacePanelUI(",
         "function _workspacePanelInvokerForBand(",
         "function openWorkspacePanel(",
+        "function _setWorkspacePanelDismissed(",
+        "function _markWorkspacePanelClosedByUser(",
         "function closeWorkspacePanel(",
         "function closeMobileWorkspacePanelFromChat(",
     ):
@@ -826,7 +828,7 @@ def _workspace_drawer_page_html() -> str:
   type="button" data-tooltip="Show workspace panel" aria-label="Show workspace panel">E</button>
 {_WORKSPACE_PANEL_HTML}
 <script>$ = (id) => document.getElementById(id);</script>
-<script>let _workspacePanelMode = 'closed';</script>
+<script>let _workspacePanelMode = 'closed'; let _workspacePanelUserDismissed=false; let _workspacePanelDismissGen=0;</script>
 <script>{_workspace_functions_source()}</script>
 <script>
   window.__openDrawer = () => {{
@@ -1014,6 +1016,8 @@ def _close_x_drawer_page_html() -> str:
             "function syncWorkspacePanelUI(",
             "function _workspacePanelInvokerForBand(",
             "function openWorkspacePanel(",
+            "function _setWorkspacePanelDismissed(",
+            "function _markWorkspacePanelClosedByUser(",
             "function closeWorkspacePanel(",
             "function handleWorkspaceClose(",
             "function clearPreview(",
@@ -1051,7 +1055,7 @@ def _close_x_drawer_page_html() -> str:
 <script>$ = (id) => document.getElementById(id);</script>
 <script>__SESSION__</script>
 <script>
-let _workspacePanelMode = 'closed';
+let _workspacePanelMode = 'closed'; let _workspacePanelUserDismissed=false; let _workspacePanelDismissGen=0;
 let _previewCurrentPath='', _previewCurrentMode='', _previewDirty=false;
 function t(k,f){{ return f; }}
 function renderBreadcrumb(){{}}
