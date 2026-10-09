@@ -59,6 +59,20 @@ def test_recovery_never_renders_inline_on_scroll_event():
         "Scroll-event path must never render inline"
 
 
+def test_threshold_guard_exempts_touch_lists():
+    """Round-4 re-gate fix 2: the desktop total<=80 early return must not run
+    on touch-primary devices. Touch batching starts at 60 rows, so an 61–80
+    session touch list runs the real batch machinery and can strand — the old
+    ordering made those lists unrecoverable (~9593 finding).
+    """
+    fn = _extract_fn(SESSIONS_JS, "_scheduleSessionVirtualizedRender")
+    threshold_idx = fn.find("SESSION_VIRTUAL_THRESHOLD_ROWS) return;")
+    assert threshold_idx >= 0, "Threshold early-return must exist"
+    guard = fn[max(0, threshold_idx - 120):threshold_idx]
+    assert "_isTouchPrimary()" in guard, \
+        "Threshold early-return must exempt touch-primary devices"
+
+
 def test_repair_reanchors_bounds_instead_of_preserving_deep_window():
     """The repair must write _sessionTouchStartIndex/_sessionTouchLoadedCount
     around the live scroll position before rendering. A plain from-cache
@@ -240,9 +254,17 @@ console.log(JSON.stringify({
 
 
 @_node_tests
-def test_production_visible_sentinel_blocks_recovery():
-    """If a directional sentinel is visible (batch machinery still covers the
-    position), recovery must NOT arm — no racing the incremental path.
+def test_production_visible_bottom_sentinel_blocks_downward_recovery():
+    """If the BOTTOM sentinel is visible and intersecting (batch machinery
+    still covers downward appends), recovery must NOT arm — no racing the
+    incremental path.
+
+    Round-4 re-gate inversion: the TOP sentinel must NOT veto recovery. The
+    top affordance is never observed by the IntersectionObserver and sits as
+    the list's first child whenever start>0, so at scrollTop=0 it is
+    permanently intersecting while no upward batch can actually fire — the
+    old top-sentinel veto left the blank sidebar unfixed (measured:
+    scrollTop 0 and 20 stayed blank forever).
     """
     source = f"""
 const SESSIONS_JS = {SESSIONS_JS!r};
@@ -292,8 +314,10 @@ let renderCalls = [];
 function _isTouchPrimary() { return true; }
 function _isSessionListTouchScrolling() { return false; }
 
-// Visible TOP sentinel intersecting the viewport: the IntersectionObserver
-// path is live at this position, so recovery must stand down.
+// Visible BOTTOM sentinel intersecting the viewport with downward-adjacent
+// geometry: the IntersectionObserver path is live for appends, so recovery
+// must stand down. The TOP sentinel is visible here too — and must NOT veto
+// (round-4 inversion: it never had working upward machinery behind it).
 function makeSentinel(display) {
   return {style: {display: display}, getBoundingClientRect() {
     return {top: 10, bottom: 50, left: 0, right: 300, width: 300, height: 40};
@@ -307,8 +331,19 @@ const list = {
   },
   querySelector(sel) {
     if (sel === '[data-touch-sentinel-top]') return makeSentinel('');
-    if (sel === '[data-touch-sentinel]') return makeSentinel('none');
+    if (sel === '[data-touch-sentinel]') return makeSentinel('');
     return null;
+  },
+  // Real-rendered-row geometry placing every row BELOW the viewport would
+  // strand 'up'; to exercise the downward veto instead, rows span the
+  // viewport (first at top edge) so geometry says visible.
+  querySelectorAll(sel) {
+    if (sel === '.session-item[data-sid]') {
+      return [0, 1, 2].map(i => ({getBoundingClientRect() {
+        return {top: i*40, bottom: i*40+40, left: 0, right: 300, width: 300, height: 40};
+      }}));
+    }
+    return [];
   },
 };
 
@@ -342,4 +377,225 @@ console.log(JSON.stringify({
 """
     result = json.loads(_run_node_vm(source))
     assert result["armed"] == 0 and result["renderCalls"] == 0, \
-        f"Visible top sentinel must veto recovery, got {result}"
+        f"Visible bottom sentinel must veto recovery, got {result}"
+
+
+@_node_tests
+def test_production_real_geometry_80row_tablet_list_recovers():
+    """The 61–80-session touch list case from the re-gate: the desktop
+    total<=80 early return used to run BEFORE the touch branch, and stranding
+    was computed from the 52px projection that ignored the ~38px sentinel and
+    group headers (first real row at 1106px in a 1049px viewport while the
+    projection claimed row 20 visible). With real row geometry, window
+    [20,80), scrollTop=0, first row below the viewport fold → stranded 'up'
+    and the repair arms.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + """
+function extractFunc(name) {
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = SESSIONS_JS.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = SESSIONS_JS.indexOf('{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < SESSIONS_JS.length) {
+    if (SESSIONS_JS[i] === '{') depth++;
+    else if (SESSIONS_JS[i] === '}') depth--;
+    i++;
+  }
+  return SESSIONS_JS.slice(start, i);
+}
+
+const timers = [];
+const sandboxSetTimeout = function(fn, ms) {
+  timers.push({fn, cancelled: false});
+  return timers.length;
+};
+const sandboxClearTimeout = function(id) {
+  if (timers[id - 1]) timers[id - 1].cancelled = true;
+};
+
+const SESSION_LIST_TOUCH_INTERACTION_IDLE_MS = 1200;
+const SESSION_TOUCH_INITIAL_BATCH = 60;
+const SESSION_TOUCH_BATCH_SIZE = 40;
+const SESSION_VIRTUAL_ROW_HEIGHT = 52;
+const SESSION_VIRTUAL_BUFFER_ROWS = 8;
+const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
+let _sessionTouchGen = 1;
+let _sessionTouchStartIndex = 20;
+let _sessionTouchLoadedCount = 80;
+let _sessionTouchTotalCount = 80;
+let _sessionTouchListEl = null;
+let _touchRenderState = null;
+let _touchBatchPending = false;
+let _touchContinuousBatchOwner = null;
+let _strandedTouchRecoveryTimer = 0;
+let _sessionListLastScrollAt = 0;
+let _pointerActive = false;
+let renderCalls = [];
+let renderOptsLog = [];
+
+function _isTouchPrimary() { return true; }
+function _isSessionListTouchScrolling() { return false; }
+
+function makeSentinel(display) {
+  return {style: {display: display}, getBoundingClientRect() {
+    return {top: 900, bottom: 940, left: 0, right: 300, width: 300, height: 40};
+  }};
+}
+const list = {
+  scrollTop: 0,
+  clientHeight: 1049,
+  getBoundingClientRect() {
+    return {top: 0, bottom: 1049, left: 0, right: 300, width: 300, height: 1049};
+  },
+  querySelector(sel) {
+    if (sel === '[data-touch-sentinel-top]') return makeSentinel('none');
+    if (sel === '[data-touch-sentinel]') return makeSentinel('none');
+    return null;
+  },
+  querySelectorAll(sel) {
+    if (sel === '.session-item[data-sid]') {
+      // The measured real-device geometry: the first rendered row sits at
+      // 1106px — BELOW the 1049px viewport fold. Zero rows visible.
+      return Array.from({length: 60}, (_, i) => ({getBoundingClientRect() {
+        return {top: 1106 + i*40, bottom: 1106 + i*40 + 40, left: 0, right: 300, width: 300, height: 40};
+      }}));
+    }
+    return [];
+  },
+};
+
+const bndStart = extractFunc('_touchStartBoundaryNearViewport');
+const bndLoaded = extractFunc('_touchLoadedBoundaryNearViewport');
+eval(bndStart);
+eval(bndLoaded);
+eval(extractFunc('_touchNextBatchDirection'));
+eval(extractFunc('_sentinelIntersectsViewport'));
+eval(extractFunc('_touchViewportStranding'));
+const _origSetTimeout = globalThis.setTimeout;
+const _origClearTimeout = globalThis.clearTimeout;
+globalThis.setTimeout = sandboxSetTimeout;
+globalThis.clearTimeout = sandboxClearTimeout;
+eval(extractFunc('_recoverStrandedTouchViewport').replace(
+  'renderSessionListFromCache({force:true});',
+  'renderCalls.push({start:_sessionTouchStartIndex, loaded:_sessionTouchLoadedCount}); renderOptsLog.push("force");'
+));
+
+_sessionTouchListEl = list;
+_touchRenderState = {gen: _sessionTouchGen, list: list, flatRows: new Array(80), itemHeight: SESSION_VIRTUAL_ROW_HEIGHT};
+
+list.scrollTop = 0;
+_sessionListLastScrollAt = Date.now();
+_recoverStrandedTouchViewport(list);
+
+const armedCount = timers.filter(t => !t.cancelled).length;
+_sessionListLastScrollAt = 0;
+for (const t of timers) {
+  if (!t.cancelled) { t.cancelled = true; t.fn(); }
+}
+
+console.log(JSON.stringify({
+  armedCount,
+  renderCalls,
+  renderOptsLog,
+}));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["armedCount"] == 1, \
+        f"80-row touch list stranded at the top must arm recovery, got {result}"
+    assert len(result["renderCalls"]) == 1, \
+        f"Repair must render exactly once, got {result}"
+    assert result["renderOptsLog"] == ["force"], \
+        f"Repair render must be forced, got {result}"
+    window = result["renderCalls"][0]
+    assert window["start"] == 0, \
+        f"Re-anchor must move the window start to 0 on an 80-row list, got {window}"
+    assert 0 < window["loaded"] <= 60, \
+        f"Re-anchored window must be a bounded initial batch, got {window}"
+
+
+@_node_tests
+def test_production_real_geometry_visible_rows_do_not_strand():
+    """Inverse of the 80-row case: with the same window bounds but rendered
+    rows actually inside the viewport, real-geometry stranding must be FALSE
+    — the projection fallback's blind spot must not invent work.
+    """
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + """
+function extractFunc(name) {
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = SESSIONS_JS.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = SESSIONS_JS.indexOf('{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < SESSIONS_JS.length) {
+    if (SESSIONS_JS[i] === '{') depth++;
+    else if (SESSIONS_JS[i] === '}') depth--;
+    i++;
+  }
+  return SESSIONS_JS.slice(start, i);
+}
+
+const SESSION_LIST_TOUCH_INTERACTION_IDLE_MS = 1200;
+const SESSION_TOUCH_INITIAL_BATCH = 60;
+const SESSION_TOUCH_BATCH_SIZE = 40;
+const SESSION_VIRTUAL_ROW_HEIGHT = 52;
+const SESSION_VIRTUAL_BUFFER_ROWS = 8;
+const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
+let _sessionTouchGen = 1;
+let _sessionTouchStartIndex = 20;
+let _sessionTouchLoadedCount = 80;
+let _sessionTouchTotalCount = 80;
+let _sessionTouchListEl = null;
+let _touchRenderState = null;
+let _touchBatchPending = false;
+let _touchContinuousBatchOwner = null;
+
+function makeSentinel(display) {
+  return {style: {display: display}, getBoundingClientRect() {
+    return {top: 900, bottom: 940, left: 0, right: 300, width: 300, height: 40};
+  }};
+}
+const list = {
+  scrollTop: 200,
+  clientHeight: 600,
+  getBoundingClientRect() {
+    return {top: 0, bottom: 600, left: 0, right: 300, width: 300, height: 600};
+  },
+  querySelector(sel) {
+    if (sel === '[data-touch-sentinel-top]') return makeSentinel('none');
+    if (sel === '[data-touch-sentinel]') return makeSentinel('none');
+    return null;
+  },
+  querySelectorAll(sel) {
+    if (sel === '.session-item[data-sid]') {
+      // Rows painted across the viewport: first at -100 (clipped above),
+      // through +500. Geometry says the user sees real rows.
+      return Array.from({length: 20}, (_, i) => ({getBoundingClientRect() {
+        return {top: -100 + i*40, bottom: -100 + i*40 + 40, left: 0, right: 300, width: 300, height: 40};
+      }}));
+    }
+    return [];
+  },
+};
+
+const bndStart = extractFunc('_touchStartBoundaryNearViewport');
+const bndLoaded = extractFunc('_touchLoadedBoundaryNearViewport');
+eval(bndStart);
+eval(bndLoaded);
+eval(extractFunc('_touchNextBatchDirection'));
+eval(extractFunc('_sentinelIntersectsViewport'));
+eval(extractFunc('_touchViewportStranding'));
+
+_sessionTouchListEl = list;
+_touchRenderState = {gen: _sessionTouchGen, list: list, flatRows: new Array(80), itemHeight: SESSION_VIRTUAL_ROW_HEIGHT};
+
+const verdict = _touchViewportStranding(list);
+console.log(JSON.stringify(verdict));
+"""
+    result = json.loads(_run_node_vm(source))
+    assert result["stranded"] is False, \
+        f"Rows visible in the viewport must NOT strand, got {result}"

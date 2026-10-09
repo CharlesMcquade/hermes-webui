@@ -8592,31 +8592,54 @@ function _touchViewportStranding(list){
   const listTotal=Number(_sessionTouchTotalCount)||0;
   if(listTotal<=0||loaded<=start) return {stranded:false,direction:''};
   const direction=_touchNextBatchDirection(list, state, 200);
-  if(direction){
-    // A visible directional sentinel means the normal batch path still
-    // covers this position — recovery must not race it.
-    const topSentinel=list.querySelector('[data-touch-sentinel-top]');
-    const bottomSentinel=list.querySelector('[data-touch-sentinel]');
-    if(direction==='up'&&(!topSentinel||topSentinel.style.display!=='none')) return {stranded:false,direction:direction};
-    if(direction==='down'&&(!bottomSentinel||bottomSentinel.style.display!=='none')) return {stranded:false,direction:direction};
-  }
-  // Belt-and-braces: a sentinel actually intersecting the viewport means the
-  // IntersectionObserver path is live at this position regardless of the
-  // scroll-math direction estimate — the machinery owns recovery. A
-  // display:none affordance never intersects (observer cannot fire on it).
-  const topSentinel=list.querySelector('[data-touch-sentinel-top]');
-  if(topSentinel&&topSentinel.style.display!=='none'&&_sentinelIntersectsViewport(list, topSentinel)){
-    return {stranded:false,direction:direction||'up'};
-  }
+  // Directional cross-check: a visible BOTTOM sentinel means the batch path
+  // still covers this position for 'down' — recovery must not race it.
+  // NOTE: there is deliberately NO equivalent veto for a visible TOP sentinel.
+  // The top affordance is the list's first child whenever start>0 and is never
+  // observed by the IntersectionObserver (only the bottom sentinel is), so at
+  // scrollTop=0 it is permanently intersecting while no upward machinery can
+  // actually fire — treating it as "machinery owns recovery" left the sidebar
+  // blank forever (#6426 re-gate, measured: scrollTop 0 and 20 never recover).
   const bottomSentinel=list.querySelector('[data-touch-sentinel]');
-  if(bottomSentinel&&bottomSentinel.style.display!=='none'&&_sentinelIntersectsViewport(list, bottomSentinel)){
-    return {stranded:false,direction:direction||'down'};
+  if(direction==='down'&&bottomSentinel&&bottomSentinel.style.display!=='none'&&_sentinelIntersectsViewport(list, bottomSentinel)){
+    return {stranded:false,direction:direction};
   }
   const scrollTop=Math.max(0, Number(list.scrollTop)||0);
   const itemHeight=Number(state.itemHeight)||SESSION_VIRTUAL_ROW_HEIGHT;
   const viewportRows=Math.max(1, Math.ceil((Number(list.clientHeight)||520)/itemHeight));
   const firstVisible=Math.floor(scrollTop/itemHeight);
   const lastVisible=firstVisible+viewportRows;
+  // REAL GEOMETRY first: the 52px projection ignores the ~38px sentinel and
+  // the per-group date headers, so it reports rows visible that sit far below
+  // the real viewport (measured: first real row at 1106px in a 1049px viewport
+  // while the projection says row 20 is on screen). The stranding verdict is
+  // taken from the first/last RENDERED row rectangles relative to the list
+  // viewport, gated on the missing prefix/suffix bounds; the projection is
+  // only the fallback for harnesses without a layout engine.
+  const renderedRows=list.querySelectorAll&&list.querySelectorAll('.session-item[data-sid]');
+  const firstRow=renderedRows&&renderedRows[0];
+  const lastRow=renderedRows&&renderedRows[renderedRows.length-1];
+  if(firstRow&&lastRow&&typeof firstRow.getBoundingClientRect==='function'&&typeof lastRow.getBoundingClientRect==='function'&&typeof list.getBoundingClientRect==='function'){
+    const listRect=list.getBoundingClientRect();
+    const firstRect=firstRow.getBoundingClientRect();
+    const lastRect=lastRow.getBoundingClientRect();
+    if(listRect&&firstRect&&lastRect&&Number.isFinite(firstRect.top)&&Number.isFinite(lastRect.bottom)){
+      // Missing prefix/suffix bounds gate the direction: with start>0 the
+      // blank space can only be ABOVE the window (upward), with loaded<total
+      // only BELOW it (downward). A viewport showing no rendered row on that
+      // side means stranded.
+      const prefixMissing=start>0;
+      const suffixMissing=loaded<listTotal;
+      const strandedAbove=prefixMissing&&firstRect.top>=listRect.bottom;
+      const strandedBelow=suffixMissing&&lastRect.bottom<=listRect.top;
+      if(strandedAbove||strandedBelow){
+        // Recovery re-anchors around the projected first visible row; keep
+        // the projection ONLY for the re-anchor index, not the verdict.
+        return {stranded:true,direction:strandedAbove?'up':'down',firstVisible:firstVisible};
+      }
+      return {stranded:false,direction:'',firstVisible:firstVisible};
+    }
+  }
   const strandedAbove=lastVisible<=start;
   const strandedBelow=firstVisible>=loaded;
   return {stranded:strandedAbove||strandedBelow,direction:direction,firstVisible:firstVisible};
@@ -8668,7 +8691,12 @@ function _scheduleSessionVirtualizedRender(){
   // rebuild the whole DOM on every scroll tick. Without this guard, the
   // unconditional scroll listener (attached for any list) caused
   // user-facing scroll jumps on small lists. (#1669 follow-up)
-  if(total>0&&total<=SESSION_VIRTUAL_THRESHOLD_ROWS) return;
+  // Touch-primary devices are EXEMPT: touch batching starts at
+  // SESSION_TOUCH_INITIAL_BATCH (60) rows, below this 80-row threshold, so an
+  // 61–80-session touch list runs the real batch machinery and CAN strand
+  // (deep-active window [20,80) jumped to scrollTop=0). Falling through to
+  // the touch branch here is what lets its stranded-viewport recovery run.
+  if(!_isTouchPrimary()&&total>0&&total<=SESSION_VIRTUAL_THRESHOLD_ROWS) return;
   // On touch-primary devices, use incremental batched rendering: the
   // IntersectionObserver on the sentinel div handles appending more rows.
   // No innerHTML wipe happens during scroll — only after scroll settles.
