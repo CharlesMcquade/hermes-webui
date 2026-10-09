@@ -448,3 +448,334 @@ def test_hidden_predicate_unchanged():
     assert is_hidden_transcript_row({"_source": "delegation_wakeup"})
     assert not is_hidden_transcript_row({"_source": "webui"})
     assert not is_hidden_transcript_row({})
+
+
+# ── Round-3 must-fix 1: carrier ambiguity rejects earlier id-less match ────
+
+
+def test_retry_undo_merged_carrier_rejects_earlier_id_less_match():
+    """After manual compression merges a summary into the latest user row
+    (merged carrier), a repeated prompt ("continue") leaves several id-less
+    same-text candidates. Selecting the newest turn must NOT cut at an
+    earlier id-less occurrence: the text-only match is rejected (None) and
+    the caller's last-user fallback cuts at the carrier — keeping the rows
+    master keeps."""
+    from api.session_ops import (
+        _truncate_context_before_row,
+        _context_prefix_before_last_user,
+    )
+
+    context = [
+        {"role": "user", "content": "old question", "timestamp": 1781024000.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 1781024000.5},
+        # Earlier id-less same-text occurrence (sanitized compression copy).
+        {"role": "user", "content": "continue", "timestamp": 1781024001.0},
+        {"role": "assistant", "content": "step 1 done", "timestamp": 1781024001.5},
+        # Merged carrier: live 'continue' text + summary + delimiter suffix.
+        {
+            "role": "user",
+            "content": (
+                "[PRIOR CONTEXT — for reference only; not a new message] continue\n\n"
+                "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]\nsummary body…"
+            ),
+            "timestamp": 1791568650.9,
+        },
+        {"role": "assistant", "content": "step 3 done", "timestamp": 1781024003.5},
+    ]
+    target = {"role": "user", "content": "continue", "timestamp": 1781024006.0}
+
+    result = _truncate_context_before_row(context, target)
+    assert result is None, (
+        "the earlier id-less occurrence must be rejected when a newer merged "
+        f"carrier makes the identity ambiguous, got cut@{len(result) if result is not None else None}"
+    )
+    # Caller fallback: cut before the context's own last user row — master
+    # parity (keeps the 4 rows before the carrier).
+    fallback = _context_prefix_before_last_user(context)
+    assert len(fallback) == 4
+    assert [str(m.get("content", ""))[:30] for m in fallback] == [
+        "old question",
+        "old answer",
+        "continue",
+        "step 1 done",
+    ]
+
+
+def test_retry_undo_carrier_shape_still_matches_without_carrier():
+    """Control for the ambiguity fix: the SAME id-less content match still
+    cuts when NO merged carrier exists in the context (the round-2
+    sanitized-compression fix must keep working)."""
+    from api.session_ops import _truncate_context_before_row
+
+    context = [
+        {"role": "user", "content": "old question", "timestamp": 1781024000.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 1781024001.0},
+        {"role": "user", "content": "real question", "timestamp": 1781024002.0},
+        {
+            "role": "user",
+            "content": "[ASYNC DELEGATION COMPLETE d2] internal handoff",
+            "timestamp": 1781024003.0,
+            "_source": "delegation_wakeup",
+        },
+        {"role": "assistant", "content": "child result summary", "timestamp": 1781024004.0},
+    ]
+    target = {"role": "user", "content": "real question", "timestamp": 1002.0}
+    result = _truncate_context_before_row(context, target)
+    assert result is not None
+    assert [m["content"] for m in result] == ["old question", "old answer"]
+
+
+def test_retry_undo_carrier_rows_after_carrier_still_match():
+    """A plain id-less copy AFTER the newest carrier is unambiguous: the
+    carrier's summary only quotes compressed-away turns, so a later row that
+    survived compression is provably the selected turn."""
+    from api.session_ops import _truncate_context_before_row
+
+    context = [
+        {
+            "role": "user",
+            "content": (
+                "[PRIOR CONTEXT — for reference only; not a new message] continue\n\n"
+                "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]\nsummary body…"
+            ),
+            "timestamp": 1791568650.9,
+        },
+        {"role": "assistant", "content": "step 3 done", "timestamp": 1781024003.5},
+        # The selected turn survived compression AFTER the carrier.
+        {"role": "user", "content": "continue", "timestamp": 1781024006.0},
+        {"role": "assistant", "content": "step 4 done", "timestamp": 1781024006.5},
+    ]
+    target = {"role": "user", "content": "continue", "timestamp": 1781024006.0}
+    result = _truncate_context_before_row(context, target)
+    assert result is not None
+    assert len(result) == 2
+
+
+def test_real_compressor_round2_context_cuts_at_tail_copy():
+    """Production-composed: run the REAL Agent ContextCompressor over a
+    repeated-prompt transcript (the exact context shape after manual
+    compression) and retry the newest prompt. The matcher must cut before
+    the tail copy — master parity — never at the carrier or an earlier
+    occurrence."""
+    compressor = pytest.importorskip("agent.context_compressor")
+    from api.session_ops import (
+        _truncate_context_before_row,
+        _context_prefix_before_last_user,
+    )
+    from api.streaming import _sanitize_messages_for_api, _stamp_missing_message_timestamps
+    import copy as copymod
+
+    ContextCompressor = compressor.ContextCompressor
+    messages = [
+        {"role": "user", "content": "old question", "timestamp": 1781024000.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 1781024000.5},
+        {"role": "user", "content": "continue", "timestamp": 1781024001.0},
+        {"role": "assistant", "content": "step 1 done", "timestamp": 1781024001.5},
+        {"role": "user", "content": "continue", "timestamp": 1781024002.0},
+        {"role": "assistant", "content": "step 2 done", "timestamp": 1781024002.5},
+        {"role": "user", "content": "continue", "timestamp": 1781024003.0},
+        {"role": "assistant", "content": "step 3 done", "timestamp": 1781024003.5},
+        {"role": "user", "content": "continue", "timestamp": 1781024004.0},
+        {"role": "assistant", "content": "step 4 done", "timestamp": 1781024004.5},
+    ]
+    original = _sanitize_messages_for_api(messages)
+    cc = ContextCompressor(
+        model="gpt-4o-mini", quiet_mode=True, protect_last_n=2, protect_first_n=2,
+    )
+    compressed = cc.compress(original, current_tokens=100000)
+    context = copymod.deepcopy(compressed)
+    _stamp_missing_message_timestamps(context)
+    # The compression must have produced a merged/standalone summary carrier
+    # for this fixture to exercise the ambiguity path.
+    assert any(
+        m.get("role") == "user" and m.get("_compressed_summary") for m in context
+    ), "fixture expects a summary carrier; compressor output changed"
+
+    target = {"role": "user", "content": "continue", "timestamp": 1781024004.0}
+    result = _truncate_context_before_row(context, target)
+    fallback = _context_prefix_before_last_user(context)
+    assert result is None or len(result) == len(fallback), (
+        "retry of the newest prompt must cut at (or after) the last user row — "
+        f"matcher cut@{len(result) if result is not None else None}, "
+        f"fallback cut@{len(fallback)}"
+    )
+
+
+# ── Round-3 must-fix 2: eager-save wakeup undercount ───────────────────────
+
+
+def test_overlay_eager_wakeup_reply_counts_reconciled_rows(tmp_path, monkeypatch):
+    """Eager-save mode: the sidecar already contains AND excludes the hidden
+    wakeup user row; when the assistant reply lands in state.db while the
+    turn is pending, the overlay must NOT subtract the wakeup again. The
+    visible total must come from the reconciled, provenance-stamped rows."""
+    import sqlite3
+    from collections import OrderedDict
+
+    import api.config as config
+    import api.models as models
+    import api.profiles as profiles
+
+    sid = "eagerwake7882"
+    # Isolated session store + state.db so the reconciled reader sees the
+    # test's rows, not the host's.
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path, raising=False)
+    session_dir = tmp_path / "sessions"
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(config, "SESSION_INDEX_FILE", session_dir / "_index.json", raising=False)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json", raising=False)
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict(), raising=False)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path, raising=False)
+    state_db_path = tmp_path / "state.db"
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: state_db_path, raising=False)
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(state_db_path)
+    conn.execute(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, started_at REAL, message_count INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, timestamp REAL, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, title, model, started_at, message_count) VALUES (?, 'webui', 'Eager wake', 'test-model', 1000.0, 4)",
+        (sid,),
+    )
+    # state.db holds the sidecar's 3 rows PLUS the visible assistant reply
+    # that landed while the wakeup turn is still pending (raw 4).
+    for row in (
+        ("user", "q1", 1781024000.0),
+        ("assistant", "a1", 1781024000.5),
+        # The wakeup row the Agent core appended as a PLAIN user row.
+        ("user", "[ASYNC DELEGATION COMPLETE d5] handoff", 1781024001.0),
+        ("assistant", "child reply", 1781024002.0),
+    ):
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            (sid, row[0], row[1], row[2]),
+        )
+    conn.commit()
+    conn.close()
+
+    sidecar = models.Session(
+        session_id=sid,
+        title="Eager wake",
+        workspace=str(tmp_path),
+        messages=[
+            {"role": "user", "content": "q1", "timestamp": 1781024000.0},
+            {"role": "assistant", "content": "a1", "timestamp": 1781024000.5},
+            # The hidden wakeup row the eager checkpoint persisted.
+            {
+                "role": "user",
+                "content": "[ASYNC DELEGATION COMPLETE d5] handoff",
+                "timestamp": 1781024001.0,
+                "_source": "delegation_wakeup",
+            },
+        ],
+        pending_user_message="[ASYNC DELEGATION COMPLETE d5] handoff",
+        pending_user_source="delegation_wakeup",
+        pending_started_at=1781024001.0,
+    )
+    # Persist + reload so the overlay reads the same metadata-prefix visible
+    # count the sidebar poll sees: raw 3, visible 2 (wakeup excluded).
+    sidecar.save()
+    reloaded = models.Session.load(sid)
+    compact = reloaded.compact(include_runtime=True)
+    assert compact["message_count"] == 3
+    assert compact["visible_message_count"] == 2
+    sessions = [dict(compact)]
+    # The bot's shape: state.db grows by ONE VISIBLE assistant reply while
+    # the wakeup turn is still pending (raw 3 -> 4). The old arithmetic
+    # subtracted hidden_pending_delta=1 from that delta and reported visible
+    # 2 — treating the visible reply as the hidden row. last_message_at
+    # must also advance (the overlay's anti-resurrection guard requires a
+    # strictly newer state.db row), which is exactly what a fresh append
+    # does in production.
+    metadata = {
+        sid: {
+            "_state_db_source": "webui",
+            "_state_db_message_count": 4,
+            "_state_db_last_message_at": 1891569499.5,
+        }
+    }
+    models._apply_sidebar_state_db_override_metadata(sessions, metadata)
+
+    assert sessions[0]["message_count"] == 4
+    # Reconciled rows: 3 visible (q1, a1, child reply) — the old delta
+    # arithmetic reported 2.
+    assert sessions[0]["visible_message_count"] == 3, (
+        f"eager wakeup reply must count reconciled visible rows (3), "
+        f"got {sessions[0]['visible_message_count']}"
+    )
+
+
+# ── Round-3 must-fix 3: localVisible counts tool rows ──────────────────────
+
+
+@_node_tests
+def test_local_send_visible_count_includes_tool_rows():
+    """The server's visible count includes tool rows; localVisible must use
+    the same definition or a send in a conversation with tool results
+    reports 4 msgs where master shows 5 (Chromium repro at 1280/390px)."""
+    start = SESSIONS_SRC.index("function upsertActiveSessionForLocalTurn")
+    end = SESSIONS_SRC.index("function _sessionRowsWithActiveEphemeralSession", start)
+    body = SESSIONS_SRC[start:end]
+    source = (
+        "const SESSIONS_JS = " + repr(SESSIONS_SRC) + ";\n"
+        + r"""
+function extractFunc(name) {
+  const start = SESSIONS_JS.indexOf('function ' + name + '(');
+  if (start < 0) throw Error(name + ' missing');
+  let i = SESSIONS_JS.indexOf('{', start) + 1, depth = 1;
+  while (depth && i < SESSIONS_JS.length) {
+    if (SESSIONS_JS[i] === '{') depth++;
+    else if (SESSIONS_JS[i] === '}') depth--;
+    i++;
+  }
+  return SESSIONS_JS.slice(start, i);
+}
+
+const S = {
+  session: {
+    session_id: 'sid-7882-tools',
+    title: 'Tool chat',
+    message_count: 5,             // server raw total
+    visible_message_count: 4,     // server visible total (includes tool rows)
+  },
+  messages: [
+    {role: 'user', content: 'q1'},
+    {role: 'assistant', content: 'thinking', tool_calls: [{id: 't1'}]},
+    {role: 'tool', content: 'tool result', tool_call_id: 't1'},
+    {role: 'assistant', content: 'a1'},
+    // The optimistic send row is added by send() BEFORE the updater runs.
+    {role: 'user', content: 'my new question'},
+  ],
+  activeProfile: 'default',
+};
+const _allSessions = [];
+const t = (k) => k;
+function renderSessionListFromCache() {}
+function closeSessionActionMenu() {}
+const document = {createElement: () => ({style: {}, dataset: {}})};
+
+"""
+        + body
+        + r"""
+
+upsertActiveSessionForLocalTurn({messageCount: 6});
+
+console.log(JSON.stringify({
+  raw: S.session.message_count,
+  visible: S.session.visible_message_count,
+}));
+"""
+    )
+    result = json.loads(_run_node_vm(source))
+    assert result["raw"] == 6
+    # 4 server-visible rows + the send = 5. The old tool-row exclusion
+    # reported 4 (server said 5).
+    assert result["visible"] == 5, (
+        "localVisible must count tool rows like the server does "
+        f"(4 visible + 1 send = 5), got {result}"
+    )

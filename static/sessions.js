@@ -8288,7 +8288,13 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
   // present in S.messages adds nothing; a fresh optimistic turn adds exactly
   // one visible row. Hidden delegation rows are the only messages that don't
   // render, and those never originate from a local send.
-  const localVisible=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m.role!=='tool'&&m._source!=='delegation_wakeup').length;
+  // #7882 re-gate round-3 must-fix 3: the server's visible count includes
+  // tool rows (only hidden delegation wakeups are excluded), so localVisible
+  // must use the same definition — counting tool rows too — or a send in a
+  // conversation with tool results reports 4 msgs where master shows 5. Keep
+  // the idempotent derivation (no cached-scalar increment) and the
+  // delegation-wakeup exclusion.
+  const localVisible=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
   S.session.message_count=count;
   // #7882 re-gate should-fix 4 / round-2 finding: the topbar and sidebar
   // prefer the visible count. Promote ONLY the local-transcript authority:

@@ -7837,16 +7837,35 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
                     pending_source = str(
                         session.get('pending_user_source') or ''
                     ).strip().lower()
-                    # The outer guard already ensures state_count > current_count.
-                    hidden_pending_delta = 1 if pending_source == 'delegation_wakeup' else 0
-                    session['visible_message_count'] = min(
-                        state_count,
-                        max(
-                            current_visible,
-                            current_visible
-                            + max(0, state_count - current_count - hidden_pending_delta),
-                        ),
+                    # #7882 re-gate round-3 must-fix 2: derive the visible
+                    # total from the reconciled, provenance-stamped rows for
+                    # the owning profile instead of delta arithmetic. The
+                    # raw-delta bump cannot distinguish WHICH new state.db
+                    # row is hidden: in eager-save mode the sidecar already
+                    # contains AND excludes the hidden wakeup user row, so
+                    # subtracting the pending hidden row again when the
+                    # assistant reply lands undercounts (visible 3 where the
+                    # reconciled transcript has 4). The reconciled walk is
+                    # the same authority the full save uses; the raw delta
+                    # remains the fallback when rows can't be read.
+                    reconciled_visible = _reconciled_visible_count_for_sidebar(
+                        session.get('session_id')
                     )
+                    if reconciled_visible is not None:
+                        session['visible_message_count'] = min(
+                            state_count, max(current_visible, reconciled_visible)
+                        )
+                    else:
+                        # The outer guard already ensures state_count > current_count.
+                        hidden_pending_delta = 1 if pending_source == 'delegation_wakeup' else 0
+                        session['visible_message_count'] = min(
+                            state_count,
+                            max(
+                                current_visible,
+                                current_visible
+                                + max(0, state_count - current_count - hidden_pending_delta),
+                            ),
+                        )
                 if state_last > 0:
                     session['last_message_at'] = max(float(session.get('last_message_at') or 0), state_last)
                     session['updated_at'] = max(float(session.get('updated_at') or 0), state_last)
@@ -11450,6 +11469,80 @@ def get_state_db_regeneration_tail_snapshot(
             }
     except Exception:
         return None
+
+
+def _reconciled_visible_count_for_sidebar(sid) -> int | None:
+    """Count visible rows in the reconciled sidecar+state.db transcript.
+
+    The sidebar growth overlay's authority for ``visible_message_count``
+    (#7882 re-gate round-3 must-fix 2): provenance-stamped reconciliation is
+    what the full save re-walks, so it is what the overlay must report. The
+    sidecar's own transcript already carries the hidden-row ``_source``
+    stamps (eager checkpoint) and its metadata prefix excludes hidden rows;
+    state.db rows appended past the sidecar arrive as plain user rows whose
+    provenance rides the session's pending fields.
+
+    Merges the sidecar's stamped transcript with freshly-read state.db rows
+    (pending provenance stamped exactly like the display path), then counts
+    non-hidden rows. Returns None when either source can't be read so the
+    caller falls back to the raw-delta arithmetic.
+
+    Bounded work: one metadata-only sidecar load + one state.db read for the
+    single session being overlaid (the growth guard already limits this to
+    rows whose count actually advanced), not a full transcript walk per
+    sidebar poll.
+    """
+    if not sid:
+        return None
+    try:
+        session = Session.load_metadata_only(str(sid))
+    except Exception:
+        session = None
+    if session is None or getattr(session, '_loaded_metadata_only', False):
+        # Metadata-only stubs carry messages=[] by contract; the sidecar
+        # transcript needs a full load (bounded to this one session).
+        try:
+            session = Session.load(str(sid))
+        except Exception:
+            return None
+    if session is None:
+        return None
+    try:
+        sidecar_messages = list(getattr(session, 'messages', None) or [])
+    except Exception:
+        return None
+    try:
+        state_messages = get_state_db_session_messages(
+            str(sid),
+            profile=getattr(session, 'profile', None),
+        )
+    except Exception:
+        state_messages = None
+    if not isinstance(state_messages, list):
+        state_messages = []
+    if not sidecar_messages and not state_messages:
+        return None
+    try:
+        stamped = _stamp_pending_source_for_display(session, state_messages)
+    except Exception:
+        stamped = state_messages
+    try:
+        merged = merge_session_messages_append_only(
+            sidecar_messages,
+            stamped,
+            truncation_watermark=getattr(session, 'truncation_watermark', None),
+            truncation_boundary=getattr(session, 'truncation_boundary', None),
+        )
+    except Exception:
+        # Merge failure: fall back to counting the sidecar's own stamped rows
+        # (always provenance-stamped on modern sidecars).
+        merged = sidecar_messages
+    if not merged:
+        return None
+    return sum(
+        1 for m in merged
+        if isinstance(m, dict) and not is_hidden_transcript_row(m)
+    )
 
 
 def get_state_db_session_summary(sid, *, profile=None) -> dict:

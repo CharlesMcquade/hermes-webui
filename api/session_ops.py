@@ -606,6 +606,35 @@ def mark_session_title_generated(session) -> None:
     session.manual_title = False
 
 
+_MERGED_SUMMARY_DELIMITER = "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]"
+
+
+def _is_merged_compression_carrier(row):
+    """True when a user row is a merged compression carrier.
+
+    The Agent compressor folds a summary into a retained user row when role
+    alternation demands it: the row's content keeps the live text, then the
+    merged-prior-context header, the summary body, and the delimiter suffix
+    ("[PRIOR CONTEXT — for reference only…]…[END OF PRIOR CONTEXT — COMPACTION
+    SUMMARY BELOW]…"). Content-equality matching against such a row is
+    meaningless (the live text rides inside a much larger blob), and its
+    presence makes earlier id-less rows identity-ambiguous.
+    """
+    if not isinstance(row, dict) or row.get('role') != 'user':
+        return False
+    if row.get('_compressed_summary'):
+        return True
+    content = row.get('content')
+    text = content if isinstance(content, str) else ''
+    if not text and isinstance(content, list):
+        text = ' '.join(
+            str(p.get('text') or p.get('content') or '')
+            for p in content
+            if isinstance(p, dict)
+        )
+    return _MERGED_SUMMARY_DELIMITER in text
+
+
 def _truncate_context_before_row(context_messages, target_row):
     """Cut model context before the exact canonical identity of ``target_row``.
 
@@ -630,7 +659,14 @@ def _truncate_context_before_row(context_messages, target_row):
     sanitize key set drops both, and the writeback re-stamps fresh
     wall-clock times), so content is the only surviving identity and a
     content match is accepted even when timestamps disagree (#7882 re-gate
-    must-fix 1).
+    must-fix 1) — EXCEPT when a merged compression carrier makes the
+    identity ambiguous (#7882 re-gate round-3 must-fix 1): when a newer
+    merged carrier exists, a text-only match against an EARLIER id-less
+    row is rejected (return None) so the caller's last-user fallback
+    applies. The carrier folds the selected turn's text into the latest
+    user row ("[PRIOR CONTEXT…|continue|END OF PRIOR CONTEXT…]"), so a
+    repeated prompt ("continue") leaves several id-less same-text
+    candidates and the earlier one would cut away rows master keeps.
     """
     history = context_messages if isinstance(context_messages, list) else []
     if not isinstance(target_row, dict):
@@ -638,6 +674,25 @@ def _truncate_context_before_row(context_messages, target_row):
     target_text = _extract_text(target_row.get('content', ''))
     target_id = target_row.get('id') or target_row.get('message_id')
     target_ts = target_row.get('timestamp')
+    # Locate the newest merged compression carrier (a user row that folded a
+    # summary into retained content — the delimiter suffix marks it). When one
+    # exists, every id-less row BEFORE it is identity-ambiguous: the carrier
+    # carries the selected turn's text inside its merged prior-content, and
+    # manual-compression copies are id-less, so content cannot distinguish
+    # "the selected turn" from "an earlier same-text turn the summary quoted".
+    # Repeated prompts ("continue") hit exactly this shape; picking the earlier
+    # occurrence drops retained rows master keeps. The id/veto paths below are
+    # unaffected (an id match is proof, not an inference).
+    newest_merged_carrier_idx = None
+    for j in range(len(history) - 1, -1, -1):
+        row_j = history[j]
+        if (
+            isinstance(row_j, dict)
+            and row_j.get('role') == 'user'
+            and _is_merged_compression_carrier(row_j)
+        ):
+            newest_merged_carrier_idx = j
+            break
     for i in range(len(history) - 1, -1, -1):
         row = history[i]
         if not isinstance(row, dict) or row.get('role') != 'user':
@@ -654,6 +709,17 @@ def _truncate_context_before_row(context_messages, target_row):
             # must-fix 1): content is the only surviving identity; the fresh
             # re-stamped timestamp must not veto the match. The different-id
             # veto above still applies whenever BOTH rows carry ids.
+            #
+            # Round-3 must-fix 1: with a newer merged carrier in the context,
+            # this text-only match is ambiguous (the carrier may quote the
+            # same text and the sanitized copy may be an EARLIER turn, not
+            # the selected one). Reject so the caller's last-user fallback
+            # cuts at the carrier instead of dropping retained history.
+            if (
+                newest_merged_carrier_idx is not None
+                and i < newest_merged_carrier_idx
+            ):
+                return None
             return history[:i]
         row_ts = row.get('timestamp')
         if target_ts is not None and row_ts is not None:
