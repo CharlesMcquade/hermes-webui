@@ -5926,3 +5926,42 @@ console.log(JSON.stringify(result));
     assert result["viewportAnchor2"] == result["viewportAnchorBefore"], \
         f"Viewport anchor must be preserved across second prepend: " \
         f"before={result['viewportAnchorBefore']}, after={result['viewportAnchor2']}"
+
+
+# ── In-row badge toggles bypass the touch-scroll cooldown ──────────────────
+#
+# The date-group header toggle already calls renderSessionListFromCache({force:true})
+# for exactly this reason (its comment cites the 1.2s cooldown). The row-badge
+# toggles — fork/child count and lineage segment count — are equally direct
+# user actions: a tap within SESSION_LIST_TOUCH_INTERACTION_IDLE_MS of a list
+# scroll otherwise lands on the deferred path, the row keeps its old (collapsed)
+# DOM, and the tap looks dead until the deferred timer fires ~1.2s later.
+# CI caught this: the project-picker keyboard gate's "tall anchor, long list"
+# cases scroll the list, click the child-count toggle, and immediately measure
+# the row height — a deferred render left it at 37px instead of ≥132px.
+
+
+def test_child_count_toggle_render_bypasses_touch_cooldown():
+    """The fork/child-count badge toggle must force its re-render."""
+    fn = _extract_fn(SESSIONS_JS, "renderSessionListFromCache")  # sanity: guard present
+    assert "_isSessionListTouchScrolling()" in fn
+    toggle = (
+        SESSIONS_JS[SESSIONS_JS.index("childCountEl.onclick="):]
+        .split("titleRow.appendChild(childCountEl)")[0]
+    )
+    assert "renderSessionListFromCache({force:true})" in toggle, (
+        "child-count toggle must call renderSessionListFromCache({force:true}) — "
+        "a tap within the 1200ms touch cooldown otherwise defers the render "
+        "and the expanded row never appears"
+    )
+
+
+def test_lineage_segment_toggle_render_bypasses_touch_cooldown():
+    """The lineage segment-count badge toggle must force its re-render."""
+    toggle = (
+        SESSIONS_JS[SESSIONS_JS.index("const toggleLineageSegments="):]
+        .split("segmentCountEl.onclick=toggleLineageSegments")[0]
+    )
+    assert "renderSessionListFromCache({force:true})" in toggle, (
+        "lineage segment toggle must call renderSessionListFromCache({force:true})"
+    )
