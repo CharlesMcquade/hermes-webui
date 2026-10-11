@@ -11864,7 +11864,11 @@ function renderSessionListFromCache(){
             _expandedLineageKeys.add(lineageKey);
             if(needsLineageReport) _fetchLineageReportForRow(s,lineageKey).then(()=>_repaintSidebarForBackgroundChurn());
           }
-          renderSessionListFromCache();
+          // Direct user action on a row badge: force bypasses the
+          // touch-scroll cooldown (see the child-count toggle — a tap within
+          // 1200ms of a scroll otherwise defers the render and the badge
+          // looks dead). Same contract as the date-group header toggle.
+          renderSessionListFromCache({force:true});
         };
         segmentCountEl.onclick=toggleLineageSegments;
         segmentCountEl.onkeydown=(e)=>{
@@ -11889,7 +11893,12 @@ function renderSessionListFromCache(){
         const key=_sidebarLineageKeyForRow(s);
         if(_expandedChildSessionKeys.has(key)) _expandedChildSessionKeys.delete(key);
         else _expandedChildSessionKeys.add(key);
-        renderSessionListFromCache();
+        // Direct user action on a row badge: force bypasses the touch-scroll
+        // cooldown. Without force, a tap within SESSION_LIST_TOUCH_INTERACTION_IDLE_MS
+        // (1200ms) of a list scroll defers this render and the row stays
+        // collapsed until the deferred timer fires — the tap looks dead.
+        // Same contract as the date-group header toggle above.
+        renderSessionListFromCache({force:true});
       };
       titleRow.appendChild(childCountEl);
     }
