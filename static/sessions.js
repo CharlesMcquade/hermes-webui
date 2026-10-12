@@ -5568,14 +5568,19 @@ function _wireSessionNewTabListeners(node, getSid, getSession, opts){
 function toggleSessionSelectMode(){
   _sessionSelectMode=!_sessionSelectMode;
   _selectedSessions.clear();
-  renderSessionListFromCache();
+  // #6426 SHOULD-FIX: the mode flips immediately, but a touch-cooldown
+  // deferred render would leave the checkboxes showing the OPPOSITE state
+  // until the cooldown expires — Select looks unresponsive right after a
+  // touch scroll. Force the render so the chrome matches the mode now.
+  renderSessionListFromCache({force:true});
 }
 function exitSessionSelectMode(){
   _sessionSelectMode=false;
   _selectedSessions.clear();
   const bar=$('batchActionBar');
   if(bar) bar.style.display='none';
-  renderSessionListFromCache();
+  // #6426 SHOULD-FIX: same immediate-chrome rule as toggleSessionSelectMode.
+  renderSessionListFromCache({force:true});
 }
 function toggleSessionSelect(sid){
   if(_selectedSessions.has(sid)) _selectedSessions.delete(sid);
@@ -6264,7 +6269,11 @@ function _openSessionActionMenu(session, anchorEl){
         const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
         if(cached) cached.pinned=newPinned;
         if(S.session&&S.session.session_id===session.session_id) S.session.pinned=newPinned;
-        renderSessionListFromCache();
+        // #6426 SHOULD-FIX: the pin landed on the server; a touch-cooldown
+        // deferred render would show the stale pin state for up to ~1.25s.
+        // Force the cache render so the row chrome updates immediately (the
+        // server re-fetch below still reconciles order/grouping).
+        renderSessionListFromCache({force:true});
         void renderSessionList();
       }catch(err){
         showToast(t('session_pin_failed')+err.message);
@@ -6912,15 +6921,31 @@ function _touchLoadedBoundaryNearViewport(list, state, lookahead){
       // to the list container. The viewport bottom is listRect.height.
       // Trigger when the loaded boundary is within `margin` of the viewport
       // bottom (or already above it — rows scrolled past).
+      // #6426 re-gate MUST-FIX (deep jumps): the trigger used to be one-sided
+      // — `loadedBottom<=viewportBottom+margin` accepted an arbitrarily NEGATIVE
+      // loadedBottom, so a jump to the bottom of a 1,500-row list let the
+      // continuous owner chain 40-row appends from [0,60) at ~15ms/row
+      // (14.5s of blank "Loading more…" at 1,000 rows) while stranded-viewport
+      // recovery stood down because the owner was set. Bound the distance the
+      // continuous chain may bridge: once the loaded boundary is more than two
+      // viewports above the viewport bottom, the incremental path is the wrong
+      // tool — return false so the chain never arms and the bounded
+      // stranded-viewport re-anchor owns the repair (verified in Chromium:
+      // bounded recovery to 60 rows on tablet and phone).
       const loadedBottom=rowRect.bottom-listRect.top;
       const viewportBottom=listRect.height;
-      return loadedBottom<=viewportBottom+margin;
+      return loadedBottom>=-(2*viewportHeight)&&loadedBottom<=viewportBottom+margin;
     }
   }
   // Projection fallback: use the stored itemHeight (or 52px default).
   const itemHeight=Math.max(1, Number(state.itemHeight)||SESSION_VIRTUAL_ROW_HEIGHT);
   const loadedBoundary=loaded*itemHeight;
-  return (loadedBoundary-scrollTop-viewportHeight)<=margin;
+  // Same two-sided bound as the geometry path above (#6426 MUST-FIX): a
+  // boundary far ABOVE the viewport (large positive distance) means a deep
+  // jump — the incremental chain must not bridge it; the stranded-viewport
+  // re-anchor owns that repair.
+  return (loadedBoundary-scrollTop-viewportHeight)<=margin
+    &&(loadedBoundary-scrollTop-viewportHeight)>=-(2*viewportHeight);
 }
 
 function _touchStartBoundaryNearViewport(list, state, lookahead){
