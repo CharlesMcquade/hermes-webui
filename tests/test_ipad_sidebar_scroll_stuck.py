@@ -4349,7 +4349,12 @@ global.IntersectionObserver = window.IntersectionObserver;
 
 const list = makeList();
 list.scrollHeight = 20000;
-list.scrollTop = 19500; // near bottom: 20000-19500-800 = -300 < 200
+// Trigger position must be reachable WITHOUT a deep jump (round-5 MUST-FIX):
+// the loaded boundary (60 rows × 52px = 3120) is 120px below the viewport
+// bottom at scrollTop=2200 — within viewportBottom(800)+margin(200). The
+// old 19500-of-20000 position is deep-jump geometry the bounded re-anchor
+// now owns, so this coalescing test chains from a near-boundary position.
+list.scrollTop = 2200; // 3120 - 2200 - 800 = 120 <= 200 → near loaded boundary
 list.clientHeight = 800;
 
 const flatRows = {json.dumps(flat_rows)};
@@ -4521,7 +4526,17 @@ global.IntersectionObserver = window.IntersectionObserver;
 
 const list = makeList();
 list.scrollHeight = 20000;
-list.scrollTop = 19500; // near bottom: 20000-19500-800 = -300 < 200
+// Trigger position must be reachable WITHOUT a deep jump, AND coherent with
+// the mock's projection geometry (makeList items have no getBoundingClientRect,
+// so the boundary helper falls back to loaded*itemHeight): the positive
+// control runs at loaded=60 → boundary 3120; at scrollTop=2200 the boundary
+// sits 3120−2200−800 = 120px from the viewport bottom — within margin(200)
+// and above the two-viewport deep-jump floor. The old 19500-of-20000 position
+// was deep-jump geometry (the round-5 MUST-FIX hands it to the bounded
+// re-anchor), so the fixture chains from a legitimately near-boundary
+// position; scenario re-setups that run at loaded=100 re-anchor scrollTop to
+// 4400 to stay inside that window's near-boundary band.
+list.scrollTop = 2200; // 3120 - 2200 - 800 = 120 <= 200 → near loaded boundary (loaded=60)
 list.clientHeight = 800;
 
 const flatRows = {json.dumps(flat_rows)};
@@ -4682,7 +4697,7 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
 
   // ── 3. Owner/list replacement AFTER RAF drains → no append ──
   // Reset geometry to near-bottom for this scenario.
-  list.scrollTop = 19500;
+  list.scrollTop = 4400; // near loaded boundary: 5200 - 4400 - 800 = 0 <= 200
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   const ownerBeforeReplace = _touchScrollOwner;
   appendCount = 0;
@@ -4717,7 +4732,7 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   // _appendTouchBatch, so we can attribute the append to the newer schedule
   // (not the stale one). We then re-setup to loaded=140 to restore the
   // postcondition expected by subsequent scenarios.
-  list.scrollTop = 19500;
+  list.scrollTop = 4400; // near loaded boundary: 5200 - 4400 - 800 = 0 <= 200
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   const staleOwner4 = _touchScrollOwner;
   const tokenBefore4 = _touchBatchToken;
@@ -4798,7 +4813,7 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   // Start with loaded=100, total=140 (so the RAF passes l<t and queues the
   // Promise). Then advance loaded to equal total BEFORE microtasks drain —
   // the microtask's l2>=t2 check fails.
-  list.scrollTop = 19500;
+  list.scrollTop = 4400; // near loaded boundary: 5200 - 4400 - 800 = 0 <= 200
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   appendCount = 0;
   const snap5 = snapshotLiveTree();
@@ -4828,7 +4843,7 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   // capture token6 AFTER the RAF drains but BEFORE the mutator runs, so the
   // invariant is: the MUTATOR does not change token, gen, list, or loaded —
   // only _touchScrollOwner.
-  list.scrollTop = 19500;
+  list.scrollTop = 4400; // near loaded boundary: 5200 - 4400 - 800 = 0 <= 200
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   appendCount = 0;
   const ownerBefore6 = _touchScrollOwner;
@@ -4867,7 +4882,14 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
     replacementOwnerRetained: _touchScrollOwner === replacementOwner6,
     replacementOwnerUntouched: replacementOwner6.gen === gen6 && replacementOwner6.list === list6 && replacementOwner6.token === token6,
     // Geometry, token, loaded/total remain as intended:
-    geometryValid: list.scrollHeight - list.scrollTop - list.clientHeight < 200,
+    // Oracle mirrors the production two-sided near-boundary band under the
+    // mock's projection geometry (loaded=100 → boundary 5200; viewport 800):
+    // scrollTop 4400 → 5200-4400-800 = 0, inside margin(200) and above the
+    // two-viewport deep-jump floor. The old scrollHeight-based check
+    // (20000-19500-800<200) only held at the deep-jump position the MUST-FIX
+    // removes.
+    geometryValid: (100 * SESSION_VIRTUAL_ROW_HEIGHT) - list.scrollTop - list.clientHeight <= 200
+      && (100 * SESSION_VIRTUAL_ROW_HEIGHT) - list.scrollTop - list.clientHeight >= -(2 * list.clientHeight),
     tokenStill6: _touchBatchToken === token6,
     loadedStill6: _sessionTouchLoadedCount === loaded6,
     // Total-state parity: owner-only replacement must not change the
@@ -4888,7 +4910,7 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   // Same as scenario 6: the RAF bumps the token before the mutator runs.
   // We capture state post-RAF, pre-mutator to isolate that the MUTATOR only
   // changes the list reference.
-  list.scrollTop = 19500;
+  list.scrollTop = 4400; // near loaded boundary: 5200 - 4400 - 800 = 0 <= 200
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
   appendCount = 0;
   const snap7 = snapshotLiveTree();
@@ -4899,7 +4921,7 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   const oldListItemCount7 = oldList7._items.length;
   const replacementList7 = makeList();
   replacementList7.scrollHeight = 20000;
-  replacementList7.scrollTop = 19500;
+  replacementList7.scrollTop = 4400; // same reachable trigger position as list
   replacementList7.clientHeight = 800;
   // Inline the adversarial schedule so we can capture state post-RAF, pre-mutator.
   rafCallbacks = [];
@@ -5418,6 +5440,94 @@ console.log(JSON.stringify({{
         "Live geometry must trigger when the loaded boundary is near the viewport"
     assert result["triggersFarFromBoundary"] is False, \
         "Live geometry must NOT trigger when the loaded boundary is far below the viewport"
+
+
+@_node_tests
+def test_loaded_boundary_rejects_deep_jump_far_above_viewport():
+    """Round-5 re-gate MUST-FIX (deep jumps on large lists): the continuous
+    chain's downward trigger was one-sided — a bottom jump on a 1,500-row
+    list accepted an arbitrarily negative loadedBottom and chained 40-row
+    appends for 13–17s of blank "Loading more…" while stranded-viewport
+    recovery stood down behind the owner latch. The trigger must reject a
+    loaded boundary more than two viewports above the viewport bottom so the
+    bounded stranded-viewport re-anchor owns the repair instead.
+
+    Mirrors the live-geometry fixture above: window [0,60) of 1,000 rows,
+    viewport 1049px at the list bottom — the boundary sits ~36k px above the
+    viewport and must NOT trigger, while a normal near-boundary position
+    still does.
+    """
+    flat_rows = json.dumps([
+        {"group": {"label": "Today", "isPinned": False}, "session": {"session_id": f"s_{i}"}}
+        for i in range(1000)
+    ])
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + """
+const list = makeList();
+list.clientHeight = 1049;
+list.getBoundingClientRect = function() { return {top: 0, bottom: 1049, height: 1049}; };
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchStartIndex = 0;
+_sessionTouchLoadedCount = 60;
+_sessionTouchTotalCount = 1000;
+for (let i = 0; i < 60; i++) list._items.push(makeSessionItem('s_' + i));
+_touchRenderState = {
+  gen: 1, list: list, flatRows: FLAT_ROWS,
+  renderOneSession: function(s) { return makeSessionItem(s.session_id); },
+  activeSid: null, itemHeight: 39,
+};
+
+// Deep-jump case: window [0,60) of 1000 rows, user jumped to the bottom.
+// The last loaded row (row 59) sits at y=2340 in content coordinates;
+// the viewport top is at content y≈42900 — the loaded boundary is ~40,560px
+// ABOVE the viewport bottom. In viewport coords the last row's rect.bottom
+// is 2340 - 42900 = -40560 (far above the viewport).
+list.scrollTop = 42900;
+const lastRow = list._items[59];
+lastRow.getBoundingClientRect = function() {
+  return {top: -40599, bottom: -40560, height: 39};
+};
+const deepJumpTriggers = _touchLoadedBoundaryNearViewport(list, _touchRenderState, 200);
+
+// Normal case: user at the bottom of the LOADED window (scrollTop≈1300).
+// Last row bottom in viewport coords: 2340 - 1300 = 1040, within
+// viewportBottom(1049) + margin(200) → must still trigger.
+list.scrollTop = 1300;
+lastRow.getBoundingClientRect = function() {
+  return {top: 1001, bottom: 1040, height: 39};
+};
+const nearBoundaryTriggers = _touchLoadedBoundaryNearViewport(list, _touchRenderState, 200);
+
+// Moderate overshoot: user flung ~800px PAST the loaded boundary (viewport
+// below the last loaded row). Last row bottom in viewport coords:
+// 2340 - 3140 = -800 — above the viewport but within the two-viewport
+// bridge bound (−2098), so a plain fling must keep chaining.
+list.scrollTop = 3140;
+lastRow.getBoundingClientRect = function() {
+  const bottom = 2340 - list.scrollTop;
+  return {top: bottom - 39, bottom: bottom, height: 39};
+};
+const moderateTriggers = _touchLoadedBoundaryNearViewport(list, _touchRenderState, 200);
+
+console.log(JSON.stringify({
+  deepJumpTriggers,
+  nearBoundaryTriggers,
+  moderateTriggers,
+}));
+"""
+    source = source.replace(
+        "flatRows: FLAT_ROWS,", f"flatRows: {flat_rows},"
+    )
+    result = json.loads(_run_node_vm(source))
+    assert result["deepJumpTriggers"] is False, \
+        ("Deep-jump boundary far above the viewport must NOT arm the "
+         f"continuous chain (bounded re-anchor owns the repair), got {result}")
+    assert result["nearBoundaryTriggers"] is True, \
+        f"Near-boundary position must still trigger appends, got {result}"
+    assert result["moderateTriggers"] is True, \
+        f"Moderate fling overshoot within two viewports must still chain, got {result}"
 
 
 @_node_tests

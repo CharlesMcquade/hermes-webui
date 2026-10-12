@@ -409,6 +409,9 @@ does not arm upward prepends. Pointer taps on the list do not enter the momentum
 cooldown — only real scroll events defer background renders. Direct group-collapse
 taps force an immediate render bypassing that deferral. Gate-blocker regressions:
 `./scripts/test.sh tests/test_ipad_gate_blockers.py tests/test_ipad_sidebar_scroll_stuck.py -q`.
+Stranded-viewport recovery (a deep-active window jumped far outside the live
+scroll position re-anchors a bounded window after the gesture settles, without
+rebuilding DOM mid-momentum): `./scripts/test.sh tests/test_ipad_stranded_viewport_recovery.py -q`.
 
 ### Streaming reader intent
 
