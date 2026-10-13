@@ -6824,6 +6824,14 @@ function _invalidateTouchRender(){
       try{owner.list.removeEventListener('scroll',owner.handler,{passive:true});}catch(_){}
     }
   }
+  // #6426 (gate round-N CORE): teardown must also clear the stored scope
+  // fingerprint. Leaving it set while the bounds reset makes touch → mouse →
+  // touch at a deep scroll position paint [0,0): re-entry sees an UNCHANGED
+  // fingerprint, skips the scope-reset branch, and the zeroed bounds survive
+  // into _sessionVirtualWindow — zero rows after idling and after further
+  // scrolling, with recovery rejecting the degenerate window. Capture the
+  // owned list BEFORE the state reset below nulls it.
+  const _touchTeardownList=_sessionTouchListEl;
   _touchScrollOwner=null;
   _touchRenderState=null;
   _sessionTouchListEl=null;
@@ -6831,6 +6839,12 @@ function _invalidateTouchRender(){
   _sessionTouchLoadedCount=0;
   _sessionTouchTotalCount=0;
   _touchBatchPending=false;
+  if(_touchTeardownList&&_touchTeardownList.dataset){
+    delete _touchTeardownList.dataset.sessionTouchScope;
+    // The scope-only fingerprint must reset with it, or a post-teardown
+    // content-only change would compare against a stale scope identity.
+    delete _touchTeardownList.dataset.sessionTouchScopeOnly;
+  }
   if(_touchContinuousBatchOwner&&_touchContinuousBatchOwner.raf){
     try{cancelAnimationFrame(_touchContinuousBatchOwner.raf);}catch(_){}
   }
@@ -10971,6 +10985,23 @@ function renderSessionListFromCache(){
       sidPrefix,                            // ordered SID identity
     ].join('|');
     const prevFingerprint=list.dataset.sessionTouchScope||'';
+    // #6426 (gate re-gate MUST-FIX): the first eight fingerprint fields are the
+    // SCOPE (filters, query, collapse, active); the last two (row count, SID
+    // prefix) are CONTENT. A content-only change while the touch window is
+    // deep (a conversation arrived or left elsewhere while the user is
+    // scrolled down) must NOT reset the window to [0,60): count/order-only
+    // refreshes restore the preserved deep scroll position, so a top-anchored
+    // window paints rows the viewport cannot see and the sidebar is blank
+    // until the stranded-viewport timer fires (~1.25s) — at every list size.
+    // Decide scope-only identity BEFORE the reset below clears the bounds,
+    // and keep the stored scope-only fingerprint across renders.
+    const scopeOnlyFingerprint=scopeFingerprint.split('|').slice(0,8).join('|');
+    const prevScopeOnlyFingerprint=list.dataset.sessionTouchScopeOnly||'';
+    const prevTouchStart=Math.max(0, Number(_sessionTouchStartIndex)||0);
+    const contentOnlyDeepChange=prevFingerprint!==scopeFingerprint&&!!prevFingerprint
+      &&prevScopeOnlyFingerprint===scopeOnlyFingerprint&&prevTouchStart>0
+      &&flatSessionRows.length>SESSION_TOUCH_INITIAL_BATCH;
+    list.dataset.sessionTouchScopeOnly=scopeOnlyFingerprint;
     if(prevFingerprint!==scopeFingerprint){
       // Reset BOTH canonical touch bounds BEFORE the window calculation so
       // _sessionVirtualWindow sees the correct start/loadedCount. Resetting
@@ -10981,6 +11012,17 @@ function renderSessionListFromCache(){
       _sessionTouchStartIndex=0;
       _sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH;
       list.dataset.sessionTouchScope=scopeFingerprint;
+    }
+    if(contentOnlyDeepChange){
+      // Re-anchor on the projected first visible row (the same projection the
+      // window's topPad and the stranded-viewport recovery use), bounded to
+      // the initial batch, instead of the top-of-list reset. The scroll
+      // position itself is restored below from listScrollTopBeforeRender, so
+      // the painted window must cover it.
+      const anchorFirstVisible=Math.floor(Math.max(0, Number(listScrollTopBeforeRender)||0)/SESSION_VIRTUAL_ROW_HEIGHT);
+      const nextStart=Math.max(0, Math.min(anchorFirstVisible-SESSION_VIRTUAL_BUFFER_ROWS, Math.max(0, flatSessionRows.length-SESSION_TOUCH_INITIAL_BATCH)));
+      _sessionTouchStartIndex=nextStart;
+      _sessionTouchLoadedCount=Math.min(flatSessionRows.length, nextStart+SESSION_TOUCH_INITIAL_BATCH);
     }
   }
   const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
