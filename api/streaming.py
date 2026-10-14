@@ -5693,7 +5693,6 @@ def _strip_xml_tool_calls(text: str) -> str:
     _lo = s.lower()
     if 'function_calls' not in _lo and 'dsml' not in _lo:
         return text
-    
     _dsml_prefix = r'(?:\s*｜\s*DSML\s*[｜|]\s*)?'
     open_tag = rf'<{_dsml_prefix}function_calls'
     close_tag = rf'</{_dsml_prefix}function_calls>'
@@ -13655,7 +13654,6 @@ def _run_agent_streaming(
                 _resolved_profile_name = get_active_profile_name()
             except Exception:
                 _resolved_profile_name = None
-        
         _thread_env = _build_agent_thread_env(
             _profile_runtime_env,
             str(s.workspace),
@@ -18659,12 +18657,6 @@ def cancel_stream(stream_id: str) -> bool:
                                                 _append_recovered_turn_to_context(
                                                     _cs, _cancel_owner
                                                 )
-                    except Exception:
-                        logger.debug(
-                            "Failed to recover pending user message on cancel for %s",
-                            _cancel_session_id,
-                        )
-                
                     except Exception:
                         logger.debug(
                             "Failed to recover pending user message on cancel for %s",
