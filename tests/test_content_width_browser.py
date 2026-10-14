@@ -59,7 +59,7 @@ def page(browser):
     boot = (ROOT / 'static/boot.js').read_text()
     tab.add_script_tag(content=boot[boot.index('const _CONTENT_WIDTH_MODES='):boot.index('function _buildSkinPicker')])
     panels = (ROOT / 'static/panels.js').read_text()
-    tab.add_script_tag(content='let _settingsThemeOnOpen, _settingsSkinOnOpen, _settingsFontSizeOnOpen, _settingsAppearanceAutosaveRetryPayload;\n' + function(panels, '_rememberAppearanceSaved') + '\nasync ' + function(panels, '_autosaveAppearanceSettings'))
+    tab.add_script_tag(content='let _settingsThemeOnOpen, _settingsSkinOnOpen, _settingsFontSizeOnOpen, _settingsAppearanceAutosaveRetryPayload;\n' + function(panels, '_rememberAppearanceSaved') + '\nasync ' + function(panels, '_autosaveAppearanceSettings') + '\n' + function(panels, '_scheduleContentWidthAutosave'))
     yield tab
     context.close()
 
@@ -90,10 +90,19 @@ def test_explicit_default_survives_unsaved_reconciliation(page, response):
 def test_older_save_does_not_revert_newer_selection(page):
     page.evaluate("""() => {
       _pickContentWidth('wide');
-      _enqueueSettingsPost = () => new Promise(resolve => window.finishSave=resolve);
+      // The real settings queue settles every POST; model that here — one
+      // deferred resolve per call, in arrival order. A single one-shot
+      // resolve would be consumed by the picker's width-only save and leave
+      // the appearance save pending forever.
+      const deferred = [];
+      _enqueueSettingsPost = () => new Promise(resolve => deferred.push(resolve));
       window.pendingSave = _autosaveAppearanceSettings({content_width:'wide'});
       _pickContentWidth('full');
-      finishSave({content_width:'wide'});
+      // The picker's width-only save settles first: its echo matches the
+      // current selection, so nothing moves. Then the OLDER appearance save
+      // settles with its stale width — which must NOT revert the selection.
+      deferred[1]({content_width:'full'});
+      deferred[0]({content_width:'wide'});
     }""")
     page.evaluate('pendingSave')
     assert page.evaluate("localStorage.getItem('hermes-content-width')") == 'full'
@@ -111,15 +120,112 @@ def test_boot_normalizes_missing_and_explicit_preferences(page, local, server, e
     assert page.evaluate("localStorage.getItem('hermes-content-width')") == expected
 
 
-def test_successful_save_projects_validated_width(page):
+def test_width_save_echo_projects_validated_value(page):
+    """The width-only autosave (re-gate SILENT fix) still projects a server-
+    normalized echo — but only while that selection is still current."""
     page.evaluate("""async () => {
       _pickContentWidth('full');
       _enqueueSettingsPost = async () => ({content_width:'default'});
-      await _autosaveAppearanceSettings({content_width:'full'});
+      _scheduleContentWidthAutosave('full');
+      await new Promise(resolve => setTimeout(resolve, 10));
     }""")
     assert page.evaluate("localStorage.getItem('hermes-content-width')") == 'default'
-    assert page.locator('html').get_attribute('data-content-width') is None
-    assert page.evaluate('saveStatus') == 'saved'
+
+
+def test_picker_selection_before_settings_posts_width_only_payload(page):
+    """Re-gate SILENT 1: a width selection made BEFORE Settings ever opens
+    must not route the unhydrated Appearance form through the autosave — the
+    POST carries only content_width, so no other preference can move."""
+    captured = page.evaluate("""async () => {
+      const bodies = [];
+      window._enqueueSettingsPost = async (options) => {
+        bodies.push(JSON.parse(options.body));
+        return {};
+      };
+      _pickContentWidth('wide');
+      await new Promise(resolve => setTimeout(resolve, 10));
+      return {bodies: bodies, local: localStorage.getItem('hermes-content-width')};
+    }""")
+    assert captured['local'] == 'wide'
+    assert captured['bodies'] == [{'content_width': 'wide'}], (
+        "the picker's save must be width-only — a full Appearance payload "
+        "built from the unhydrated form wiped theme, skin, font size, "
+        "auto-follow, Markdown, endless scroll, jump buttons and activity "
+        "display on a picker-only selection"
+    )
+
+
+def test_popup_mounts_under_body_under_transformed_ancestor(page):
+    """Re-gate SILENT 2: a composer ancestor with backdrop-filter/transform
+    (Geist Contrast does it on .composer-wrap) becomes the containing block
+    for position:fixed. While open the popup must live under document.body so
+    the viewport coordinates land on-screen; on close it returns home."""
+    state = page.evaluate("""() => {
+      const popup = document.getElementById('composerContentWidthPopup');
+      const wrap = document.getElementById('composerContentWidthWrap');
+      const ancestor = document.getElementById('composerWrap');
+      ancestor.style.backdropFilter = 'blur(2px)';
+      ancestor.style.transform = 'translateZ(0)';
+      _setContentWidthPickerOpen(true);
+      const openRect = popup.getBoundingClientRect();
+      const openParentIsBody = popup.parentElement === document.body;
+      _setContentWidthPickerOpen(false);
+      return {
+        openParentIsBody: openParentIsBody,
+        onScreen: openRect.top >= 0 && openRect.left >= 0
+          && openRect.bottom <= window.innerHeight && openRect.right <= window.innerWidth,
+        rectTop: openRect.top,
+        closedParentIsWrap: popup.parentElement === wrap,
+      };
+    }""")
+    assert state['openParentIsBody'] is True
+    assert state['onScreen'] is True, (
+        f"popup rendered off-screen under a transformed composer ancestor "
+        f"(top={state['rectTop']}) — the Geist Contrast containing-block bug"
+    )
+    assert state['closedParentIsWrap'] is True
+
+
+def test_picker_gives_space_back_in_first_footer_collapse_stage(page):
+    """Re-gate MUST-FIX: the picker is measured inside .composer-left, so at
+    constrained widths it must hide in the FIRST collapse stage (cf-icons) —
+    otherwise every other footer control collapses earlier than on master."""
+    page.set_viewport_size({'width': 820, 'height': 1000})
+    state = page.evaluate("""() => {
+      const wrap = document.getElementById('composerContentWidthWrap');
+      const footer = document.querySelector('.composer-footer');
+      const before = getComputedStyle(wrap).display;
+      footer.classList.add('cf-icons');
+      const during = getComputedStyle(wrap).display;
+      footer.classList.remove('cf-icons');
+      return {before: before, during: during};
+    }""")
+    assert state['before'] != 'none'
+    assert state['during'] == 'none', (
+        "the picker must collapse in the first footer stage (cf-icons) — it "
+        "occupies .composer-left's measured width and must give that space "
+        "back before other controls collapse"
+    )
+
+
+def test_default_mode_keeps_master_wide_desktop_widths(page):
+    """Re-gate SHOULD-FIX: master's +40px/+80px desktop breakpoints (#587)
+    stay the DEFAULT geometry; explicit picker modes override via :root."""
+    width = page.evaluate("""() => {
+      const inner = document.getElementById('msgInner');
+      const root = document.documentElement;
+      const base = parseFloat(getComputedStyle(root).getPropertyValue('--msg-max'));
+      const defaultWidth = getComputedStyle(inner).maxWidth;
+      root.dataset.contentWidth = 'wide';
+      const wideWidth = getComputedStyle(inner).maxWidth;
+      delete root.dataset.contentWidth;
+      return {base: base, defaultWidth: defaultWidth, wideWidth: wideWidth};
+    }""")
+    assert width['defaultWidth'] == f"{width['base'] + 40}px", (
+        f"at 1600px the default column must keep master's +40px width "
+        f"(#587) — got {width['defaultWidth']} for base {width['base']}px"
+    )
+    assert width['wideWidth'] == '1100px'
 
 
 def test_reconciliation_rejection_is_handled(page):

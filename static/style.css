@@ -3139,6 +3139,11 @@
   .composer-footer.cf-icons #btnSavedPrompts,
   .composer-footer.cf-icons .saved-prompts-popup{display:none!important;}
   .composer-footer.cf-icons .composer-divider{display:none;}
+  /* #7497 re-gate MUST-FIX: the width picker is measured as part of
+     .composer-left, so at constrained widths it must give its space back in
+     the FIRST collapse stage — otherwise every other footer control collapses
+     earlier than on master. cf-burger implies cf-icons, so it stays hidden. */
+  .composer-footer.cf-icons #composerContentWidthWrap{display:none;}
 
   .composer-footer.cf-burger .composer-left{gap:8px;}
   .composer-footer.cf-burger .composer-workspace-group{box-sizing:border-box;flex:0 0 44px;width:44px;min-width:44px;max-width:44px;min-height:44px;overflow:hidden;border:none;background:transparent;border-radius:8px;}
@@ -6575,6 +6580,12 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
 
 /* ── Widths: collapse messages-inner to match the selected content column ── */
 .messages-inner { max-width: var(--msg-max); }
+/* Master's wide-desktop column widths (#587) stay the DEFAULT geometry
+   (#7497 re-gate SHOULD-FIX): the picker modes override --msg-max on :root,
+   so these breakpoints are scoped to the unscoped default (no
+   data-content-width attribute) and Wide/Full keep their own geometry. */
+@media (min-width: 1400px) { html:not([data-content-width]) .messages-inner { max-width: calc(var(--msg-max) + 40px); } }
+@media (min-width: 1800px) { html:not([data-content-width]) .messages-inner { max-width: calc(var(--msg-max) + 80px); } }
 
 @media (max-width: 700px) {
   .msg-role { margin-bottom: 4px; }

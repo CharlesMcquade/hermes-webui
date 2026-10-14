@@ -3480,15 +3480,35 @@ function _positionContentWidthPicker(){
   popup.style.bottom='auto';
 }
 
+// Where the popup was mounted before the current open moved it under
+// document.body (#7497 re-gate SILENT): skins that put backdrop-filter,
+// transform or filter on a composer ancestor (Geist Contrast does it on
+// .composer-wrap) turn that ancestor into the containing block for
+// position:fixed, which throws the viewport-coordinated popup off-screen.
+let _contentWidthPopupHome=null;
+
 function _setContentWidthPickerOpen(open){
   const wrap=$('composerContentWidthWrap');
   const btn=$('composerContentWidthBtn');
   const popup=$('composerContentWidthPopup');
   if(!wrap||!btn||!popup) return;
   const next=!!open;
+  // Mount under document.body while open — body is never a transformed
+  // containing block, so the viewport coordinates written by
+  // _positionContentWidthPicker() mean what they say under every skin. The
+  // popup returns to its authored home on close so the DOM stays canonical
+  // for styling, tests and the outside-click handler (which ignores clicks
+  // on the popup itself — they stopPropagation before reaching document).
+  if(next&&popup.parentElement!==document.body){
+    _contentWidthPopupHome=wrap;
+    document.body.appendChild(popup);
+  }else if(!next&&_contentWidthPopupHome&&popup.parentElement!==_contentWidthPopupHome){
+    _contentWidthPopupHome.appendChild(popup);
+  }
   popup.hidden=!next;
   btn.setAttribute('aria-expanded',next?'true':'false');
   if(next){
+    // Position AFTER the unhide: a still-hidden popup measures as 0×0.
     _positionContentWidthPicker();
     popup.querySelector('[aria-selected="true"]')?.focus();
   }
@@ -3501,7 +3521,11 @@ function _pickContentWidth(width){
   _syncContentWidthPicker(next);
   _setContentWidthPickerOpen(false);
   if(keyboardSelection) $('composerContentWidthBtn')?.focus();
-  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
+  // Width-only autosave (#7497 re-gate SILENT): the Appearance form stays
+  // unhydrated until Settings opens — routing a picker selection through the
+  // general autosave posted its unhydrated defaults and wiped the user's
+  // saved theme/skin/font/activity preferences.
+  if(typeof _scheduleContentWidthAutosave==='function') _scheduleContentWidthAutosave(next);
 }
 
 function _syncContentWidthPicker(active){

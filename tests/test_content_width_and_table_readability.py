@@ -39,16 +39,27 @@ def test_width_picker_is_anchored_to_the_left_composer_controls():
     assert 'flex:0 0 34px' in read_static("style.css")
 
 
-def test_width_picker_applies_immediately_and_persists_through_appearance_autosave():
+def test_width_picker_applies_immediately_and_persists_through_width_only_autosave():
+    """Re-gate round 2 (SILENT): the picker commits through its OWN width-only
+    autosave. Routing it through the general Appearance autosave posted that
+    form's unhydrated defaults and wiped the user's saved preferences when
+    Settings had never been opened, and every other appearance change silently
+    re-wrote the width from the mirrored localStorage value."""
     boot = read_static("boot.js")
     panels = read_static("panels.js")
     assert "const _CONTENT_WIDTH_MODES=new Set(['default','wide','full'])" in boot
     assert "function _applyContentWidth(width)" in boot
     assert "document.documentElement.dataset.contentWidth=next" in boot
     assert "localStorage.setItem('hermes-content-width',next)" in boot
-    assert "_scheduleAppearanceAutosave()" in boot
-    assert "content_width: localStorage.getItem('hermes-content-width') || 'default'" in panels
-    assert "saved.content_width" in panels
+    # The picker must call the width-only autosave, never the Appearance one.
+    assert "_scheduleContentWidthAutosave(next)" in boot
+    picker_call = boot.index("function _pickContentWidth(width)")
+    assert "_scheduleAppearanceAutosave" not in boot[picker_call:boot.index("function _syncContentWidthPicker")]
+    # The Appearance payload carries no width key, and the width-only saver exists.
+    payload = panels[panels.index("function _appearancePayloadFromUi()"):panels.index("function _pickChatActivityDisplayMode")]
+    assert "content_width:" not in payload
+    assert "function _scheduleContentWidthAutosave(width)" in panels
+    assert "{content_width:next}" in panels
 
 
 def test_width_picker_is_keyboard_and_outside_click_usable():
