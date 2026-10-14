@@ -1824,4 +1824,3 @@ def test_apply_update_pull_lock_no_stash_when_clean(tmp_path, monkeypatch):
     assert result.get('lock_conflict') is True
     # No stash pop on a clean pull-lock path.
     assert not any(c[0] == 'stash' for c in git_calls)
-

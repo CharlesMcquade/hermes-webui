@@ -36,4 +36,3 @@ def test_scroll_if_pinned_recovers_when_far_from_bottom():
     assert "_messageBottomDistance()>2" in fn
     assert "_setMessageScrollToBottom();" in fn
     assert fn.index("_messageBottomDistance()>2") < fn.index("_settleMessageScrollToBottom(false)")
-
