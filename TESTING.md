@@ -15,7 +15,6 @@
 
 ---
 
-<<<<<<< HEAD
 ## Cancelled-journal recovery combinations
 
 Run `./scripts/test.sh tests/test_cancel_recovery_properties.py tests/test_cancel_restart_journal_recovery.py`.
@@ -59,7 +58,6 @@ and fallback URLs retain the session and snapshot captured for their fetch,
 including requests started without a session. The Node harness executes the
 real loaders with deferred responses and PDF-ready/timeout callbacks; it does
 not certify browser rendering or real CDN availability.
-=======
 ## Session title authority regression gate
 
 ```bash
@@ -80,7 +78,6 @@ provenance, generation-time CLI/WebUI rename races, shared-generator routing,
 legacy-store compatibility, and failure status. Provider outputs are fixtures;
 this is not a live model or browser rendering certification. The older routing
 unit tests explicitly model standalone WebUI without an Agent title DB.
->>>>>>> 3f55d27408 (fix: make Agent titles authoritative across WebUI generation)
 
 ## Static JS runtime lint (brick-class regression guard)
 
