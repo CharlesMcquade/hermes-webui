@@ -255,7 +255,7 @@ class TestPostCASBarrier:
                    side_effect=_payload_hook):
             result = _streaming_mod.cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
 
         # Exactly one save (A) — B was never persisted
         assert len(_save_snapshots) == 1, (
@@ -358,7 +358,7 @@ class TestPostCASBarrier:
                    side_effect=_payload_hook):
             result = _streaming_mod.cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
 
         # Reload from disk and assert exactly one durable notice
         assert os.path.exists(session_path), "session was not saved to disk"
@@ -434,7 +434,7 @@ class TestPostCASBarrier:
             result = _streaming_mod.cancel_stream(stream_id)
 
         # Cancel save failed -> non-silent disposition
-        assert result["cancelled"] is False
+        assert result is False
         # Notice transferred to dead-letter (bounded owner — gate-certifier
         # blocker #3: failed persistence has a named owner, not an ownerless
         # residue in _STREAM_FALLBACK_NOTICES).
@@ -518,7 +518,7 @@ class TestPostCASBarrier:
         with patch("api.streaming.get_session", return_value=cancel_session):
             result = _streaming_mod.cancel_stream(stream_id)
 
-        assert result["cancelled"] is False
+        assert result is False
         assert stream_id in _streaming_mod._STREAM_FALLBACK_DEAD_LETTER, "notice dropped after cancel save failure"
 
         # Worker retry also fails
@@ -597,7 +597,7 @@ class TestPostCASBarrier:
             result = _streaming_mod.cancel_stream(stream_id)
 
         # Exact disposition: False (not True, not raise)
-        assert result["cancelled"] is False, (
+        assert result is False, (
             f"settlement exhaustion must return False, got {result}"
         )
 

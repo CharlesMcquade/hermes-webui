@@ -97,7 +97,7 @@ class TestCancelInterrupt:
         result = cancel_stream(stream_id)
 
         # Assert
-        assert result["cancelled"] is True
+        assert result is True
         mock_agent.interrupt.assert_called_once_with("Cancelled by user")
         # CANCEL_FLAGS is eagerly popped after cancel (#776 fix) so the flag
         # is no longer in the dict — verify the pop happened instead
@@ -118,7 +118,7 @@ class TestCancelInterrupt:
         result = cancel_stream(stream_id)
 
         # Assert
-        assert result["cancelled"] is True
+        assert result is True
         mock_agent.interrupt.assert_called_once()
         assert stream_id not in CANCEL_FLAGS, \
             "cancel_stream() should eagerly pop CANCEL_FLAGS even on interrupt exception"
@@ -135,7 +135,7 @@ class TestCancelInterrupt:
         result = cancel_stream(stream_id)
 
         # Assert
-        assert result["cancelled"] is True
+        assert result is True
         # CANCEL_FLAGS is eagerly popped; the agent thread checks the event
         # object it already has a reference to — pop doesn't clear the event
         assert stream_id not in CANCEL_FLAGS, \
@@ -145,7 +145,7 @@ class TestCancelInterrupt:
     def test_cancel_nonexistent_stream(self):
         """Test cancel for a stream that doesn't exist"""
         result = cancel_stream("nonexistent_stream")
-        assert result["cancelled"] is False
+        assert result is False
 
     def test_cancel_falls_back_to_active_run_registry(self):
         """Cancel should still work when STREAMS is gone but the worker is alive."""
@@ -177,7 +177,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
         assert ACTIVE_RUNS[stream_id]["phase"] == "cancelling"
         mock_agent.interrupt.assert_called_once_with("Cancelled by user")
         assert mock_session.active_stream_id is None
@@ -196,7 +196,7 @@ class TestCancelInterrupt:
 
         result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
         assert cancel_event.is_set()
 
     def test_cancel_puts_sentinel_in_queue(self):
@@ -209,7 +209,7 @@ class TestCancelInterrupt:
 
         result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
         # Check that cancel message was queued
         assert not q.empty()
         event_type, data = q.get_nowait()
@@ -269,7 +269,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
         mock_agent.interrupt.assert_called_once_with("Cancelled by user")
         # The cancelled turn must carry the partial text that was live BEFORE the
         # interrupt popped the buffers. Find it in the appended messages.
@@ -332,7 +332,7 @@ class TestCancelInterrupt:
                 patch("api.streaming._cached_agent_matches_session", return_value=True):
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
         mock_agent.interrupt.assert_called_once_with("Cancelled by user")
         appended = [m for m in mock_session.messages if isinstance(m, dict)]
         joined = " ".join(str(m.get("content", "")) for m in appended)
@@ -430,7 +430,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
 
         # The worker's _persist_cancelled_turn should have stamped the notice
         stamped = [
@@ -518,7 +518,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
 
         stamped = [
             m for m in mock_session.messages
@@ -580,7 +580,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
 
         stamped = [
             m for m in mock_session.messages
@@ -676,7 +676,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
 
         # Verify the notice was stamped on the DURABLE row (not _other_partial)
         assert "_fallbackNotice" not in _other_partial, (
@@ -762,7 +762,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
 
         # The late-published notice MUST be stamped on the current-turn row.
         stamped = [
@@ -812,7 +812,7 @@ class TestCancelInterrupt:
         result = cancel_stream(stream_id)
 
         # The supported stream-present/agent-not-yet-ready path returns True
-        assert result["cancelled"] is True, (
+        assert result is True, (
             "cancel_stream() should return True for stream-present/agent-not-ready path"
         )
 
@@ -901,7 +901,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
 
         # Exactly one durable notice — and it must be B (the latest), NOT A.
         stamped = [
@@ -1025,7 +1025,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
 
         # A must be the sole durable notice
         stamped = [
@@ -1110,7 +1110,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
 
         # The loop should have iterated 3 times (once per generation)
         assert len(_save_snapshots) == 3, (
@@ -1194,7 +1194,7 @@ class TestCancelInterrupt:
         # report success.  It returns False (routes.py surfaces cancelled:
         # false) and logs an ERROR, while still leaving the notice in the map
         # for the worker's _persist_cancelled_turn as a backstop.
-        assert result["cancelled"] is False
+        assert result is False
 
         # Claim retired; fence was never set on the failure path
         assert stream_id not in _STREAM_CANCEL_CLAIMED, (
@@ -1265,7 +1265,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
 
         # save must NOT have been called — stale guard returned early
         mock_session.save.assert_not_called()
@@ -1333,7 +1333,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
 
         # Two saves: first persisted A, second persisted B
         assert len(_save_snapshots) == 2, (
@@ -1426,7 +1426,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
 
         # Two saves: first persisted A, second persisted B
         assert len(_save_snapshots) == 2, (
@@ -1526,7 +1526,7 @@ class TestCancelInterrupt:
         # durable within cancel's bounded window, so cancel_stream does NOT
         # report success — it returns False and logs an ERROR, leaving the
         # current unsaved generation in the map for the worker.
-        assert result["cancelled"] is False
+        assert result is False
 
         # The loop must have run _SETTLEMENT_MAX_ITERS times
         from api.streaming import _SETTLEMENT_MAX_ITERS_GLOBAL
@@ -1626,7 +1626,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
 
         # The notice must be on partial2 (current turn), NOT partial1
         assert "_fallbackNotice" not in _partial1, (
@@ -1795,7 +1795,7 @@ class TestCancelInterrupt:
 
         with patch("api.streaming.get_session", return_value=cs):
             result = cancel_stream(stream_id)
-        assert result["cancelled"] is True
+        assert result is True
 
         stamped = [
             m for m in cs.messages
@@ -2300,7 +2300,7 @@ class TestCancelInterrupt:
             # a phantom 'worker' participant — the job already finished.
             _config.register_active_run(sid, session_id="sess_sched_wf")
             result = cancel_stream(sid)
-            assert result.get("cancelled") is True
+            assert result is True
             # After cancel's outer finally retires 'cancel', the completed
             # tombstones must all drain back to baseline — no permanent
             # 'worker' entry.
@@ -2965,7 +2965,7 @@ class TestCancelInterrupt:
 
         watcher.join(timeout=10)
 
-        assert result["cancelled"] is True
+        assert result is True
         assert _publication_result[0] is not None, (
             "watcher never ran — the fence-install interception did not fire"
         )

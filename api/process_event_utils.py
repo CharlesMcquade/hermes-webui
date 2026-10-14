@@ -169,7 +169,9 @@ def stamp_message_source(
     """
     if isinstance(msg, dict) and active_turn_token:
         msg["_active_turn_token"] = str(active_turn_token)
-    if not isinstance(msg, dict) or not source or source == "webui":
+    if not isinstance(source, str) or not source or source == "webui":
+        return
+    if not isinstance(msg, dict):
         return
     msg["_source"] = source
     attach_wakeup_display_meta(msg, source)

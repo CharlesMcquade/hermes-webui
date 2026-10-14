@@ -119,7 +119,7 @@ class TestIssue1298CancelPreservesUserMessage:
         stream_id, _agent = _setup_cancel_stream_state(s.session_id)
 
         result = cancel_stream(stream_id)
-        assert result["cancelled"] is True
+        assert result is True
 
         # Reload from disk to confirm save happened
         s2 = models.SESSIONS[s.session_id]

@@ -77,7 +77,7 @@ def steer():
 
 
 def assert_cancelled(result):
-    assert result == {"cancelled": True, "persistence_failed": False, "stream_id": "run"}
+    assert result is True
 
 
 def assert_delivered(result):

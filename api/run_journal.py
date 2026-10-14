@@ -430,40 +430,16 @@ def _append_run_event_locked(
     seq: int | None = None,
     created_at: float | None = None,
 ) -> dict:
-    if seq is not None:
-        assigned_seq = int(seq)
-        _note_assigned_seq(path, assigned_seq)
-    else:
-        assigned_seq = _reserve_next_seq(path)
-    terminal_state = _terminal_state_for_event(event_name, payload)
-    event = {
-        "version": 1,
-        "event_id": f"{run_id}:{assigned_seq}",
-        "seq": assigned_seq,
-        "run_id": str(run_id),
-        "session_id": str(session_id),
-        "event": event_name,
-        "type": event_name,
-        "created_at": float(created_at if created_at is not None else time.time()),
-        "terminal": bool(terminal_state),
-        "terminal_state": terminal_state,
-        "payload": payload,
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    created_file = not path.exists()
-    line = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
-    fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-    with os.fdopen(fd, "a", encoding="utf-8") as fh:
-        fh.write(line)
-        fh.flush()
-        # A delivered Steer becomes user-visible durable conversation history
-        # immediately, before the run's next terminal fsync boundary.
-        if _should_fsync_event(terminal_state) or event_name == "steer_delivered":
-            os.fsync(fh.fileno())
-    _discard_cached_summary(path)
-    if created_file:
-        _fsync_parent_dir(path)
-    return event
+    """Append one durable run event; caller holds ``_lock_for(path)``.
+
+    Used by the writer-locked publish/accept/terminal transactions, which must
+    keep the per-path lease across append + queue publication so journal ``seq``
+    order cannot disagree with live delivery order.
+    """
+    return _append_event_transaction(
+        path, session_id, run_id, event_name, payload,
+        seq=seq, created_at=created_at,
+    )
 
 
 def append_run_event(
@@ -483,6 +459,30 @@ def append_run_event(
     if not event_name:
         raise ValueError("event_name is required")
     with _lock_for(path):
+        return _append_event_transaction(
+            path, session_id, run_id, event_name, payload,
+            seq=seq, created_at=created_at,
+        )
+
+
+def _append_event_transaction(
+    path: Path,
+    session_id: str,
+    run_id: str,
+    event_name: str,
+    payload,
+    *,
+    seq: int | None = None,
+    created_at: float | None = None,
+) -> dict:
+    """Run one journal append transaction; caller holds ``_lock_for(path)``.
+
+    Shared by the free ``append_run_event`` and the writer-locked helpers
+    (``_append_run_event_locked``) so every append — transactional or
+    publish-under-lock — allocates its sequence inside the same gapless
+    append/repair protocol and shares one seq cache.
+    """
+    if True:  # keep original indentation of the extracted body
         key = str(path)
         with _SEQ_CACHE_LOCK:
             cached_next = _SEQ_CACHE.get(key)
@@ -540,7 +540,10 @@ def append_run_event(
                         if written <= 0:
                             raise OSError("run journal write made no progress")
                         remaining = remaining[written:]
-                    if _should_fsync_event(terminal_state):
+                    # A delivered Steer becomes user-visible durable conversation
+                    # history immediately, before the run's next terminal fsync
+                    # boundary.
+                    if _should_fsync_event(terminal_state) or event_name == "steer_delivered":
                         os.fsync(fd)
                 except BaseException:
                     # No buffered close can flush a partial row after this rollback.
@@ -671,7 +674,15 @@ class RunJournalWriter:
             ):
                 return None
             event = None
-            if not malformed and (not terminal or event_name == "stream_end"):
+            # Cancel terminals are never journaled here: cancel_stream publishes
+            # them live-only. A journaled cancel row would give a
+            # cancel-before-first-output run a durable terminal (breaking
+            # crash-recovery) and would fence post-cancel tokens out of replay
+            # (breaking exact recovery). The worker's own finalization journals
+            # real terminals; a disconnected run's recovery goes through the
+            # session's lazy-retry hook instead.
+            journal_exists = event_name != "cancel" and self._path.exists()
+            if journal_exists and not malformed and (not terminal or event_name == "stream_end"):
                 try:
                     event = _append_run_event_locked(self._path, self.session_id,
                         self.run_id, event_name, payload or {})
