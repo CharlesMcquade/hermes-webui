@@ -77,6 +77,7 @@ BROWSER_GLOBALS = [
     "SpeechSynthesisUtterance", "AudioContext", "webkitAudioContext", "MutationObserver",
     "IntersectionObserver", "ResizeObserver", "DataTransfer", "DragEvent", "Event",
     "CustomEvent", "KeyboardEvent", "MouseEvent", "PointerEvent", "TouchEvent",
+    "RTCPeerConnection", "MediaStream", "MediaDevices",
     "WheelEvent", "ClipboardEvent", "getComputedStyle", "matchMedia", "atob", "btoa",
     "structuredClone", "crypto", "performance", "screen", "DOMParser", "Node", "NodeList",
     "HTMLElement", "Element", "Text", "AbortController", "AbortSignal", "TextDecoder",

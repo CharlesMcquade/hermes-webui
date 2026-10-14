@@ -7056,6 +7056,28 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
     return english_hits >= 2
 
 
+def _apply_generated_title(session, next_title, *, expected=None, replace=False, explicit=False):
+    """Caller holds the session lock; DB decides the exact sidebar title."""
+    from api.state_sync import sync_session_title
+
+    title, source = sync_session_title(
+        session.session_id, next_title, profile=getattr(session, 'profile', None) or 'default',
+        expected=expected, replace=replace, explicit=explicit,
+    )
+    session.title = title
+    if source in ('llm', 'derived'):
+        mark_session_title_generated(session)
+        if source == 'derived':
+            session.llm_title_generated = False
+    else:
+        # Unknown provenance on a nonempty legacy title is user authority.
+        session.manual_title = True
+        session.llm_title_generated = False
+    return title
+
+
+
+
 def _generated_title_language_mismatch(user_text: str, title: str, pinned_language: str = '') -> bool:
     """Language-validate a generated title, honouring a resolvable pin.
 
@@ -18065,7 +18087,6 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     durable/published state and the canonical journal envelope when accepted.
     """
     from api.helpers import j, bad
-    from api import config as _cfg
 
     sid = str((body or {}).get("session_id", "") or "").strip()
     structured_input = "user_text" in (body or {}) or "attachment_paths" in (body or {})

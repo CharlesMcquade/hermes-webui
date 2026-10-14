@@ -7463,6 +7463,12 @@ if(typeof window!=='undefined'){
       const caughtInputTail=movedDown
         &&inputTailHeightForRepin!==null
         &&(top+el.clientHeight)>=(inputTailHeightForRepin-80);
+      // if a downward scroll carried the viewport to within 80px of the
+      // previous tail, the reader caught the tail they were aiming at — that
+      // is decisive re-pin intent even though new content already grew below.
+      const caughtPrevTail=movedDown
+        &&_prevMessageScrollHeightForRepin!==null
+        &&(top+el.clientHeight)>=(_prevMessageScrollHeightForRepin-80);
       // Suppress the post-render scroll artifact: right after renderMessages()
       // rebuilds #msgInner, the browser can emit a non-user upward scroll event.
       // The typeof guards keep this branch inert in unit harnesses that inject
