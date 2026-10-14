@@ -9119,7 +9119,11 @@ function _appearancePayloadFromUi(){
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
-    content_width: localStorage.getItem('hermes-content-width') || 'default',
+    // content_width is intentionally ABSENT (#7497 re-gate SILENT): the
+    // composer picker commits it through its own width-only autosave at
+    // selection time. Including it here made every other appearance change
+    // silently re-write the width, and let a picker-only selection route
+    // through this payload while the form was still unhydrated.
     chat_activity_display_mode: chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='hide_all_activity')
       ? chatActivityModeSel.value
       : 'compact_worklog',
@@ -9221,6 +9225,33 @@ function _scheduleAppearanceAutosave(){
   _settingsAppearanceAutosaveTimer=setTimeout(()=>_autosaveAppearanceSettings(payload),350);
 }
 
+function _scheduleContentWidthAutosave(width){
+  // Width-only autosave (#7497 re-gate SILENT): the composer picker commits
+  // the width at selection time and must never route through the
+  // Appearance-form autosave — that form stays unhydrated until Settings
+  // opens, and projecting its defaults overwrote the user's saved theme,
+  // skin, font size, auto-follow, Markdown, endless-scroll and activity
+  // preferences on a picker-only selection.
+  const next=(typeof _normalizeContentWidth==='function')?_normalizeContentWidth(width):width;
+  const payload={content_width:next};
+  const post=(typeof _enqueueSettingsPost==='function')
+    ? _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)})
+    : api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+  Promise.resolve(post).then((saved)=>{
+    // Only a save for the STILL-CURRENT selection may project its echo, and
+    // only when the server normalized the value differently.
+    if(saved&&saved.content_width&&saved.content_width!==next
+      &&typeof _applyContentWidth==='function'
+      &&localStorage.getItem('hermes-content-width')===String(next)){
+      localStorage.setItem('hermes-content-width',saved.content_width);
+      _applyContentWidth(saved.content_width);
+      if(typeof _syncContentWidthPicker==='function') _syncContentWidthPicker(saved.content_width);
+    }
+  }).catch(()=>{ /* the selection persists in localStorage; boot
+                     reconciliation re-pushes it after a failed save */ });
+}
+if(typeof window!=='undefined') window._scheduleContentWidthAutosave=_scheduleContentWidthAutosave;
+
 async function _autosaveAppearanceSettings(payload){
   try{
     const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
@@ -9228,12 +9259,6 @@ async function _autosaveAppearanceSettings(payload){
     _rememberAppearanceSaved(payload);
     if(saved&&saved.font_size){
       localStorage.setItem('hermes-font-size',saved.font_size);
-    }
-    // Only the save for the current selection may project its response.
-    if(saved&&saved.content_width&&payload&&localStorage.getItem('hermes-content-width')===payload.content_width){
-      localStorage.setItem('hermes-content-width',saved.content_width);
-      if(typeof _applyContentWidth==='function') _applyContentWidth(saved.content_width);
-      if(typeof _syncContentWidthPicker==='function') _syncContentWidthPicker(saved.content_width);
     }
     if(saved){
       window._sessionJumpButtonsEnabled=!!saved.session_jump_buttons;
