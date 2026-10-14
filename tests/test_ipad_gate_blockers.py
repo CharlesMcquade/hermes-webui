@@ -44,7 +44,10 @@ def test_touch_window_reset_only_on_scope_change():
     fn = _extract_fn(SESSIONS_JS, "renderSessionListFromCache")
     fp_idx = fn.find("scopeFingerprint=")
     assert fp_idx >= 0, "Scope fingerprint must be computed"
-    window = fn[fp_idx:fp_idx + 3000]
+    # Window covers the fingerprint array, the scope-only decision, and the
+    # bounds reset. The #6426 round-4 fix comments between them grew this
+    # span past 3000 chars; 3800 keeps the reset statements in view.
+    window = fn[fp_idx:fp_idx + 3800]
     assert "prevFingerprint!==scopeFingerprint" in window, \
         "Bounds reset must be gated on a fingerprint CHANGE"
     assert "_sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH" in window, \

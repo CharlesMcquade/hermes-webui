@@ -1,36 +1,36 @@
-"""#6426 gate re-gate regressions — the two remaining blanking cases.
+"""#6426 gate re-gate regressions — deep-scroll blanking cases.
 
-Both were reproduced by the gate-certifier in Chromium with touch at iPad
-sizes; the Node geometry test cannot see them, so these drive the real
-production functions under node.
+Round-4 gate findings (exact head ``5934b565b7``), both CORE:
 
-## MUST-FIX: a new conversation arriving while scrolled deep blanks the sidebar
+1. **Any forced re-render while scrolled deep blanks the sidebar.**
+   ``_setupTouchSentinel()`` runs at the end of EVERY touch render and calls
+   ``_invalidateTouchRender()`` unconditionally. The round-3 teardown wipe
+   made that invalidation delete ``dataset.sessionTouchScope`` and
+   ``sessionTouchScopeOnly`` — the very fingerprints the just-finished
+   ``renderSessionListFromCache()`` had stamped onto the same list. The next
+   refresh read an empty ``prevFingerprint``, took the full ``[0,60)`` reset
+   beneath the preserved deep scroll position, and blanked the sidebar; the
+   forced-render path (collapse toggle, select mode, pin success, the
+   recovery timer itself) hits this on its very next repaint.
+   Fix: setup captures both fingerprints before the invalidation and
+   restores them when the invalidated list is this setup's list (a same-list
+   owner replacement). Genuine teardowns keep the deletion.
 
-``renderSessionListFromCache()`` reset BOTH touch bounds to the initial batch
-whenever the full scope fingerprint changed — but the last two fingerprint
-fields (total row count, ordered SID prefix) are CONTENT, not scope. A
-conversation arriving elsewhere while the user is scrolled deep changes only
-those two fields; the render then restores the preserved deep
-``listScrollTopBeforeRender`` on top of a [0,60) window, painting rows the
-viewport cannot see: zero visible rows until the stranded-viewport recovery
-timer fires (~1.25s), at every list size.
+2. **Content refreshes blank a normally scrolled prefix window.**
+   Incremental appends keep ``start=0`` while the user scrolls deep into the
+   loaded prefix, so the round-3 ``prevTouchStart>0`` gate rejected the
+   re-anchor exactly when a content-only refresh needed it (window
+   ``[0,1060)``, viewport at ~37,000px → reset to ``[0,60)``, zero visible
+   rows for ~1.24s). Fix: the gate is removed — the re-anchor is
+   self-limiting (a shallow viewport projects an anchor of ≈0, so the window
+   degrades to the same ``[0,60)`` the reset would have painted).
 
-Fix: compute a scope-ONLY fingerprint (first eight fields) BEFORE the reset;
-on a content-only change while the touch window is deep, re-anchor the
-60-row window on the projected first visible row instead of resetting to the
-top. Genuine scope changes keep the full reset.
-
-## CORE: touch → mouse → touch at a deep scroll position blanks the list
-
-``_invalidateTouchRender()`` cleared the loaded interval bounds but left the
-stored ``data-session-touch-scope`` fingerprint on the list. Re-entering
-touch mode saw an UNCHANGED fingerprint, skipped the scope-reset branch, and
-the zeroed bounds survived into ``_sessionVirtualWindow`` — [0,0) painted,
-recovery rejected the degenerate window: zero rows after idling and after
-further scrolling.
-
-Fix: teardown deletes the fingerprint (and its scope-only companion) from
-the owned list, so re-entry takes the normal initial-batch path.
+Unlike the earlier revision of this file, these tests do NOT hand-copy the
+production logic: every scenario executes the REAL production fingerprint
+block (sliced verbatim out of ``renderSessionListFromCache``), the REAL
+``_invalidateTouchRender``, the REAL ``_setupTouchSentinel``, and the REAL
+``_sessionVirtualWindow`` under node, in the production order render →
+setup → invalidation → re-render.
 """
 from __future__ import annotations
 
@@ -52,6 +52,11 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 NODE_BIN = str(NODE)
 
 SRC = SESSIONS_JS.read_text(encoding="utf-8")
+
+# Production constants (static/sessions.js:4727-4735) used by Python-side
+# assertions against node results.
+INITIAL_BATCH = 60
+ROW_HEIGHT = 52
 
 
 def _function_source(name: str, src: str = "") -> str:
@@ -118,24 +123,351 @@ def _run_node(script: str):
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-_STUBS = r"""
-function t(key){ return key; }
-const SESSION_TOUCH_INITIAL_BATCH=60;
-const SESSION_TOUCH_BATCH_SIZE=40;
-const SESSION_VIRTUAL_ROW_HEIGHT=44;
-const SESSION_VIRTUAL_BUFFER_ROWS=6;
-const SESSION_VIRTUAL_THRESHOLD_ROWS=80;
+def _fingerprint_block_source(src: str = "") -> str:
+    """Slice the REAL touch-scope fingerprint block out of
+    renderSessionListFromCache: from ``if(_isTouchPrimary()){`` through the
+    scope-only fingerprint, the bounds reset, and the content-only re-anchor.
+    Executed verbatim by the chain tests below — no mirrored logic."""
+    src = src or SRC
+    anchor = src.find("const collapsedKeys=Object.keys(_groupCollapsed)")
+    assert anchor != -1, "fingerprint block anchor (collapsedKeys) not found"
+    start = src.rfind("if(_isTouchPrimary()){", 0, anchor)
+    assert start != -1, "fingerprint block start not found"
+    end = src.find("const activeIndex=flatSessionRows.findIndex(", start)
+    assert end != -1, "fingerprint block end not found"
+    return src[start:end]
+
+
+# The chain harness reuses the battle-tested node preamble from
+# test_ipad_sidebar_scroll_stuck (mock DOM, extractFunc, state lets, real
+# _touchIntervalState/_ensureTouchSentinelObserver). It mocks
+# _invalidateTouchRender and never extracts _setupTouchSentinel, so the chain
+# body below re-extracts BOTH from the real source before driving scenarios.
+try:  # pragma: no cover - import guard mirrors test_touch_prepend_browser
+    from tests.test_ipad_sidebar_scroll_stuck import (  # noqa: E402
+        SESSIONS_JS as _STUCK_SESSIONS_JS_TEXT,
+        _node_test_preamble,
+    )
+except Exception:  # pragma: no cover
+    _STUCK_SESSIONS_JS_TEXT = None
+    _node_test_preamble = None
+
+# Exact restore statements added by the round-4 fix inside
+# _setupTouchSentinel. The mutation bite strips them from the extracted REAL
+# function source (emulating the pre-fix head) and expects the chain to fail.
+_SETUP_RESTORE_STMTS = (
+    "if(_setupPrevScopeFingerprint)_setupInvalidatedList.dataset.sessionTouchScope=_setupPrevScopeFingerprint;",
+    "if(_setupPrevScopeOnlyFingerprint)_setupInvalidatedList.dataset.sessionTouchScopeOnly=_setupPrevScopeOnlyFingerprint;",
+)
+
+_CHAIN_PRELUDE = """const SESSIONS_JS = """ + repr(_STUCK_SESSIONS_JS_TEXT) + """;
+""" + (_node_test_preamble() if _node_test_preamble else "") + """
+// ── chain overrides: everything below makes the preamble production-real ──
+global.cancelAnimationFrame = function(){};
+global.requestAnimationFrame = global.requestAnimationFrame || function(fn){ return 0; };
+window.IntersectionObserver = function(cb, opts) {
+  this.disconnect = function(){};
+  this.observe = function(){};
+  this.unobserve = function(){};
+};
+global.IntersectionObserver = window.IntersectionObserver;
+function _isTouchPrimary(){ return true; }
+// REAL invalidation replaces the preamble mock — the fingerprint deletion
+// under test lives only in the production function.
+""" + "eval(extractFunc('_invalidateTouchRender'));" + """
+// REAL setup — carries the round-4 capture/restore around its invalidation.
+""" + "eval(extractFunc('_setupTouchSentinel'));" + """
+// REAL desktop/touch window computation (the production paint authority for
+// touch lists — it reads the touch bounds the fingerprint block maintains).
+""" + "eval(extractFunc('_sessionVirtualWindow'));" + """
+// Suppress the continuous-append chain: this court is the
+// fingerprint → window → setup → invalidation schedule, not the append path.
+_scheduleContinuousBatch = function(){};
+const SESSION_VIRTUAL_BUFFER_ROWS = 12;
+const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
+// Render-side state the production fingerprint block reads/writes.
+let q = '';
+let _groupCollapsed = {};
+let _showAllProfiles = false;
+let _activeProject = 'proj';
+let _sessionSourceFilter = 'cli';
+let _showArchived = false;
+let _contentSearchResults = null;
+let activeSidForSidebar = '';
+let listScrollTopBeforeRender = 0;
+// Timers the REAL _invalidateTouchRender clears (absent from the preamble's
+// mock invalidation).
+let _pendingTouchDeferredRenderTimer = 0;
+let _strandedTouchRecoveryTimer = 0;
+// The production fingerprint block, verbatim, wrapped so each harness render
+// call runs exactly what renderSessionListFromCache runs in its touch branch.
+function productionTouchScopeBranch(){
+""" + _fingerprint_block_source() + """
+}
+function makeFlatRows(total, firstSidOffset) {
+  const rows = [];
+  for (let i = 0; i < total; i++) {
+    rows.push({ group: { label: 'G' }, session: { session_id: 's' + (i + (firstSidOffset || 0)) } });
+  }
+  return rows;
+}
 """
 
 
+def _chain_script(body: str, strip_setup_restore: bool = False) -> str:
+    script = _CHAIN_PRELUDE
+    if strip_setup_restore:
+        setup_src = _function_source("_setupTouchSentinel")
+        for stmt in _SETUP_RESTORE_STMTS:
+            assert stmt in setup_src, "restore statement missing from extracted setup source"
+            setup_src = setup_src.replace(stmt, "")
+        script += "eval(" + json.dumps(setup_src) + ");\n"
+    script += body
+    return script
+
+
+class TestProductionRenderSetupChain:
+    """Round-4 CORE blockers, driven through the REAL production chain:
+    fingerprint block (verbatim source slice) → _sessionVirtualWindow →
+    _setupTouchSentinel (real, includes its unconditional invalidation)."""
+
+    def _render_once_js(self) -> str:
+        # The production fingerprint block reads the module-level
+        # `flatSessionRows` binding (as renderSessionListFromCache does), so
+        # scenarios model content changes by REASSIGNING that binding.
+        return """
+function renderOnce() {
+  productionTouchScopeBranch();
+  const vw = _sessionVirtualWindow({
+    total: flatSessionRows.length,
+    scrollTop: listScrollTopBeforeRender,
+    viewportHeight: list.clientHeight || 1080,
+    itemHeight: SESSION_VIRTUAL_ROW_HEIGHT,
+    buffer: SESSION_VIRTUAL_BUFFER_ROWS,
+    threshold: SESSION_VIRTUAL_THRESHOLD_ROWS,
+    activeIndex: -1,
+  });
+  _setupTouchSentinel(list, flatSessionRows.length, flatSessionRows,
+    function(s){ return makeSessionItem(s.session_id); },
+    activeSidForSidebar, vw.end, vw.start);
+  return vw;
+}
+"""
+
+    def test_forced_repaints_at_depth_keep_window_and_fingerprints(self):
+        """Forced re-render while scrolled deep (collapse toggle, select mode,
+        pin success, recovery timer — eight call sites) must not blank the
+        sidebar: setup's invalidation must not erase the fingerprints the
+        render just stamped, so unchanged-scope repaints keep the deep window
+        instead of resetting to [0,60) beneath the restored deep scrollTop."""
+        body = """
+const list = makeList();
+list.clientHeight = 1080;
+let flatSessionRows = makeFlatRows(1500, 0);
+listScrollTopBeforeRender = 170 * SESSION_VIRTUAL_ROW_HEIGHT; // deep viewport at row ~170
+// Reach the mid-session state through the production block itself: the first
+// call sees an empty fingerprint and takes the initial-batch path (stamping
+// the fingerprints), then the deep appends + scroll are applied on top.
+productionTouchScopeBranch();
+_sessionTouchStartIndex = 140;
+_sessionTouchLoadedCount = 200;
+""" + self._render_once_js() + """
+const vw1 = renderOnce();
+const scopeAfterSetup1 = list.dataset.sessionTouchScope || '';
+const scopeOnlyAfterSetup1 = list.dataset.sessionTouchScopeOnly || '';
+const vw2 = renderOnce();
+const vw3 = renderOnce();
+const viewportRow = 170;
+console.log(JSON.stringify({
+  fingerprintsSurviveSetup: !!(scopeAfterSetup1 && scopeOnlyAfterSetup1),
+  fingerprintsAfterThreeRenders: !!(list.dataset.sessionTouchScope && list.dataset.sessionTouchScopeOnly),
+  start3: _sessionTouchStartIndex,
+  loaded3: _sessionTouchLoadedCount,
+  vw3Start: vw3.start,
+  vw3End: vw3.end,
+  viewportCovered: vw3.start * SESSION_VIRTUAL_ROW_HEIGHT <= viewportRow * SESSION_VIRTUAL_ROW_HEIGHT
+    && viewportRow * SESSION_VIRTUAL_ROW_HEIGHT < vw3.end * SESSION_VIRTUAL_ROW_HEIGHT,
+  noTopReset: _sessionTouchStartIndex >= 100,
+}));
+"""
+        out = _run_node(_chain_script(body))
+        assert out["fingerprintsSurviveSetup"] is True, (
+            "_setupTouchSentinel's invalidation wiped the fingerprints the "
+            "render just stamped — the next refresh resets to [0,60) beneath "
+            "the preserved deep scroll position (gate round-4 blocker 1)"
+        )
+        assert out["fingerprintsAfterThreeRenders"] is True
+        assert out["viewportCovered"] is True, (
+            "the third forced repaint must still cover the viewport — zero "
+            "visible rows at depth is the reproduced blank"
+        )
+        assert out["noTopReset"] is True
+        assert out["vw3End"] > out["vw3Start"]
+
+    def test_mutation_bite_setup_restore_removal(self):
+        """Bite: stripping the capture/restore from the REAL setup source
+        (the pre-fix head) must fail the chain — fingerprints vanish during a
+        setup whose list is already owned, and the NEXT render (the third
+        repaint — the gate's exact repro) resets the deep window to [0,60)
+        beneath the restored deep scroll position."""
+        body = """
+const list = makeList();
+list.clientHeight = 1080;
+let flatSessionRows = makeFlatRows(1500, 0);
+listScrollTopBeforeRender = 170 * SESSION_VIRTUAL_ROW_HEIGHT;
+productionTouchScopeBranch();
+_sessionTouchStartIndex = 140;
+_sessionTouchLoadedCount = 200;
+""" + self._render_once_js() + """
+renderOnce();   // establishes list ownership; setup#2 onwards wipes on strip
+renderOnce();   // strip: setup#2 deletes the fingerprints the block stamped
+const fingerprintsAfterSecondSetup = !!(list.dataset.sessionTouchScope && list.dataset.sessionTouchScopeOnly);
+const vw3 = renderOnce();   // block now reads an empty fingerprint → reset
+console.log(JSON.stringify({
+  fingerprintsAfterSecondSetup: fingerprintsAfterSecondSetup,
+  windowResetToTop: _sessionTouchStartIndex === 0 && _sessionTouchLoadedCount === SESSION_TOUCH_INITIAL_BATCH,
+  viewportCovered: vw3.start * SESSION_VIRTUAL_ROW_HEIGHT <= 170 * SESSION_VIRTUAL_ROW_HEIGHT
+    && 170 * SESSION_VIRTUAL_ROW_HEIGHT < vw3.end * SESSION_VIRTUAL_ROW_HEIGHT,
+}));
+"""
+        out = _run_node(_chain_script(body, strip_setup_restore=True))
+        assert out["fingerprintsAfterSecondSetup"] is False, (
+            "the bite must bite: without the capture/restore, a setup whose "
+            "list is already owned deletes the freshly stamped fingerprints"
+        )
+        assert out["windowResetToTop"] is True, (
+            "without the restore, the third repaint must take the full "
+            "[0,60) reset — the exact reproduced regression"
+        )
+        assert out["viewportCovered"] is False
+
+    def test_content_only_refresh_reanchors_prefix_window(self):
+        """A conversation arriving while the viewport is deep inside a PREFIX
+        touch window ([0,1060), start=0 after appends) must re-anchor on the
+        restored scroll position — the removed prevTouchStart>0 gate must not
+        reject the re-anchor (gate round-4 blocker 2)."""
+        body = """
+const list = makeList();
+list.clientHeight = 1080;
+let flatSessionRows = makeFlatRows(1500, 0);
+// Mid-session state: prefix window [0,1060) (appends keep start=0), viewport
+// scrolled ~37,000px deep into the loaded prefix (row ~712).
+listScrollTopBeforeRender = 712 * SESSION_VIRTUAL_ROW_HEIGHT;
+productionTouchScopeBranch();            // stamps fingerprints via initial path
+_sessionTouchStartIndex = 0;
+_sessionTouchLoadedCount = 1060;
+""" + self._render_once_js() + """
+const vw1 = renderOnce();                // unchanged repaint at depth
+// A conversation arrived at the top: one more row, different SID prefix —
+// scope fields identical, CONTENT changed. Reassign the production binding.
+flatSessionRows = makeFlatRows(1501, 1);
+const vw2 = renderOnce();                // content-only change arrives
+console.log(JSON.stringify({
+  start2: _sessionTouchStartIndex,
+  loaded2: _sessionTouchLoadedCount,
+  vw2Start: vw2.start,
+  vw2End: vw2.end,
+  reanchoredNearViewport: _sessionTouchStartIndex >= 680 && _sessionTouchStartIndex <= 712,
+  viewportCovered: vw2.start * SESSION_VIRTUAL_ROW_HEIGHT <= 712 * SESSION_VIRTUAL_ROW_HEIGHT
+    && 712 * SESSION_VIRTUAL_ROW_HEIGHT < vw2.end * SESSION_VIRTUAL_ROW_HEIGHT,
+}));
+"""
+        out = _run_node(_chain_script(body))
+        assert out["reanchoredNearViewport"] is True, (
+            "a content-only refresh with a prefix window (start=0) and a deep "
+            "viewport must re-anchor near the scroll position — the removed "
+            "prevTouchStart>0 gate must stay removed (gate round-4 blocker 2)"
+        )
+        assert out["viewportCovered"] is True
+        assert out["vw2End"] > out["vw2Start"]
+
+    def test_shallow_content_only_change_degrades_to_initial_batch(self):
+        """Without the start gate, a genuinely shallow viewport must behave
+        exactly as before: the re-anchor projects an anchor of ≈0 and the
+        window degrades to the same [0,60) the reset would have painted."""
+        body = """
+const list = makeList();
+list.clientHeight = 1080;
+let flatSessionRows = makeFlatRows(120, 0);
+listScrollTopBeforeRender = 0; // viewport at the top
+productionTouchScopeBranch();
+_sessionTouchStartIndex = 0;
+_sessionTouchLoadedCount = SESSION_TOUCH_INITIAL_BATCH;
+""" + self._render_once_js() + """
+renderOnce();
+// one more row, different SID prefix — scope identical, content changed
+flatSessionRows = makeFlatRows(121, 1);
+const vw2 = renderOnce();
+console.log(JSON.stringify({ start2: _sessionTouchStartIndex, end2: vw2.end }));
+"""
+        out = _run_node(_chain_script(body))
+        assert out["start2"] == 0 and out["end2"] == INITIAL_BATCH, (
+            "shallow viewports must degrade to the initial batch — no behavior "
+            "change for small lists now that the start gate is gone"
+        )
+
+    def test_teardown_still_clears_fingerprints(self):
+        """Genuine teardown keeps its deletion: the REAL _invalidateTouchRender
+        clears both fingerprints and the bounds, so touch → mouse → touch
+        re-entry takes the normal initial-batch path instead of surviving into
+        _sessionVirtualWindow with zeroed bounds as an unchanged-scope [0,0)
+        window (the round-3 CORE case must stay fixed)."""
+        body = """
+const list = makeList();
+list.clientHeight = 1080;
+let flatSessionRows = makeFlatRows(1500, 0);
+listScrollTopBeforeRender = 170 * SESSION_VIRTUAL_ROW_HEIGHT;
+productionTouchScopeBranch();
+_sessionTouchStartIndex = 140;
+_sessionTouchLoadedCount = 200;
+_sessionTouchListEl = list;
+// REAL production teardown (extracted above, replacing the preamble mock):
+_invalidateTouchRender();
+const fingerprintCleared = !list.dataset.sessionTouchScope && !list.dataset.sessionTouchScopeOnly;
+const boundsZeroedAfterTeardown = _sessionTouchStartIndex === 0 && _sessionTouchLoadedCount === 0;
+// Re-entry: same scope, fresh render — the production sequence runs the
+// fingerprint block FIRST (empty prev → initial-batch reset), then the
+// window. The degenerate [0,0) must be unreachable.
+productionTouchScopeBranch();
+const vw = _sessionVirtualWindow({
+  total: flatSessionRows.length,
+  scrollTop: 0,
+  viewportHeight: 1080,
+  itemHeight: SESSION_VIRTUAL_ROW_HEIGHT,
+  buffer: SESSION_VIRTUAL_BUFFER_ROWS,
+  threshold: SESSION_VIRTUAL_THRESHOLD_ROWS,
+  activeIndex: -1,
+});
+console.log(JSON.stringify({
+  fingerprintCleared: fingerprintCleared,
+  start: vw.start,
+  end: vw.end,
+  boundsZeroed: boundsZeroedAfterTeardown,
+}));
+"""
+        out = _run_node(_chain_script(body))
+        assert out["fingerprintCleared"] is True, (
+            "genuine teardown must clear the stored scope fingerprints so "
+            "re-entry takes the initial-batch path"
+        )
+        assert out["boundsZeroed"] is True
+        assert out["start"] == 0 and out["end"] == INITIAL_BATCH, (
+            "re-entry after teardown with an unchanged scope must paint the "
+            "initial [0,60) batch — never the degenerate [0,0)"
+        )
+
+
 class TestCountChangeKeepsDeepWindow:
-    """MUST-FIX: content-only fingerprint change keeps a deep-anchored window."""
+    """Window-math pins (real _sessionVirtualWindow; production source pins)."""
 
     def _script(self, body: str) -> str:
         return (
-            _STUBS
-            + _collect_functions(["_sessionVirtualWindow"])
+            _collect_functions(["_sessionVirtualWindow"])
             + "function _isTouchPrimary(){return true;}\n"
+            + "const SESSION_TOUCH_INITIAL_BATCH=60;\n"
+            + "const SESSION_VIRTUAL_ROW_HEIGHT=52;\n"
+            + "const SESSION_VIRTUAL_BUFFER_ROWS=12;\n"
+            + "const SESSION_VIRTUAL_THRESHOLD_ROWS=80;\n"
             + body
         )
 
@@ -144,94 +476,23 @@ class TestCountChangeKeepsDeepWindow:
         conversation (total 11001) + restored deep scrollTop → the window
         must stay anchored near the scroll position, NOT reset to [0,60)."""
         script = self._script(r"""
-// Simulate the production sequence inside renderSessionListFromCache's touch
-// branch, using the real _sessionVirtualWindow and the real fingerprint math.
 let _sessionTouchStartIndex=9940;
 let _sessionTouchLoadedCount=10000;
-// prior fingerprints: scope-only identical, content changed (one new row).
-let prevFingerprint='1|proj|cli|0||0||sidA|11000|sidprefix-A';
-const scopeOnlyPrev=prevFingerprint.split('|').slice(0,8).join('|');
-// new content: total 11001, new sid prefix; scope fields identical.
-const scopeFingerprint='1|proj|cli|0||0||sidA|11001|sidprefix-B';
-const scopeOnlyNew=scopeFingerprint.split('|').slice(0,8).join('|');
-const listScrollTopBeforeRender=9940*SESSION_VIRTUAL_ROW_HEIGHT;
-const flatSessionRows=new Array(11001).fill(null);
-
-// -- production logic (mirrors the fixed branch) --
-const prevScopeOnlyFingerprint=scopeOnlyPrev;
-const prevTouchStart=Math.max(0, Number(_sessionTouchStartIndex)||0);
-const contentOnlyDeepChange=prevFingerprint!==scopeFingerprint&&!!prevFingerprint
-  &&prevScopeOnlyFingerprint===scopeOnlyNew&&prevTouchStart>0
-  &&flatSessionRows.length>SESSION_TOUCH_INITIAL_BATCH;
-if(prevFingerprint!==scopeFingerprint){
-  _sessionTouchStartIndex=0;
-  _sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH;
-}
-if(contentOnlyDeepChange){
-  const anchorFirstVisible=Math.floor(Math.max(0, Number(listScrollTopBeforeRender)||0)/SESSION_VIRTUAL_ROW_HEIGHT);
-  const nextStart=Math.max(0, Math.min(anchorFirstVisible-SESSION_VIRTUAL_BUFFER_ROWS, Math.max(0, flatSessionRows.length-SESSION_TOUCH_INITIAL_BATCH)));
-  _sessionTouchStartIndex=nextStart;
-  _sessionTouchLoadedCount=Math.min(flatSessionRows.length, nextStart+SESSION_TOUCH_INITIAL_BATCH);
-}
 const vw=_sessionVirtualWindow({
-  total:flatSessionRows.length,
-  scrollTop:listScrollTopBeforeRender,
-  viewportHeight:1080,
-  itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
-  buffer:SESSION_VIRTUAL_BUFFER_ROWS,
-  threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
-  activeIndex:-1,
+  total:11001, scrollTop:9940*SESSION_VIRTUAL_ROW_HEIGHT, viewportHeight:1080,
+  itemHeight:SESSION_VIRTUAL_ROW_HEIGHT, buffer:SESSION_VIRTUAL_BUFFER_ROWS,
+  threshold:SESSION_VIRTUAL_THRESHOLD_ROWS, activeIndex:-1,
 });
-console.log(JSON.stringify({start:vw.start,end:vw.end,contentOnly:contentOnlyDeepChange}));
+console.log(JSON.stringify({start:vw.start,end:vw.end}));
 """)
         out = _run_node(script)
-        assert out["contentOnly"] is True
         assert out["start"] >= 9800, (
             "a content-only change while scrolled deep must keep the window "
             "anchored near the scroll position — not reset to [0,60)"
         )
         assert out["end"] > out["start"], "window must be non-empty"
-        # The restored scroll position must fall INSIDE the painted window:
-        restored_scroll = 9940 * 44  # SESSION_VIRTUAL_ROW_HEIGHT
-        assert out["start"] * 44 <= restored_scroll < out["end"] * 44
-
-    def test_genuine_scope_change_still_resets(self):
-        """A real scope change (search query) must still reset to [0,60)."""
-        script = self._script(r"""
-let _sessionTouchStartIndex=9940;
-let _sessionTouchLoadedCount=10000;
-const prevFingerprint='1|proj|cli|0||0||sidA|1500|sidprefix-A';
-const scopeFingerprint='1|proj|cli|0|newquery||sidA|1500|sidprefix-A'; // scope field changed
-const scopeOnlyNew=scopeFingerprint.split('|').slice(0,8).join('|');
-const prevScopeOnlyFingerprint=prevFingerprint.split('|').slice(0,8).join('|');
-const listScrollTopBeforeRender=9940*SESSION_VIRTUAL_ROW_HEIGHT;
-const flatSessionRows=new Array(1500).fill(null);
-const contentOnlyDeepChange=prevFingerprint!==scopeFingerprint&&!!prevFingerprint
-  &&prevScopeOnlyFingerprint===scopeOnlyNew&&prevTouchStart>0
-  &&flatSessionRows.length>SESSION_TOUCH_INITIAL_BATCH;
-if(prevFingerprint!==scopeFingerprint){
-  _sessionTouchStartIndex=0;
-  _sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH;
-}
-if(contentOnlyDeepChange){
-  const anchorFirstVisible=Math.floor(Math.max(0, Number(listScrollTopBeforeRender)||0)/SESSION_VIRTUAL_ROW_HEIGHT);
-  const nextStart=Math.max(0, Math.min(anchorFirstVisible-SESSION_VIRTUAL_BUFFER_ROWS, Math.max(0, flatSessionRows.length-SESSION_TOUCH_INITIAL_BATCH)));
-  _sessionTouchStartIndex=nextStart;
-  _sessionTouchLoadedCount=Math.min(flatSessionRows.length, nextStart+SESSION_TOUCH_INITIAL_BATCH);
-}
-const vw=_sessionVirtualWindow({
-  total:flatSessionRows.length, scrollTop:listScrollTopBeforeRender,
-  viewportHeight:1080, itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
-  buffer:SESSION_VIRTUAL_BUFFER_ROWS, threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
-  activeIndex:-1,
-});
-console.log(JSON.stringify({start:vw.start,end:vw.end,contentOnly:contentOnlyDeepChange}));
-""")
-        out = _run_node(script)
-        assert out["contentOnly"] is False
-        assert out["start"] == 0 and out["end"] == 60, (
-            "a genuine scope change (query) must keep the full reset to [0,60)"
-        )
+        restored_scroll = 9940 * 52
+        assert out["start"] * 52 <= restored_scroll < out["end"] * 52
 
     def test_render_source_wires_scope_only_logic(self):
         """Pin the production wiring: scope-only fingerprint computed BEFORE
@@ -245,6 +506,17 @@ console.log(JSON.stringify({start:vw.start,end:vw.end,contentOnly:contentOnlyDee
         # ...and the re-anchor must follow it.
         assert body.find("contentOnlyDeepChange)") > body.find("_sessionTouchStartIndex=0;\n      _sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH;")
 
+    def test_render_source_has_no_start_gate(self):
+        """Round-4 fix: the prevTouchStart>0 gate must stay OUT of the
+        content-only decision — it rejected the re-anchor for prefix windows
+        (start=0) whose viewport sat deep inside the loaded prefix."""
+        body = _function_source("renderSessionListFromCache")
+        assert "prevTouchStart" not in body, (
+            "the start-based gate is the round-4 regression: incremental "
+            "appends keep start=0 while the viewport is deep, so the gate "
+            "rejects the re-anchor exactly when a content-only refresh needs it"
+        )
+
     def test_mutation_bite_scope_guard_removal(self):
         """Removing the scope-only comparison (reverting to full-fingerprint
         content sensitivity) must fail the wiring pin: the guard expression
@@ -252,14 +524,41 @@ console.log(JSON.stringify({start:vw.start,end:vw.end,contentOnly:contentOnlyDee
         body = _function_source("renderSessionListFromCache")
         assert "prevScopeOnlyFingerprint===scopeOnlyFingerprint" in body
 
+    def test_setup_source_pins_capture_restore(self):
+        """Round-4 fix wiring: setup captures the fingerprints from the list
+        it is about to invalidate and restores them only for a same-list
+        replacement; the deletion itself stays in _invalidateTouchRender."""
+        setup = _function_source("_setupTouchSentinel")
+        for stmt in _SETUP_RESTORE_STMTS:
+            assert stmt in setup, f"missing restore statement: {stmt}"
+        assert setup.find("const _setupInvalidatedList=_sessionTouchListEl;") != -1
+        # The capture must precede the setup-path invalidation (the SECOND
+        # call site — the first is the touch→non-touch exit above it, which is
+        # genuine teardown and must keep its deletion).
+        capture_idx = setup.find("const _setupInvalidatedList=_sessionTouchListEl;")
+        main_invalidate_idx = setup.find("_invalidateTouchRender();", capture_idx)
+        assert main_invalidate_idx != -1
+        restore_idx = setup.find(_SETUP_RESTORE_STMTS[0])
+        assert capture_idx < main_invalidate_idx < restore_idx, (
+            "the capture must happen BEFORE the invalidation wipes the dataset, "
+            "and the restore right after it"
+        )
+        invalidate = _function_source("_invalidateTouchRender")
+        assert "delete _touchTeardownList.dataset.sessionTouchScope;" in invalidate
+        assert "delete _touchTeardownList.dataset.sessionTouchScopeOnly;" in invalidate
+        # The list must be captured BEFORE _sessionTouchListEl is nulled.
+        capture = invalidate.find("const _touchTeardownList=_sessionTouchListEl;")
+        nulling = invalidate.find("_sessionTouchListEl=null;")
+        assert -1 < capture < nulling
+
 
 def list_scroll_top(out):
-    # helper used in the first test's assertion
-    return 9940 * 44
+    # helper kept for the deep-window assertion above
+    return 9940 * 52
 
 
 class TestTeardownClearsFingerprint:
-    """CORE: touch → mouse → touch must not reuse a stale fingerprint."""
+    """Source pins for the teardown wipe (round-3 CORE case)."""
 
     def test_invalidate_touch_render_clears_scope_fingerprint(self):
         body = _function_source("_invalidateTouchRender")
@@ -268,63 +567,10 @@ class TestTeardownClearsFingerprint:
             "takes the initial-batch path instead of painting [0,0)"
         )
         assert "delete _touchTeardownList.dataset.sessionTouchScopeOnly;" in body
-        # The list must be captured BEFORE _sessionTouchListEl is nulled.
-        capture = body.find("const _touchTeardownList=_sessionTouchListEl;")
-        nulling = body.find("_sessionTouchListEl=null;")
-        assert -1 < capture < nulling
-
-    def test_reentry_after_teardown_resets_bounds(self):
-        """Drive the real sequence: deep bounds + fingerprint set → teardown
-        (bounds zeroed, fingerprint cleared) → re-render with unchanged scope
-        → the scope branch must fire and produce [0,60), not [0,0)."""
-        script = (
-            _STUBS
-            + _collect_functions(["_sessionVirtualWindow"])
-            + r"""
-// Touch-primary must be TRUE before _sessionVirtualWindow is collected —
-// define it AFTER the collected source so the real matchMedia-based
-// definition (false in node) does not shadow this stub.
-function _isTouchPrimary(){return true;}
-let _sessionTouchStartIndex=9940;
-let _sessionTouchLoadedCount=10000;
-const list={dataset:{sessionTouchScope:'1|proj|cli|0||0||sidA|1500|sidprefix-A'}};
-
-// -- teardown (mirrors _invalidateTouchRender's fixed tail) --
-function _invalidate(){
-  const t=list;
-  _sessionTouchStartIndex=0;
-  _sessionTouchLoadedCount=0;
-  if(t&&t.dataset){ delete t.dataset.sessionTouchScope; delete t.dataset.sessionTouchScopeOnly; }
-}
-_invalidate();
-
-// -- re-render, SAME scope (fingerprint recomputes identical) --
-const scopeFingerprint='1|proj|cli|0||0||sidA|1500|sidprefix-A';
-const prevFingerprint=list.dataset.sessionTouchScope||'';
-const prevTouchStart=Math.max(0, Number(_sessionTouchStartIndex)||0);
-const contentOnlyDeepChange=false;
-if(prevFingerprint!==scopeFingerprint){
-  _sessionTouchStartIndex=0;
-  _sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH;
-}
-const vw=_sessionVirtualWindow({
-  total:1500, scrollTop:0, viewportHeight:1080,
-  itemHeight:SESSION_VIRTUAL_ROW_HEIGHT, buffer:SESSION_VIRTUAL_BUFFER_ROWS,
-  threshold:SESSION_VIRTUAL_THRESHOLD_ROWS, activeIndex:-1,
-});
-console.log(JSON.stringify({start:vw.start,end:vw.end,fingerprintCleared:!list.dataset.sessionTouchScope}));
-"""
-        )
-        out = _run_node(script)
-        assert out["fingerprintCleared"] is True, "teardown must clear the fingerprint"
-        assert out["start"] == 0 and out["end"] == 60, (
-            "re-entry after teardown with an unchanged scope must paint the "
-            "initial [0,60) batch — never the degenerate [0,0)"
-        )
 
     def test_mutation_bite_fingerprint_clear_removal(self):
         """Reverting the teardown fingerprint clear must fail: the pre-fix
-        teardown left the fingerprint set, so the re-entry test above would
+        teardown left the fingerprint set, so the re-entry chain test would
         see prevFingerprint===scopeFingerprint and paint [0,0)."""
         body = _function_source("_invalidateTouchRender")
         stripped = body.replace("delete _touchTeardownList.dataset.sessionTouchScope;", "")
