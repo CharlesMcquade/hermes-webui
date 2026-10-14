@@ -7990,7 +7990,29 @@ function _setupTouchSentinel(list, total, flatRows, renderOneSession, activeSid,
   }
   // Unified invalidation before setting up new state. _invalidateTouchRender
   // bumps _sessionTouchGen, so the new render state's gen is already current.
+  // #6426 (gate round-4 CORE): this setup runs at the end of EVERY touch
+  // render, immediately after renderSessionListFromCache stamped the fresh
+  // scope fingerprints onto this list (dataset.sessionTouchScope /
+  // sessionTouchScopeOnly). _invalidateTouchRender's teardown wipe would
+  // delete them from the same list, so the NEXT count-only refresh reads an
+  // empty prevFingerprint, takes the full [0,60) reset beneath the preserved
+  // deep scroll position, and blanks the sidebar — the forced-render path
+  // (collapse toggle, select mode, pin success, the recovery timer itself)
+  // hits this on its very next repaint. Capture both fingerprints before the
+  // invalidation and restore them when the invalidated list is THIS setup's
+  // list (a same-list owner replacement). Genuine teardowns keep the
+  // deletion: the touch→non-touch exit above returns through
+  // _invalidateTouchRender directly, and when the list element itself is
+  // replaced the captured fingerprints belong to the outgoing element and
+  // are not restored onto the new one.
+  const _setupInvalidatedList=_sessionTouchListEl;
+  const _setupPrevScopeFingerprint=(_setupInvalidatedList&&_setupInvalidatedList.dataset)?(_setupInvalidatedList.dataset.sessionTouchScope||''):'';
+  const _setupPrevScopeOnlyFingerprint=(_setupInvalidatedList&&_setupInvalidatedList.dataset)?(_setupInvalidatedList.dataset.sessionTouchScopeOnly||''):'';
   _invalidateTouchRender();
+  if(list&&_setupInvalidatedList&&list===_setupInvalidatedList&&_setupInvalidatedList.dataset){
+    if(_setupPrevScopeFingerprint)_setupInvalidatedList.dataset.sessionTouchScope=_setupPrevScopeFingerprint;
+    if(_setupPrevScopeOnlyFingerprint)_setupInvalidatedList.dataset.sessionTouchScopeOnly=_setupPrevScopeOnlyFingerprint;
+  }
   // Restore the canonical loaded count to the exact number of rows the initial
   // render actually painted (virtualWindow.end). _invalidateTouchRender reset it
   // to 0; without restoring, the first _appendTouchBatch() reads oldLoaded=0,
@@ -11579,9 +11601,17 @@ function renderSessionListFromCache(){
     // and keep the stored scope-only fingerprint across renders.
     const scopeOnlyFingerprint=scopeFingerprint.split('|').slice(0,8).join('|');
     const prevScopeOnlyFingerprint=list.dataset.sessionTouchScopeOnly||'';
-    const prevTouchStart=Math.max(0, Number(_sessionTouchStartIndex)||0);
+    // #6426 (gate round-4 CORE): no start-index gate here. Incremental
+    // appends keep start=0 while the user scrolls deep into the loaded prefix,
+    // so a start-based gate would reject the re-anchor exactly when a
+    // content-only refresh must use it (window [0,1060), viewport at
+    // ~37,000px → reset to [0,60) under the restored scrollTop, zero visible
+    // rows for ~1.24s). The re-anchor is self-limiting for genuinely shallow
+    // viewports: the anchor projects to ≈0, nextStart clamps to 0, and the
+    // window degrades to the same [0,60) the reset would have painted — so
+    // small lists behave exactly as before without the gate.
     const contentOnlyDeepChange=prevFingerprint!==scopeFingerprint&&!!prevFingerprint
-      &&prevScopeOnlyFingerprint===scopeOnlyFingerprint&&prevTouchStart>0
+      &&prevScopeOnlyFingerprint===scopeOnlyFingerprint
       &&flatSessionRows.length>SESSION_TOUCH_INITIAL_BATCH;
     list.dataset.sessionTouchScopeOnly=scopeOnlyFingerprint;
     if(prevFingerprint!==scopeFingerprint){

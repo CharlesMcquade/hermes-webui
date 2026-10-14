@@ -4680,7 +4680,14 @@ async function fireScrollDrainRAFMutateThenMicrotasks(mutator) {{
   // Re-setup to get a fresh owner at loaded=100. Geometry is near-bottom at
   // setup and during the RAF, so the RAF queues the Promise. Then we scroll
   // away BEFORE microtasks drain — the microtask's nearBottom2 check fails.
+  // scrollTop must be re-anchored to 4400 for loaded=100 (5200−4400−800=0 ≤
+  // 200): the positive control left it at 2200 from the loaded=60 band, and
+  // at loaded=100 that position sits 2200px above the boundary — the RAF
+  // frame's direction check returns before queueing the Promise, so the
+  // scroll-away mutation below would never be reached and this scenario
+  // would pass vacuously.
   _setupTouchSentinel(list, {total}, flatRows, renderOne, null, 100);
+  list.scrollTop = 4400; // near loaded boundary: 5200 - 4400 - 800 = 0 <= 200
   appendCount = 0;
   const snap2 = snapshotLiveTree();
   await fireScrollDrainRAFMutateThenMicrotasks(function() {{
