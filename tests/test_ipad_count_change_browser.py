@@ -186,6 +186,7 @@ const scenarioB = {
   start2: _sessionTouchStartIndex,
   end2: vw2.end,
   reanchoredNearViewport: _sessionTouchStartIndex >= 680 && _sessionTouchStartIndex <= 712,
+  keptPaintedWindow: _sessionTouchStartIndex === 0 && _sessionTouchLoadedCount === 1060,
 };
 
 return { scenarioA: scenarioA, scenarioB: scenarioB };
@@ -229,6 +230,9 @@ return { scenarioA: scenarioA, scenarioB: scenarioB };
         "a content-only refresh deep inside a prefix window left zero visible "
         "rows — the reproduced round-4 blank (real Chromium layout)"
     )
-    assert b["reanchoredNearViewport"] is True, (
-        "the refreshed window must re-anchor near the restored scroll position"
+    assert b["keptPaintedWindow"] is True, (
+        "a content-only refresh whose anchor sits inside the previously "
+        "painted window must KEEP that window (master parity: the viewport "
+        "shifts by exactly the inserted rows, not by the row-height "
+        "estimate error — gate round-5 blocker 2)"
     )
