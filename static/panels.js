@@ -9234,9 +9234,12 @@ function _scheduleContentWidthAutosave(width){
   // preferences on a picker-only selection.
   const next=(typeof _normalizeContentWidth==='function')?_normalizeContentWidth(width):width;
   const payload={content_width:next};
-  const post=(typeof _enqueueSettingsPost==='function')
-    ? _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)})
-    : api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+  // Settings POSTs share one serialized queue (#6612 single owner): the
+  // picker's width-only save must serialize with every other settings
+  // writer, so it goes through _enqueueSettingsPost unconditionally — a
+  // direct api() fallback would bypass the queue's stale-response ordering
+  // guard and race an in-flight appearance save.
+  const post=_enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
   Promise.resolve(post).then((saved)=>{
     // Only a save for the STILL-CURRENT selection may project its echo, and
     // only when the server normalized the value differently.
