@@ -7930,7 +7930,17 @@ function _scheduleContinuousBatch(){
     if(owner.token!==_touchBatchToken) return;
     if(!_sessionTouchListEl||_sessionTouchListEl!==list) return;
     const liveDirection=_touchNextBatchDirection(list, state, 200);
-    if(liveDirection!==direction) return;
+    if(liveDirection!==direction){
+      // #6426 re-gate CORE 1: a deep jump that flips the needed batch
+      // direction must not strand the sidebar. This RAF was the last owner
+      // (it cleared its own registration above), so recovery declined with
+      // "owner exists" and nothing rescheduled — zero visible rows. Assess
+      // stranding here: ownership is already released, so a viewport outside
+      // the window arms the bounded recovery timer instead of the RAF
+      // returning silently.
+      _recoverStrandedTouchViewport(list);
+      return;
+    }
     if(_touchBatchPending) return;
     _touchBatchPending=true;
     try{
@@ -11610,6 +11620,13 @@ function renderSessionListFromCache(){
     // viewports: the anchor projects to ≈0, nextStart clamps to 0, and the
     // window degrades to the same [0,60) the reset would have painted — so
     // small lists behave exactly as before without the gate.
+    // #6426 re-gate MUST-FIX (round 5): snapshot the previously painted
+    // window BEFORE the content-only decision. A content-only refresh whose
+    // preserved anchor still falls inside that window must KEEP it —
+    // re-anchoring with the fixed SESSION_VIRTUAL_ROW_HEIGHT estimate walks
+    // the viewport by the real-height error on every arrival.
+    const prevTouchStart=Math.max(0, Number(_sessionTouchStartIndex)||0);
+    const prevTouchLoaded=Math.max(prevTouchStart, Number(_sessionTouchLoadedCount)||0);
     const contentOnlyDeepChange=prevFingerprint!==scopeFingerprint&&!!prevFingerprint
       &&prevScopeOnlyFingerprint===scopeOnlyFingerprint
       &&flatSessionRows.length>SESSION_TOUCH_INITIAL_BATCH;
@@ -11632,9 +11649,23 @@ function renderSessionListFromCache(){
       // position itself is restored below from listScrollTopBeforeRender, so
       // the painted window must cover it.
       const anchorFirstVisible=Math.floor(Math.max(0, Number(listScrollTopBeforeRender)||0)/SESSION_VIRTUAL_ROW_HEIGHT);
-      const nextStart=Math.max(0, Math.min(anchorFirstVisible-SESSION_VIRTUAL_BUFFER_ROWS, Math.max(0, flatSessionRows.length-SESSION_TOUCH_INITIAL_BATCH)));
-      _sessionTouchStartIndex=nextStart;
-      _sessionTouchLoadedCount=Math.min(flatSessionRows.length, nextStart+SESSION_TOUCH_INITIAL_BATCH);
+      const totalRows=flatSessionRows.length;
+      if(anchorFirstVisible>=prevTouchStart&&anchorFirstVisible<Math.min(totalRows,prevTouchLoaded)){
+        // The preserved scroll position still falls inside the window the
+        // previous render painted: keep that window. Repainting the same
+        // [start,loaded) from the refreshed rows shifts the viewport by
+        // exactly the inserted/removed rows (master parity). Re-anchoring
+        // here would replace painted rows ABOVE the viewport with a
+        // SESSION_VIRTUAL_ROW_HEIGHT spacer whose height differs from the
+        // real rows, walking the viewport by that estimate error on every
+        // content-only refresh.
+        _sessionTouchStartIndex=Math.min(prevTouchStart, Math.max(0,totalRows-1));
+        _sessionTouchLoadedCount=Math.min(totalRows, Math.max(prevTouchLoaded, _sessionTouchStartIndex+SESSION_TOUCH_INITIAL_BATCH));
+      }else{
+        const nextStart=Math.max(0, Math.min(anchorFirstVisible-SESSION_VIRTUAL_BUFFER_ROWS, Math.max(0, totalRows-SESSION_TOUCH_INITIAL_BATCH)));
+        _sessionTouchStartIndex=nextStart;
+        _sessionTouchLoadedCount=Math.min(totalRows, nextStart+SESSION_TOUCH_INITIAL_BATCH);
+      }
     }
   }
   const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));

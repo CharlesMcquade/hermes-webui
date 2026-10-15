@@ -21,9 +21,14 @@ Round-4 gate findings (exact head ``5934b565b7``), both CORE:
    loaded prefix, so the round-3 ``prevTouchStart>0`` gate rejected the
    re-anchor exactly when a content-only refresh needed it (window
    ``[0,1060)``, viewport at ~37,000px → reset to ``[0,60)``, zero visible
-   rows for ~1.24s). Fix: the gate is removed — the re-anchor is
-   self-limiting (a shallow viewport projects an anchor of ≈0, so the window
-   degrades to the same ``[0,60)`` the reset would have painted).
+   rows for ~1.24s). Fix: the gate is removed — and (round 5) a content-only
+   refresh whose restored anchor still falls inside the previously painted
+   window KEEPS that window, because re-anchoring with the fixed
+   ``SESSION_VIRTUAL_ROW_HEIGHT`` estimate walks the viewport by the real
+   row-height error on every arrival (one conversation moved the reader
+   hundreds of rows). The re-anchor survives only for anchors outside the
+   painted window; a shallow viewport still degrades to the same ``[0,60)``
+   the reset would have painted.
 
 Unlike the earlier revision of this file, these tests do NOT hand-copy the
 production logic: every scenario executes the REAL production fingerprint
@@ -341,11 +346,14 @@ console.log(JSON.stringify({
         )
         assert out["viewportCovered"] is False
 
-    def test_content_only_refresh_reanchors_prefix_window(self):
+    def test_content_only_refresh_keeps_painted_window(self):
         """A conversation arriving while the viewport is deep inside a PREFIX
-        touch window ([0,1060), start=0 after appends) must re-anchor on the
-        restored scroll position — the removed prevTouchStart>0 gate must not
-        reject the re-anchor (gate round-4 blocker 2)."""
+        touch window ([0,1060), start=0 after appends) must KEEP the window
+        the previous render painted when the restored scroll position still
+        falls inside it — repainting [0,1060) from the refreshed rows shifts
+        the viewport by exactly the inserted rows (master parity), while
+        re-anchoring walks the viewport by the fixed-row-height estimate
+        error (gate round-5 blocker 2)."""
         body = """
 const list = makeList();
 list.clientHeight = 1080;
@@ -367,19 +375,60 @@ console.log(JSON.stringify({
   loaded2: _sessionTouchLoadedCount,
   vw2Start: vw2.start,
   vw2End: vw2.end,
-  reanchoredNearViewport: _sessionTouchStartIndex >= 680 && _sessionTouchStartIndex <= 712,
+  keptPaintedWindow: _sessionTouchStartIndex === 0 && _sessionTouchLoadedCount === 1060,
   viewportCovered: vw2.start * SESSION_VIRTUAL_ROW_HEIGHT <= 712 * SESSION_VIRTUAL_ROW_HEIGHT
     && 712 * SESSION_VIRTUAL_ROW_HEIGHT < vw2.end * SESSION_VIRTUAL_ROW_HEIGHT,
 }));
 """
         out = _run_node(_chain_script(body))
-        assert out["reanchoredNearViewport"] is True, (
-            "a content-only refresh with a prefix window (start=0) and a deep "
-            "viewport must re-anchor near the scroll position — the removed "
-            "prevTouchStart>0 gate must stay removed (gate round-4 blocker 2)"
+        assert out["keptPaintedWindow"] is True, (
+            "a content-only refresh whose anchor sits inside the previously "
+            "painted window must KEEP that window (master parity) instead of "
+            "re-anchoring with the fixed-row-height estimate"
         )
         assert out["viewportCovered"] is True
         assert out["vw2End"] > out["vw2Start"]
+
+    def test_content_only_refresh_outside_window_still_reanchors(self):
+        """The keep-window rule must not freeze a stale window: when the
+        restored anchor falls OUTSIDE the previously painted window (rows
+        removed above it), the bounded re-anchor still runs."""
+        body = """
+const list = makeList();
+list.clientHeight = 1080;
+let flatSessionRows = makeFlatRows(1500, 0);
+// Deep window painted by appends at the BOTTOM of the list; the viewport
+// scrolled near the loaded prefix's deep edge (row ~1010 of [0,1060)).
+listScrollTopBeforeRender = 1010 * SESSION_VIRTUAL_ROW_HEIGHT;
+productionTouchScopeBranch();
+_sessionTouchStartIndex = 0;
+_sessionTouchLoadedCount = 1060;
+""" + self._render_once_js() + """
+renderOnce();
+// A large purge above the window: content changed, and the restored anchor
+// (row ~1010) now sits beyond the previously loaded prefix edge — the
+// keep-window rule does not apply because the anchor is outside
+// [prevStart, prevLoaded) of the refreshed list... but it is INSIDE
+// [0,1060) here by construction, so instead exercise the true outside case:
+// shrink the total so far below the anchor that the window must re-anchor.
+flatSessionRows = makeFlatRows(700, 2);
+const vw2 = renderOnce();
+console.log(JSON.stringify({
+  start2: _sessionTouchStartIndex,
+  loaded2: _sessionTouchLoadedCount,
+  vw2Start: vw2.start,
+  vw2End: vw2.end,
+  anchoredNearViewport: _sessionTouchStartIndex >= 640 && _sessionTouchStartIndex <= 660,
+  viewportCovered: vw2.start * SESSION_VIRTUAL_ROW_HEIGHT <= 640 * SESSION_VIRTUAL_ROW_HEIGHT
+    && 640 * SESSION_VIRTUAL_ROW_HEIGHT < vw2.end * SESSION_VIRTUAL_ROW_HEIGHT,
+}));
+"""
+        out = _run_node(_chain_script(body))
+        assert out["anchoredNearViewport"] is True, (
+            "an anchor outside the previously painted window must still take "
+            "the bounded re-anchor path"
+        )
+        assert out["viewportCovered"] is True
 
     def test_shallow_content_only_change_degrades_to_initial_batch(self):
         """Without the start gate, a genuinely shallow viewport must behave
@@ -506,15 +555,26 @@ console.log(JSON.stringify({start:vw.start,end:vw.end}));
         # ...and the re-anchor must follow it.
         assert body.find("contentOnlyDeepChange)") > body.find("_sessionTouchStartIndex=0;\n      _sessionTouchLoadedCount=SESSION_TOUCH_INITIAL_BATCH;")
 
-    def test_render_source_has_no_start_gate(self):
-        """Round-4 fix: the prevTouchStart>0 gate must stay OUT of the
-        content-only decision — it rejected the re-anchor for prefix windows
-        (start=0) whose viewport sat deep inside the loaded prefix."""
+    def test_render_source_pins_keep_window_reanchor(self):
+        """Round-5 fix wiring: a content-only refresh whose restored anchor
+        still falls inside the previously painted window KEEPS that window;
+        the bounded re-anchor survives only for anchors outside it. The
+        round-4 ``prevTouchStart>0`` rejection gate must stay OUT either way
+        — incremental appends keep start=0 while the viewport is deep, so a
+        start-based gate rejected the re-anchor exactly when it was needed."""
         body = _function_source("renderSessionListFromCache")
-        assert "prevTouchStart" not in body, (
-            "the start-based gate is the round-4 regression: incremental "
-            "appends keep start=0 while the viewport is deep, so the gate "
-            "rejects the re-anchor exactly when a content-only refresh needs it"
+        # The keep-window wiring is present...
+        assert "const prevTouchStart=Math.max(0, Number(_sessionTouchStartIndex)||0);" in body
+        assert "const prevTouchLoaded=Math.max(prevTouchStart, Number(_sessionTouchLoadedCount)||0);" in body
+        assert "if(anchorFirstVisible>=prevTouchStart&&anchorFirstVisible<Math.min(totalRows,prevTouchLoaded)){" in body
+        # ...the bounded re-anchor survives for out-of-window anchors...
+        assert "anchorFirstVisible-SESSION_VIRTUAL_BUFFER_ROWS" in body
+        # ...and the old rejection gate is still gone.
+        assert "prevTouchStart>0" not in body, (
+            "the start-based rejection gate is the round-4 regression: "
+            "incremental appends keep start=0 while the viewport is deep, so "
+            "the gate rejected the re-anchor exactly when a content-only "
+            "refresh needed it"
         )
 
     def test_mutation_bite_scope_guard_removal(self):
