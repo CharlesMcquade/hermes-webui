@@ -6082,3 +6082,262 @@ def test_lineage_segment_toggle_render_bypasses_touch_cooldown():
     assert "renderSessionListFromCache({force:true})" in toggle, (
         "lineage segment toggle must call renderSessionListFromCache({force:true})"
     )
+
+
+# ── Final prepend hides the top indicator without shifting visible rows ─────
+#
+# Greptile P2 on PR #6426: _prependTouchBatch() corrects scrollTop from the
+# anchor row's measured delta, and only afterwards calls _updateTouchSentinel().
+# When the final prepend reaches start=0, that call hides the top
+# "Loading more…" indicator, whose height sits ABOVE every row — so every
+# visible conversation jumps upward AFTER the correction already ran.
+# Production must update the affordances BEFORE measuring the anchor's final
+# offsetTop, so the single scrollTop correction includes the indicator's
+# height change.
+
+
+def test_final_prepend_hides_top_indicator_without_shifting_rows():
+    """The final prepend (start→0) must hide the top loading indicator as part
+    of the same layout change the anchor correction measures.
+
+    Scenario mirrors test_prepend_crosses_absent_earlier_group_inserts_before_
+    live_later (two prepends across absent earlier groups), but the live row
+    geometry ALSO includes the top indicator's height while it is displayed:
+    offsetTop = (indicator visible ? IND_H : 0) + liveIndex * ROW_HEIGHT.
+
+    Mutation bite: with the correction ordered before _updateTouchSentinel(),
+    the indicator hides AFTER the correction, the anchor's viewport coordinate
+    shifts by IND_H, and both the exact-scrollTop and viewport-anchor
+    assertions fail.
+    """
+    total = 160
+    ind_h = 36
+    flat_rows = []
+    for i in range(total):
+        if i < 40:
+            label = "Pre"
+        elif i < 80:
+            label = "Pre-2"
+        elif i < 120:
+            label = "Today"
+        else:
+            label = "Later"
+        flat_rows.append({
+            "group": {"label": label, "isPinned": False},
+            "session": {"session_id": f"s{i}"},
+        })
+
+    source = f"""
+const SESSIONS_JS = {SESSIONS_JS!r};
+""" + _node_test_preamble() + f"""
+const list = makeList();
+_sessionTouchListEl = list;
+_sessionTouchGen = 1;
+_sessionTouchTotalCount = {total};
+
+// requestAnimationFrame mock: store, never execute (we drive prepends manually).
+global.requestAnimationFrame = function(fn) {{ return 1; }};
+global.cancelAnimationFrame = function() {{}};
+
+// Top "Loading more…" indicator: visible while start > 0, with real layout
+// height above every row. Bottom sentinel present so _updateTouchSentinel
+// manages both affordances exactly as production does.
+const topIndicator = makeEl('div');
+topIndicator.className = 'session-touch-sentinel-top';
+topIndicator.dataset['touch-sentinel-top'] = '1';
+topIndicator.style.display = '';
+topIndicator.offsetHeight = {ind_h};
+const bottomSentinel = makeEl('div');
+bottomSentinel.className = 'session-touch-sentinel';
+bottomSentinel.dataset['touch-sentinel'] = '1';
+
+// DOM-faithful selectors over the live child tree (no side registries).
+list.querySelector = function(sel) {{
+  if (sel === '[data-touch-sentinel]') return bottomSentinel;
+  if (sel === '[data-touch-sentinel-top]') return topIndicator;
+  if (sel.indexOf('.session-date-group[data-group-label="') === 0) {{
+    const label = sel.split('data-group-label="')[1].split('"]')[0];
+    return list.children.find(c => c.dataset && c.dataset['group-label'] === label) || null;
+  }}
+  if (sel === '.session-date-group[data-group-label]') {{
+    return list.children.find(c => c.dataset && c.dataset['group-label'] !== undefined) || null;
+  }}
+  return null;
+}};
+list.querySelectorAll = function(sel) {{
+  if (sel === '.session-item[data-sid]') {{
+    const items = [];
+    for (const gw of list.children) {{
+      if (!gw.dataset || gw.dataset['group-label'] === undefined) continue;
+      const body = gw.querySelector('.session-date-body');
+      if (!body) continue;
+      for (const c of body.children) {{
+        if (c.className && c.className.indexOf('session-item') >= 0 && c.dataset && c.dataset.sid) items.push(c);
+      }}
+    }}
+    return items;
+  }}
+  if (sel === '.session-date-group[data-group-label]') {{
+    return list.children.filter(c => c.dataset && c.dataset['group-label'] !== undefined);
+  }}
+  return [];
+}};
+
+// Live row geometry: the top indicator's height sits above every row while
+// it is displayed, exactly like the real list.
+function makeSessionItemWithGeometry(sid) {{
+  const el = makeEl('div');
+  el.className = 'session-item';
+  el.dataset.sid = sid;
+  Object.defineProperty(el, 'offsetTop', {{
+    get: function() {{
+      const allItems = list.querySelectorAll('.session-item[data-sid]');
+      let idx = allItems.indexOf(el);
+      if (idx < 0) idx = 0;
+      const indH = (topIndicator.style.display !== 'none' && topIndicator.offsetHeight) || 0;
+      return indH + idx * SESSION_VIRTUAL_ROW_HEIGHT;
+    }},
+    configurable: true,
+  }});
+  return el;
+}}
+
+// Newly created wrappers get a tracking body with geometry-aware items.
+const _origCreate = _createTouchGroupWrapper;
+_createTouchGroupWrapper = function(g, st) {{
+  const wrapper = _origCreate(g, st);
+  wrapper.dataset['group-label'] = g.label;
+  const trackingBody = makeBodyThatTracksItems(list);
+  trackingBody.className = 'session-date-body';
+  wrapper.children = wrapper.children.filter(c => c.className !== 'session-date-body');
+  wrapper.appendChild(trackingBody);
+  wrapper.querySelector = function(sel) {{
+    if (sel === '.session-date-body') return trackingBody;
+    return null;
+  }};
+  return wrapper;
+}};
+
+function makeLiveGroup(label) {{
+  const gw = makeEl('div');
+  gw.className = 'session-date-group';
+  gw.dataset['group-label'] = label;
+  const body = makeBodyThatTracksItems(list);
+  body.className = 'session-date-body';
+  gw.appendChild(body);
+  gw.querySelector = function(sel) {{
+    if (sel === '.session-date-body') return body;
+    return null;
+  }};
+  return gw;
+}}
+
+// Initial paint: groups B (Today) and C (Later) live; P (Pre) and A (Pre-2)
+// are absent. Top indicator first in the list, bottom sentinel last.
+list.children.push(topIndicator);
+const gwB = makeLiveGroup('Today');
+const bodyB = gwB.querySelector('.session-date-body');
+for (let i = 80; i < 120; i++) bodyB.appendChild(makeSessionItemWithGeometry('s' + i));
+list.children.push(gwB);
+const gwC = makeLiveGroup('Later');
+const bodyC = gwC.querySelector('.session-date-body');
+for (let i = 120; i < 160; i++) bodyC.appendChild(makeSessionItemWithGeometry('s' + i));
+list.children.push(gwC);
+list.children.push(bottomSentinel);
+
+// Touch state: window [80, 160) painted; prefix [0, 80) unpainted.
+_sessionTouchStartIndex = 80;
+_sessionTouchLoadedCount = 160;
+_touchRenderState = {{
+  gen: 1, list: list, flatRows: {json.dumps(flat_rows)},
+  renderOneSession: function(s) {{ return makeSessionItemWithGeometry(s.session_id); }},
+  activeSid: 's100',
+  itemHeight: SESSION_VIRTUAL_ROW_HEIGHT,
+}};
+
+list.clientHeight = 600;
+const anchorSid = 's80';
+const anchorElInitial = list.querySelectorAll('.session-item[data-sid]')[0];
+const anchorTopBeforeFirst = anchorElInitial.offsetTop;   // IND_H + 0*ROW_H
+list.scrollTop = anchorTopBeforeFirst;                    // anchor at viewport top
+const scrollBeforeFirst = list.scrollTop;
+const viewportAnchorBefore = scrollBeforeFirst - anchorTopBeforeFirst;
+
+// ── FIRST prepend: [40, 80). Indicator must stay visible (start 40 > 0). ──
+_prependTouchBatch();
+const anchorAfter1 = list.querySelectorAll('.session-item[data-sid]').find(i => i.dataset.sid === anchorSid);
+const topShownAfter1 = topIndicator.style.display !== 'none';
+const scrollAfter1 = list.scrollTop;
+const viewportAnchor1 = scrollAfter1 - anchorAfter1.offsetTop;
+
+// ── SECOND prepend: [0, 40) — the FINAL one; start reaches 0. ──
+_prependTouchBatch();
+const allItems2 = list.querySelectorAll('.session-item[data-sid]');
+const anchorAfter2 = allItems2.find(i => i.dataset.sid === anchorSid);
+const topHiddenAfter2 = topIndicator.style.display === 'none';
+const anchorTopAfter2 = anchorAfter2.offsetTop;
+const scrollAfter2 = list.scrollTop;
+const viewportAnchor2 = scrollAfter2 - anchorTopAfter2;
+const labelsAfter2 = list.children
+  .filter(c => c.dataset && c.dataset['group-label'] !== undefined)
+  .map(c => c.dataset['group-label']);
+const ordered2 = allItems2.every((it, idx) => it.dataset.sid === 's' + idx);
+
+console.log(JSON.stringify({{
+  anchorTopBeforeFirst: anchorTopBeforeFirst,
+  scrollBeforeFirst: scrollBeforeFirst,
+  viewportAnchorBefore: viewportAnchorBefore,
+  topShownAfter1: topShownAfter1,
+  scrollAfter1: scrollAfter1,
+  viewportAnchor1: viewportAnchor1,
+  topHiddenAfter2: topHiddenAfter2,
+  anchorTopAfter2: anchorTopAfter2,
+  scrollAfter2: scrollAfter2,
+  viewportAnchor2: viewportAnchor2,
+  labelsAfter2: labelsAfter2,
+  ordered2: ordered2,
+  startAfter2: _sessionTouchStartIndex,
+  loadedAfter2: _sessionTouchLoadedCount,
+  rowH: SESSION_VIRTUAL_ROW_HEIGHT
+}}));
+"""
+    result = json.loads(_run_node_vm(source))
+
+    # Premises: the geometry includes the indicator, and the final prepend
+    # both reaches start=0 and hides the indicator.
+    assert result["anchorTopBeforeFirst"] == ind_h, \
+        f"Anchor offsetTop must include the visible indicator ({ind_h}), got {result['anchorTopBeforeFirst']}"
+    assert result["topShownAfter1"] is True, \
+        "Top indicator must stay visible while start > 0 (after first prepend)"
+    assert result["topHiddenAfter2"] is True, \
+        "Top indicator must be hidden after the final prepend reaches start=0"
+    assert result["startAfter2"] == 0, \
+        f"Final prepend must advance startIndex to 0, got {result['startAfter2']}"
+    assert result["loadedAfter2"] == total, \
+        f"loadedCount must stay {total}, got {result['loadedAfter2']}"
+    assert result["labelsAfter2"] == ["Pre", "Pre-2", "Today", "Later"], \
+        f"Canonical group order expected, got {result['labelsAfter2']}"
+    assert result["ordered2"] is True, "All SIDs must render in canonical order s0..s159"
+
+    # First (non-final) prepend: indicator still visible — correction is the
+    # plain inserted-rows delta and the anchor stays put.
+    assert result["scrollAfter1"] == result["scrollBeforeFirst"] + 40 * result["rowH"], \
+        f"After the first prepend scrollTop must grow by 40*rowH, " \
+        f"got {result['scrollAfter1']} (was {result['scrollBeforeFirst']})"
+    assert result["viewportAnchor1"] == result["viewportAnchorBefore"], \
+        f"Viewport anchor must be preserved across the first prepend: " \
+        f"before={result['viewportAnchorBefore']}, after={result['viewportAnchor1']}"
+
+    # Final prepend: the indicator's height leaves the layout in the SAME
+    # change the anchor correction measures, so scrollTop grows by exactly
+    # (inserted rows * rowH - indicator height) and the anchor's viewport
+    # coordinate is unchanged — the visible rows do not jump.
+    assert result["anchorTopAfter2"] == 80 * result["rowH"], \
+        f"After the final prepend hides the indicator, anchor offsetTop must be " \
+        f"80*rowH={80 * result['rowH']}, got {result['anchorTopAfter2']}"
+    assert result["scrollAfter2"] == result["scrollBeforeFirst"] + 80 * result["rowH"] - ind_h, \
+        f"Final-prepend scrollTop correction must include the indicator height: " \
+        f"expected {result['scrollBeforeFirst'] + 80 * result['rowH'] - ind_h}, got {result['scrollAfter2']}"
+    assert result["viewportAnchor2"] == result["viewportAnchorBefore"], \
+        f"Viewport anchor must be preserved across the final prepend (no visible jump): " \
+        f"before={result['viewportAnchorBefore']}, after={result['viewportAnchor2']}"

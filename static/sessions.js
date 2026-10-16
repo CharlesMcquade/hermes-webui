@@ -7362,6 +7362,14 @@ function _prependTouchBatch(){
   }
   _sessionTouchStartIndex=targetStart;
   _updateTouchGroupSpacers(list, state, targetStart, oldLoaded);
+  // Update the loading affordances BEFORE measuring the anchor's final
+  // offsetTop. When this prepend completes the prefix (targetStart===0),
+  // _updateTouchSentinel() hides the top "Loading more…" indicator, whose
+  // height sits above every row; hiding it after the correction would shift
+  // every visible row upward by that height. Measuring after the update lets
+  // the single scrollTop correction below include the indicator's height
+  // change (greptile P2 on #6426).
+  _updateTouchSentinel(list, total, targetStart, oldLoaded);
   // Adjust scrollTop to preserve the user's viewport anchor after the prepend
   // shrank the before-spacer and inserted real rows above the viewport.
   if(anchorEl&&typeof anchorEl.offsetTop==='number'){
@@ -7372,7 +7380,6 @@ function _prependTouchBatch(){
       list.scrollTop=Math.max(0, currentScroll+delta);
     }
   }
-  _updateTouchSentinel(list, total, targetStart, oldLoaded);
   // Clear pending BEFORE scheduling the successor (same fix as append —
   // _scheduleContinuousBatch bumps _touchBatchToken, so if pending is still
   // true when the caller's finally runs, the token mismatch prevents cleanup
