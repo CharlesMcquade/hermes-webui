@@ -167,9 +167,8 @@ def test_initial_run_registration_is_fenced_with_cancel_flag(worker_scene, monke
         flag = config.CANCEL_FLAGS["run"]
         assert not flag.is_set()
         published_flags.append(flag)
-        assert streaming.cancel_stream("run") == {
-            "cancelled": True, "persistence_failed": False, "stream_id": "run",
-        }
+        # Frozen F3 contract: cancel_stream returns a plain bool.
+        assert streaming.cancel_stream("run") is True
         return None
 
     monkeypatch.setattr(streaming, "RunJournalWriter", cancel_at_journal)
@@ -207,9 +206,11 @@ def test_stop_during_agent_creation_prevents_provider_run(worker_scene, monkeypa
             assert reached.wait(5), "worker never reached agent creation"
             event = config.CANCEL_FLAGS["run"]
             if cancellation == "stop":
-                assert streaming.cancel_stream("run") == {
-                    "cancelled": True, "persistence_failed": False, "stream_id": "run",
-                }
+                # Frozen F3 contract: cancel_stream returns a plain bool (the
+                # retired dict receipt {cancelled, persistence_failed,
+                # stream_id} is gone; the registry side effects below carry
+                # the same guarantees).
+                assert streaming.cancel_stream("run") is True
                 assert event.is_set()
                 assert "run" not in config.CANCEL_FLAGS
                 assert "run" not in config.STREAMS

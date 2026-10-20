@@ -17,21 +17,33 @@ def _steer():
 
 @pytest.mark.parametrize("registered", [True, False])
 @pytest.mark.parametrize("first", ["steer", "stop"])
-def test_stop_and_journal_acceptance_share_one_edge(worker_scene, monkeypatch, registered, first):
+def test_stop_and_steer_admission_share_one_stream_lock_edge(worker_scene, monkeypatch, registered, first):
+    """Stop and Steer admission remain serialized on one STREAMS_LOCK edge.
+
+    Retired-contract conversion (W4-HYG): the fork-only journal acceptance
+    fence (RunJournalWriter.accept_and_append_if_nonterminal on the Steer
+    path) is gone — Steer admission is the in-memory Agent queue under
+    STREAMS_LOCK, and the response carries only {accepted, fallback,
+    stream_id}. The old test gated both contenders on the retired journal
+    edge and asserted durable/published/steer_event receipts plus
+    steer_delivered journal/SSE rows; those receipt assertions are NOT
+    resurrected. The deterministic single-edge serialization is preserved by
+    gating the Steer contender at stream_owner_session_id (called under
+    STREAMS_LOCK in _steer_bound_stream) and the Stop contender at
+    update_active_run(phase='cancelling').
+    """
     scene = worker_scene
     running, release_run = threading.Event(), threading.Event()
     reached, release = threading.Event(), threading.Event()
     scene.on_run = lambda: (running.set(), release_run.wait(5))
-    original_accept = run_journal.RunJournalWriter.accept_and_append_if_nonterminal
+    original_owner = config.stream_owner_session_id
     original_update = streaming.update_active_run
 
-    def pause_accept(self, event, payload, accept, **kwargs):
-        def gated_accept():
-            assert scene.lock.owner == threading.get_ident()
-            reached.set()
-            assert release.wait(5)
-            return accept()
-        return original_accept(self, event, payload, gated_accept, **kwargs)
+    def pause_owner(stream_id):
+        assert scene.lock.owner == threading.get_ident()
+        reached.set()
+        assert release.wait(5)
+        return original_owner(stream_id)
 
     def pause_cancel(*args, **kwargs):
         if kwargs.get("phase") == "cancelling":
@@ -40,7 +52,7 @@ def test_stop_and_journal_acceptance_share_one_edge(worker_scene, monkeypatch, r
             assert release.wait(5)
         return original_update(*args, **kwargs)
 
-    monkeypatch.setattr(run_journal.RunJournalWriter, "accept_and_append_if_nonterminal", pause_accept)
+    monkeypatch.setattr(config, "stream_owner_session_id", pause_owner)
     monkeypatch.setattr(streaming, "update_active_run", pause_cancel)
     with ThreadPoolExecutor(max_workers=3) as pool:
         worker = pool.submit(scene.run)
@@ -64,18 +76,21 @@ def test_stop_and_journal_acceptance_share_one_edge(worker_scene, monkeypatch, r
             release_run.set()
         worker.result(timeout=10)
     response = winner_result if first == "steer" else loser_result
+    # Frozen native Steer contract: exactly {accepted, fallback, stream_id}.
+    assert set(response) == {"accepted", "fallback", "stream_id"}
     assert response["accepted"] is (first == "steer")
+    assert response["stream_id"] == ("run" if first == "steer" else response["stream_id"])
     assert scene.calls.count("steer") == (1 if first == "steer" else 0)
+    # Retired projection: no steer_delivered journal rows or live SSE frames.
     rows = run_journal.read_run_events("original", "run")["events"]
-    deliveries = [row for row in rows if row["event"] == "steer_delivered"]
-    live = [item for item in scene.events.queue if item[0] == "steer_delivered"]
-    assert len(deliveries) == len(live) == (1 if first == "steer" else 0)
+    assert not [row for row in rows if row["event"] == "steer_delivered"]
+    assert not [item for item in scene.events.queue if item[0] == "steer_delivered"]
     if first == "steer":
-        assert response["durable"] and response["published"]
-        assert deliveries[0]["event_id"] == live[0][2] == response["steer_event"]["event_id"]
-        assert loser_result["cancelled"]
+        assert response["fallback"] is None
+        # Frozen F3 contract: cancel_stream returns a plain bool.
+        assert loser_result is True
     else:
-        assert winner_result["cancelled"]
+        assert winner_result is True
         assert response["fallback"] == "stream_dead"
 
 
