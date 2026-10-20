@@ -28,12 +28,24 @@ def test_guidance_before_close_and_close_before_guidance(tmp_path):
 
 
 def test_done_then_stream_end_closes_transport_and_replays(tmp_path):
+    """P10 conversion: replay rows require an existing journal.
+
+    The old test published terminals into a never-appended journal and
+    asserted durable rows. Since R01, publish_terminal only appends when the
+    journal already exists (a terminal over a nonexistent run is synthetic
+    and live-only — this is what keeps cancel-before-first-output runs out
+    of replay). Seed one accepted admission so the journal exists, then the
+    done/stream_end schedule replays exactly and closes the transport.
+    """
     writer = journal.RunJournalWriter('session', 'run', session_dir=tmp_path)
+    accepted = writer.accept_and_append_if_nonterminal(
+        'steer_delivered', {'text': 'a'}, lambda: True)
+    assert accepted[0]
     frames = []
     writer.publish_terminal('done', {'session_id': 'session'}, frames.append)
     writer.publish_terminal('stream_end', {'session_id': 'session'}, frames.append)
     assert [frame['event'] for frame in frames] == ['done', 'stream_end']
-    assert [frame['event'] for frame in journal.read_run_events('session', 'run', session_dir=tmp_path)['events']] == ['done', 'stream_end']
+    assert [frame['event'] for frame in journal.read_run_events('session', 'run', session_dir=tmp_path)['events']] == ['steer_delivered', 'done', 'stream_end']
     assert frames[-1]['event'] in journal.SSE_RELAY_CLOSE_EVENTS
 
 
@@ -52,6 +64,9 @@ def test_append_failure_synthesizes_live_only_terminal(tmp_path, monkeypatch):
 
 def test_stream_end_append_failure_after_done_still_closes_live_transport(tmp_path, monkeypatch):
     writer = journal.RunJournalWriter('session', 'run', session_dir=tmp_path)
+    # Seed the journal so the done terminal is durable (see P10 note on
+    # test_done_then_stream_end_closes_transport_and_replays).
+    assert writer.accept_and_append_if_nonterminal('steer_delivered', {'text': 'a'}, lambda: True)[0]
     frames = []
     writer.publish_terminal('done', {}, frames.append)
     def fail(*args, **kwargs):
@@ -59,28 +74,39 @@ def test_stream_end_append_failure_after_done_still_closes_live_transport(tmp_pa
     monkeypatch.setattr(journal, '_append_run_event_locked', fail)
     writer.publish_terminal('stream_end', {}, frames.append)
     assert frames[-1]['event'] == 'stream_end' and frames[-1]['event_id'] is None
-    assert [row['event'] for row in journal.read_run_events('session', 'run', session_dir=tmp_path)['events']] == ['done']
+    assert [row['event'] for row in journal.read_run_events('session', 'run', session_dir=tmp_path)['events']] == ['steer_delivered', 'done']
     assert writer.accept_and_append_if_nonterminal('steer_delivered', {}, lambda: True)[2] == 'terminal'
 
 
 def test_publication_failure_keeps_durable_replay_terminal(tmp_path):
+    """Retired-contract conversion: cancel terminals are never journaled.
+
+    The old test published a 'cancel' terminal and asserted a durable cancel
+    replay row. Since R01, cancel_stream publishes cancel live-only (a
+    journaled cancel would break crash-recovery and post-cancel token
+    fencing), so the durable-terminal invariant is exercised with an 'error'
+    terminal, which is journaled: the append succeeds, the live publication
+    failure raises, and the replay stays terminal.
+    """
     writer = journal.RunJournalWriter('session', 'run', session_dir=tmp_path)
+    assert writer.accept_and_append_if_nonterminal('steer_delivered', {'text': 'a'}, lambda: True)[0]
     def fail(_row):
         raise RuntimeError('queue closed')
     with pytest.raises(RuntimeError, match='queue closed'):
-        writer.publish_terminal('cancel', {}, fail)
+        writer.publish_terminal('error', {}, fail)
     replay = journal.read_run_events('session', 'run', session_dir=tmp_path)['events']
-    assert [row['event'] for row in replay] == ['cancel']
+    assert [row['event'] for row in replay] == ['steer_delivered', 'error']
     assert writer.accept_and_append_if_nonterminal('steer_delivered', {}, lambda: True)[2] == 'terminal'
 
 
 def test_duplicate_stream_end_does_not_append_or_publish_twice(tmp_path):
     writer = journal.RunJournalWriter('session', 'run', session_dir=tmp_path)
+    assert writer.accept_and_append_if_nonterminal('steer_delivered', {'text': 'a'}, lambda: True)[0]
     frames = []
     writer.publish_terminal('done', {}, frames.append)
     writer.publish_terminal('stream_end', {}, frames.append)
     writer.publish_terminal('stream_end', {}, frames.append)
-    assert [e['event'] for e in journal.read_run_events('session', 'run', session_dir=tmp_path)['events']] == ['done', 'stream_end']
+    assert [e['event'] for e in journal.read_run_events('session', 'run', session_dir=tmp_path)['events']] == ['steer_delivered', 'done', 'stream_end']
     assert [e['event'] for e in frames] == ['done', 'stream_end']
 
 
@@ -148,12 +174,20 @@ def test_real_stop_journals_admitted_identity_and_closes_transport(tmp_path, mon
         tmp_path / session_id / f'{run_id}.jsonl')
     subscriber, _ = channel.subscribe_with_snapshot()
     result = streaming.cancel_stream(run)
-    assert result['cancelled'] is True
+    # Frozen F3 contract: cancel_stream returns a plain bool.
+    assert result is True
     rows = journal.read_run_events(sid, run, session_dir=tmp_path)['events']
-    assert rows[-1]['event'] == 'cancel'
-    assert rows[-1]['session_id'] == sid
+    # Retired-contract conversion: cancel terminals are published live-only
+    # and never journaled (plan §18.1 — reuse the final-drain/Stop schedules
+    # WITHOUT resurrecting receipt assertions). The admitted session identity
+    # invariant survives as: no durable cancel row anywhere, the rotated
+    # session's journal stays empty, and the live channel carries cancel.
+    assert not [row for row in rows if row['event'] == 'cancel']
     assert journal.read_run_events('rotated_session', run, session_dir=tmp_path)['events'] == []
     if not detached:
         item = subscriber.get_nowait()
-        assert item[0] == 'cancel' and item[2] == rows[-1]['event_id']
-        assert channel.subscribe_with_snapshot()[1]['last_event_id'] == rows[-1]['event_id']
+        assert item[0] == 'cancel'
+        # Snapshot channels stamp a live event id when one is assigned.
+        if len(item) == 3:
+            assert isinstance(item[2], int)
+            assert channel.subscribe_with_snapshot()[1]['last_event_id'] == item[2]
