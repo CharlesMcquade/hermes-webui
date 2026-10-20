@@ -26860,15 +26860,10 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
                 return stream_id
             for stale_run_key, _stale_stream_id in stale_runs:
                 (_live_config.ACTIVE_RUNS or {}).pop(stale_run_key, None)
-        # Retire owner and settlement state only after releasing ACTIVE_RUNS_LOCK;
+        # Retire the owner only after releasing ACTIVE_RUNS_LOCK;
         # worker teardown takes STREAMS_LOCK before ACTIVE_RUNS_LOCK.
         for stale_run_key, stale_stream_id in stale_runs:
             unregister_stream_owner(stale_run_key)
-            try:
-                from api.streaming import _abandon_stale_stream_settlement
-                _abandon_stale_stream_settlement(stale_stream_id)
-            except Exception:
-                pass
     except Exception:
         return None
     return None

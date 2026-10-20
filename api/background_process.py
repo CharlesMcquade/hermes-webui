@@ -654,18 +654,6 @@ def _active_run_ids_for_session(
                 (_cfg.ACTIVE_RUNS or {}).pop(run_key, None)
         for run_key, _stale_sid in stale_keys:
             _cfg.unregister_stream_owner(run_key)
-            # Retire settlement participant/fence state for the abandoned
-            # stream so stale-run cleanup does not leak settlement registries
-            # (gate-certifier blocker #3: stale-run participant/fence cleanup).
-            try:
-                from api.streaming import _abandon_stale_stream_settlement
-                _abandon_stale_stream_settlement(_stale_sid)
-            except Exception:
-                logger.debug(
-                    "Failed to abandon stale stream settlement for %s",
-                    _stale_sid,
-                    exc_info=True,
-                )
         return matches
     except Exception:
         logger.debug(

@@ -76,13 +76,6 @@ async function cancelStream(reason){
   if(sid && S.activeStreamId !== streamId && typeof closeLiveStream==='function'){
     closeLiveStream(sid, streamId);
   }
-  // Derive persistence-failure truth DIRECTLY from the accepted response,
-  // independent of current pane/stream ownership (gate-certifier blocker #2:
-  // owner switch A→B suppressed a real persistence_failed response).  The old
-  // code only checked persistence_failed inside the old-owner branch, so an
-  // A→B (or A→B→A) switch while /api/chat/cancel was pending returned
-  // {persistence_failed:false} for a real failure and showed no warning.
-  const _persistenceFailed = !!(respOk && respBody && respBody.persistence_failed);
   // Owner guard: if the backend accepted the active-session cancel, leave
   // the current SSE transport and owner state intact so the terminal
   // `cancel` event can clear INFLIGHT, render "Task cancelled", and refresh
@@ -93,28 +86,12 @@ async function cancelStream(reason){
     setBusy(false);
     if(typeof setComposerStatus==='function') setComposerStatus('');
     else setStatus('');
-    // The server may report a fallback-notice persistence failure even though
-    // the stream is no longer active; preserve the pending-prompt cleanup.
     if(typeof _clearPendingPromptsForSession==='function') _clearPendingPromptsForSession(sid);
-    // Surface persistence failure honestly: when the backend reports
-    // persistence_failed, the terminal fallback notice could not be saved —
-    // show a truthful warning instead of the generic "stream no longer
-    // active" toast.
-    if(_persistenceFailed && typeof showToast==='function'){
-      showToast(t('cancel_persistence_warning'),4000,'warning');
-    }else if(typeof showToast==='function'){
+    if(typeof showToast==='function'){
       showToast(t('stream_no_longer_active'),2000);
     }
-  }else if(_persistenceFailed && typeof showToast==='function'){
-    // Owner switched (A→B) before the response arrived — still surface the
-    // persistence-failure warning against the originating cancellation
-    // transaction without mutating successor B's state.
-    showToast(t('cancel_persistence_warning'),4000,'warning');
   }
-  // Return a structured cancellation result matching cancelSessionStream()'s
-  // contract so callers can distinguish success from persistence failure
-  // (gate-certifier blocker #4).
-  return {cancelled: respOk, persistence_failed: _persistenceFailed};
+  return {cancelled: respOk, persistence_failed: false};
 }
 
 async function cancelSessionStream(session){
@@ -134,16 +111,6 @@ async function cancelSessionStream(session){
     try{respBody=await r.json();}catch(_){}
   }catch(e){/* close local stream; keep UI state honest below */}
   if(!respOk) return {cancelled: false, persistence_failed: false};
-  const persistenceFailed = !!(respBody && respBody.persistence_failed);
-  if(persistenceFailed){
-    if(typeof showToast==='function') showToast(t('cancel_persistence_warning'),4000,'warning');
-    // The backend DID cancel the stream (agent interrupted, cancel marker
-    // persisted) — only the fallback-notice stamping failed.  Continue with
-    // local UI cleanup (closeLiveStream, active_stream_id=null, INFLIGHT
-    // delete) so the sidebar does not stay stuck rendering "streaming".
-    // Mirrors cancelStream()'s active-chat path which clears state even on
-    // persistence_failed.  (greptile P1: cancelSessionStream streaming-state bug)
-  }
   if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
   session.active_stream_id=null;
   delete INFLIGHT[sid];
@@ -4030,7 +3997,6 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._notificationsEnabled=!!s.notifications_enabled;
     window._whatsNewSummaryEnabled=!!s.whats_new_summary_enabled;
     window._showThinking=s.show_thinking!==false;
-    window._showFallbackNotices=s.show_fallback_notices!==false;
     window._simplifiedToolCalling=true;
     window._chatActivityDisplayMode=s.chat_activity_display_mode==='transparent_stream'||s.chat_activity_display_mode==='hide_all_activity'||s.chat_activity_display_mode==='turn_worklog'
       ? s.chat_activity_display_mode
@@ -4208,7 +4174,6 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._notificationsEnabled=false;
     window._whatsNewSummaryEnabled=false;
     window._showThinking=true;
-    window._showFallbackNotices=true;
     window._simplifiedToolCalling=true;
     window._chatActivityDisplayMode='compact_worklog';
     window._transparentStream=false;

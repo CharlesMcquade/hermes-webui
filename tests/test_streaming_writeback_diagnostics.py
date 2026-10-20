@@ -97,12 +97,7 @@ def test_stream_writeback_diagnostics_cover_final_writeback_stages():
         # multiple lines — match a regex instead of an exact string.
         re.search(
             r'with _stream_writeback_stage\(_writeback_timings, "session_save"\):\n'
-            r'                    with _turn_final_save_commit\(\n'
-            r'                        stream_id, s,\n'
-            r'                        committed_generation=_commit_gen,\n'
-            r'                        committed_notice=_commit_notice,\n'
-            r'                        committed_row=_commit_row,\n'
-            r'                    \):\n'
+            r'                    with _turn_final_save_commit\(stream_id, s\):\n'
             r'                        s\.save\(\)',
             src,
         )
