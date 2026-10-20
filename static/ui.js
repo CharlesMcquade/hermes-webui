@@ -15603,7 +15603,6 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(existingTurn&&requestedSessionId&&existingTurnSessionId&&existingTurnSessionId!==requestedSessionId){
     if(!_resetMismatchedLiveAssistantTurnForSession(existingTurn, requestedSessionId)) return false;
   }
-  if(existingTurn&&typeof existingTurn.removeAttribute==='function') existingTurn.removeAttribute('data-steer-only');
   if(sceneMode==='transparent_stream'){
     return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);
   }
