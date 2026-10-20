@@ -14580,17 +14580,50 @@ function _materializeDeferredWorklogRows(group){
   }
   return true;
 }
+function _messageForWorklogGroup(group){
+  // K04c: resolve the owning message of a settled worklog group by STABLE
+  // identity, not raw index alone. Prefer the group's disclosure key
+  // `settled-stream:<streamId>` (turn/stream identity — survives history
+  // prepends, rebuilds and scene-page navigation); fall back to the legacy
+  // raw-index key `anchor-scene:<rawIdx>` for groups without stream identity.
+  const key=group&&group.getAttribute&&(group.getAttribute('data-activity-disclosure-key')||group.getAttribute('data-tool-worklog-key'));
+  if(!key) return null;
+  let m=/^settled-stream:(.+)$/.exec(key);
+  if(m){
+    const sid=m[1];
+    const list=Array.isArray(S.messages)?S.messages:[];
+    for(let i=list.length-1;i>=0;i--){
+      const msg=list[i];
+      const scene=msg&&msg._anchor_activity_scene;
+      if(!scene) continue;
+      const msgSid=String(msg._anchor_stream_id||(scene.stream_id)||(scene.identity&&scene.identity.stream_id)||'');
+      if(msgSid===sid) return msg;
+    }
+    // Stable identity missed (scene lacks stream id): fall back to raw index.
+    m=/^anchor-scene:(\d+)$/.exec(group.getAttribute('data-tool-worklog-key')||'');
+    if(m){
+      const msg=S.messages&&S.messages[Number(m[1])];
+      return (msg&&msg._anchor_activity_scene)?msg:null;
+    }
+    return null;
+  }
+  m=/^anchor-scene:(\d+)$/.exec(key);
+  if(m){
+    const msg=S.messages&&S.messages[Number(m[1])];
+    return (msg&&msg._anchor_activity_scene)?msg:null;
+  }
+  return null;
+}
 function _deferredWorklogRowsFromGroup(group){
   // Recover a settled worklog's rows from S.messages using the group's
-  // worklog key `anchor-scene:<rawIdx>`. Used after an HTML-cache restore
+  // worklog/disclosure key. Used after an HTML-cache restore
   // where the _deferredWorklogRows JS property was dropped. (#5839)
-  const key=group&&group.getAttribute&&(group.getAttribute('data-tool-worklog-key')||group.getAttribute('data-activity-disclosure-key'));
-  const m=key&&/^anchor-scene:(\d+)$/.exec(key);
-  if(!m) return null;
-  const msg=S.messages&&S.messages[Number(m[1])];
-  const scene=msg&&msg._anchor_activity_scene;
-  if(!scene) return null;
-  return _anchorSceneRowsForRendering(scene,{settled:true});
+  // K04c: keyed by stable turn/stream identity (`settled-stream:<streamId>`)
+  // when available, so the owning turn survives history prepends; raw-index
+  // `anchor-scene:<rawIdx>` remains the fallback for identity-less groups.
+  const message=_messageForWorklogGroup(group);
+  if(!message) return null;
+  return _anchorSceneRowsForRendering(message._anchor_activity_scene,{settled:true});
 }
 function _rehydrateDeferredWorklogsFromCache(root){
   // After restoring a transcript from _sessionHtmlCache, deferred settled
@@ -16469,8 +16502,9 @@ function _collapseJustSettledWorklogInPlace(streamId){
   const savedDisclosure=_readActivityDisclosureState(disclosureKey);
   const rows=_deferredWorklogRowsFromGroup(group);
   if(!rows||!rows.length) return false;
-  const match=/^anchor-scene:(\d+)$/.exec(group.getAttribute('data-tool-worklog-key')||disclosureKey);
-  const message=match&&S.messages&&S.messages[Number(match[1])];
+  // K04c: resolve the owning message via the stable key helper (stream identity
+  // first, raw index fallback) instead of raw index alone.
+  const message=_messageForWorklogGroup(group);
   const errored=!!(message&&message._anchor_activity_scene&&
     _anchorSceneHasErroredTerminalState(message._anchor_activity_scene));
   const keepOpen=!ownerHasVisibleSegment

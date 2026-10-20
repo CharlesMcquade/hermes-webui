@@ -57,11 +57,16 @@ def test_materialize_helper_recovers_rows_after_cache_restore():
 
 def test_row_recovery_maps_group_to_message_scene():
     body = _function_body(UI_JS, "_deferredWorklogRowsFromGroup")
-    # Recovers rawIdx from the disclosure key and rebuilds from S.messages.
+    # Recovers the owning message via the group's key (K04c: stable stream
+    # identity first, raw-index fallback) and rebuilds from S.messages.
     assert "anchor-scene:" in body
     assert "S.messages" in body
     assert "_anchor_activity_scene" in body
-    assert "_anchorSceneRowsForRendering(scene,{settled:true})" in body
+    assert "_messageForWorklogGroup(group)" in body
+    assert "_anchorSceneRowsForRendering(message._anchor_activity_scene,{settled:true})" in body
+    # K04c: the key resolver must understand settled-stream identity keys.
+    resolver = _function_body(UI_JS, "_messageForWorklogGroup")
+    assert "settled-stream:" in resolver
 
 
 def test_cache_restore_rehydrates_deferred_worklogs():
