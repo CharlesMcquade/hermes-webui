@@ -6235,10 +6235,18 @@ def set_reasoning_effort(
             overrides = agent_cfg.get("reasoning_overrides")
             if not isinstance(overrides, dict):
                 overrides = {}
+            # S02 frozen serialization: with provider context the key is
+            # ``provider:model`` (lowercased provider); the legacy model-only
+            # key remains readable so existing maps migrate transparently.
+            override_key = reasoning_override_key(model_id, provider_id)
             if raw:
-                overrides[model_id] = raw
+                overrides[override_key] = raw
             else:
-                overrides.pop(model_id, None)
+                overrides.pop(override_key, None)
+                # Legacy hygiene: also clear a stale model-only entry when the
+                # same binding was previously written without provider scope.
+                if provider_id and model_id in overrides:
+                    overrides.pop(model_id, None)
             if overrides:
                 agent_cfg["reasoning_overrides"] = overrides
             else:
@@ -6257,6 +6265,92 @@ def set_reasoning_effort(
         provider_id=provider_id,
         base_url=base_url,
     )
+
+
+# ── S02 canonical scoped reasoning-effort resolution ─────────────────────────
+# Frozen override-key serialization: ``provider:model`` with the provider id
+# lowercased and stripped; a model-only key is the legacy shape and keeps
+# resolving (model-only map migration). Precedence at ACTUAL execution:
+#   explicit run request > provider:model scoped override
+#   > model-only override > global agent.reasoning_effort > provider default.
+# Execution lanes (api/streaming.py Agent construction and
+# api/gateway_chat.py) must call resolve_reasoning_effort_for_request() with
+# the request's model/provider identity so UI status, saves and sends all use
+# one identity contract.
+
+REASONING_OVERRIDE_KEY_SEPARATOR = ":"
+
+
+def reasoning_override_key(model_id, provider_id=None) -> str:
+    """Serialize a scoped reasoning-override key (frozen format).
+
+    ``provider:model`` with provider lowercased; bare model when no provider
+    is known (legacy model-only map shape).
+    """
+    model = str(model_id or "").strip()
+    provider = str(provider_id or "").strip().lower()
+    if provider and model:
+        return f"{provider}{REASONING_OVERRIDE_KEY_SEPARATOR}{model}"
+    return model
+
+
+def resolve_reasoning_effort_for_request(
+    model_id=None,
+    provider_id=None,
+    base_url=None,
+    *,
+    cfg=None,
+    requested=None,
+):
+    """Resolve the reasoning effort for an actual execution request.
+
+    Returns the coerced effort string, or None when no effort should be sent.
+    ``requested`` is an explicit per-run effort from the request itself and
+    outranks every stored binding; an unrecognized ``requested`` value is
+    ignored (falls through to stored bindings) rather than erroring. Stored
+    values are coerced through coerce_reasoning_effort_for_model so an
+    unsupported value/model is safely handled by the existing canonical rules.
+    """
+    if cfg is None:
+        cfg = _load_yaml_config_file(_get_config_path())
+    agent_cfg = cfg.get("agent") if isinstance(cfg, dict) else None
+    if not isinstance(agent_cfg, dict):
+        agent_cfg = {}
+
+    def _coerced(raw):
+        coerced = coerce_reasoning_effort_for_model(
+            str(raw or "").strip().lower(),
+            model_id,
+            provider_id=provider_id,
+            base_url=base_url,
+        )
+        return coerced or None
+
+    req_raw = str(requested or "").strip().lower()
+    if req_raw and req_raw in VALID_REASONING_EFFORTS:
+        return _coerced(req_raw)
+
+    overrides = agent_cfg.get("reasoning_overrides")
+    overrides = overrides if isinstance(overrides, dict) else {}
+    model = str(model_id or "").strip()
+    provider = str(provider_id or "").strip().lower()
+    # Strip a provider prefix from the model id so ``prov:m`` stored as a
+    # qualified catalog id still matches the scoped key ``prov:m``.
+    bare_model = model
+    if provider and model.startswith(f"{provider}:"):
+        bare_model = model[len(provider) + 1:]
+    scoped_key = reasoning_override_key(bare_model, provider)
+    for key in (scoped_key, bare_model) if provider else (bare_model,):
+        if key and key in overrides:
+            resolved = _coerced(overrides[key])
+            if resolved is not None:
+                return resolved
+    global_raw = agent_cfg.get("reasoning_effort")
+    if global_raw:
+        resolved = _coerced(global_raw)
+        if resolved is not None:
+            return resolved
+    return None
 
 
 def _public_advanced_model_options(model_cfg: dict) -> dict:
