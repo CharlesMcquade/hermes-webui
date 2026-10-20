@@ -14592,10 +14592,12 @@ def _handle_insights(handler, parsed) -> bool:
                 raise ValueError("Agent model rows do not cover every session")
 
             candidate_daily: dict[str, dict] = {}
+            # Calendar-day series (DST-safe), matching the absolute/custom
+            # window's date arithmetic — the old fixed `day_secs` stepping no
+            # longer exists in the rewritten window code.
+            _series_start_day = _datetime.fromtimestamp(first_day_ts).date()
             rendered_days = {
-                _time.strftime(
-                    "%Y-%m-%d", _time.localtime(first_day_ts + (i * day_secs))
-                )
+                (_series_start_day + _timedelta(days=i)).isoformat()
                 for i in range(days)
             }
             daily_accounted_ids: set[str] = set()
