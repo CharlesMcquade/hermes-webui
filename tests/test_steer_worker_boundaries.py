@@ -280,13 +280,11 @@ def test_final_drain_fences_steer(worker_scene, monkeypatch, registered, rotated
                 assert result["accepted"] is True
                 assert result["fallback"] is None
                 assert result["stream_id"] == "run"
-                assert result["durable"] is True
-                assert result["published"] is True
-                assert result["steer_event"]["event"] == "steer_delivered"
-                assert result["steer_event"]["stream_id"] == "run"
-                assert result["steer_event"]["session_id"] == "original"
-                assert result["steer_event"]["payload"]["text"] == "guidance"
-                assert result["steer_event"]["event_id"]
+                # R02 retirement: the response carries only the legacy fields —
+                # the independent durable/published receipt and steer_event
+                # projection are gone; persistence is the native
+                # display_kind=steer user row at the Agent drain boundary.
+                assert set(result) == {"accepted", "fallback", "stream_id"}
             else:
                 assert result == {"accepted": False, "fallback": "not_running", "stream_id": "run"}
                 assert scene.agent.pending == []

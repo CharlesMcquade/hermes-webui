@@ -14990,58 +14990,6 @@ function _anchorSceneRowsForRendering(scene, opts){
   }
   return out;
 }
-function _anchorSceneDeliveredSteerRows(scene, opts){
-  return _anchorSceneRowsForRendering(scene,opts).filter(row=>
-    row&&row.role==='user'&&String(row.source_event_type||'')==='steer_delivered'
-  );
-}
-function _renderLiveAnchorSteerRowsOnly(streamId, scene, opts){
-  opts=opts||{};
-  if(!S.session||!S.activeStreamId) return false;
-  if(opts.sessionId&&S.session.session_id!==opts.sessionId) return false;
-  if(streamId&&S.activeStreamId!==streamId) return false;
-  const rows=_anchorSceneDeliveredSteerRows(scene,{settled:false});
-  if(!rows.length) return false;
-  $('emptyState').style.display='none';
-  let turn=$('liveAssistantTurn');
-  if(!turn){
-    turn=_createAssistantTurn();
-    turn.id='liveAssistantTurn';
-    $('msgInner').appendChild(turn);
-  }
-  turn.setAttribute('data-anchor-scene-live-owner','1');
-  turn.setAttribute('data-anchor-stream-id',String(streamId||''));
-  turn.setAttribute('data-anchor-scene-live-mode','hide_all_activity');
-  turn.setAttribute('data-steer-only','1');
-  if(S.session) turn.dataset.sessionId=S.session.session_id;
-  const blocks=_assistantTurnBlocks(turn);
-  if(!blocks) return false;
-  blocks.querySelectorAll('[data-steer-delivery="delivered"]').forEach(el=>el.remove());
-  for(const row of rows){
-    const node=_anchorSceneNodeForRow(row,{settled:false});
-    if(node) blocks.appendChild(node);
-  }
-  if(typeof scrollIfPinned==='function') scrollIfPinned();
-  return true;
-}
-function _renderSettledAnchorSteerRowsOnlyForMessage(message, segment, rawIdx){
-  if(!message||!message._anchor_activity_scene||!segment) return false;
-  const rows=_anchorSceneDeliveredSteerRows(message._anchor_activity_scene,{settled:true});
-  if(!rows.length) return false;
-  const blocks=_assistantTurnBlocks(segment.closest('.assistant-turn'));
-  if(!blocks) return false;
-  blocks.querySelectorAll('[data-anchor-settled-scene-row="1"][data-steer-delivery="delivered"]').forEach(el=>el.remove());
-  let wrote=false;
-  for(const row of rows){
-    const node=_anchorSceneNodeForRow(row,{settled:true});
-    if(!node) continue;
-    node.setAttribute('data-anchor-settled-scene-row','1');
-    if(segment.parentElement===blocks) blocks.insertBefore(node,segment);
-    else blocks.appendChild(node);
-    wrote=true;
-  }
-  return wrote;
-}
 function _anchorSceneIsSettledSuccessfulCompression(row, settled){
   if(!settled||!row||row.role!=='lifecycle') return false;
   const source=String(row.source_event_type||'');
@@ -15175,31 +15123,6 @@ function _anchorSceneNodeForRow(row, opts){
         id:row.row_id||row.local_id||'',
       });
     }
-  }else if(row.role==='user'&&String(row.source_event_type||'')==='steer_delivered'){
-    const text=String(row.text||'').trim();
-    const files=(row.payload&&Array.isArray(row.payload.files))?row.payload.files.filter(Boolean):[];
-    if(!text&&!files.length) return null;
-    node=document.createElement('div');
-    node.className='msg-row steer-delivered-row';
-    node.setAttribute('data-role','user');
-    node.setAttribute('data-steer-delivery','delivered');
-    const label=document.createElement('div');
-    label.className='steer-delivered-label';
-    label.textContent=(typeof t==='function'&&t('steer_message_label'))||'Steer';
-    node.appendChild(label);
-    const body=document.createElement('div');
-    body.className='msg-body';
-    // Steer is user-authored transcript content. Use the exact same safe user
-    // renderer as ordinary user bubbles so the render_user_markdown preference,
-    // fenced-block handling, sanitization, and render cache stay consistent.
-    body.innerHTML=_getCachedRender(text,true);
-    node.appendChild(body);
-    if(files.length){
-      const attachments=document.createElement('div');
-      attachments.className='steer-delivered-files';
-      attachments.textContent=files.join(', ');
-      node.appendChild(attachments);
-    }
   }else if(row.role==='control'){
     node=_activityStatusNode({
       kind:settled?'done':'waiting',
@@ -15235,11 +15158,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     segmentSeq:row.segment_seq||row.segmentSeq||'',
     burstId:row.activity_burst_id||row.burst_id||row.burstId||'',
   };
-  if(row.role==='user'&&String(row.source_event_type||'')==='steer_delivered'){
-    // User guidance should stay a user message in Transparent Stream, not gain
-    // generic activity chrome merely because it lives inside an assistant turn.
-    node=_anchorSceneNodeForRow(row,{settled});
-  }else if(row.role==='prose'){
+  if(row.role==='prose'){
     // The settled assistant segment already owns the FINAL answer prose, so a
     // prose row whose text matches the final answer must be suppressed here to
     // avoid duplicating the answer. But INTERMEDIATE progress prose (the
@@ -15674,12 +15593,9 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   const knownMode=(m)=>m==='compact_worklog'||m==='turn_worklog'||m==='transparent_stream'||m==='hide_all_activity';
   const sceneMode=knownMode(activeMode)?activeMode:(knownMode(requestedMode)?requestedMode:activeMode);
   if(sceneMode==='hide_all_activity'){
-    // Keep the renderer's historical no-DOM early-out for ordinary activity;
-    // only user-authored Steer rows pierce Final-answer-only mode.
-    const hasDeliveredSteer=Array.isArray(scene&&scene.activity_rows)
-      && scene.activity_rows.some(row=>row&&String(row.source_event_type||'')==='steer_delivered');
-    if(!hasDeliveredSteer||typeof _renderLiveAnchorSteerRowsOnly!=='function') return false;
-    return _renderLiveAnchorSteerRowsOnly(streamId,scene,opts);
+    // Retired custom Steer presentation (#7188): no steer rows pierce
+    // Final-answer-only mode; consumed steers persist as native user rows.
+    return false;
   }
   const existingTurn=$('liveAssistantTurn');
   const requestedSessionId=String(opts.sessionId||'');
@@ -15687,7 +15603,6 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(existingTurn&&requestedSessionId&&existingTurnSessionId&&existingTurnSessionId!==requestedSessionId){
     if(!_resetMismatchedLiveAssistantTurnForSession(existingTurn, requestedSessionId)) return false;
   }
-  if(existingTurn&&typeof existingTurn.removeAttribute==='function') existingTurn.removeAttribute('data-steer-only');
   if(sceneMode==='transparent_stream'){
     return _renderLiveAnchorActivitySceneTransparent(streamId,scene,opts);
   }
@@ -16242,7 +16157,6 @@ function _anchorSceneSceneHasWorklogWorthyRows(scene){
   for(const row of rows){
     if(!row||typeof row!=='object') continue;
     const role=String(row.role||'');
-    if(String(row.source_event_type||'')==='steer_delivered') return true;
     if(isTurnWorklogMode()&&role==='prose'
       && (row.source_event_type==='interim_assistant'||row.source_event_type==='settled_message')) return true;
     if(role==='tool'||role==='thinking') return true;
@@ -16603,7 +16517,7 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   if(!message||!message._anchor_activity_scene||!segment) return false;
   if(!_anchorSceneSceneHasWorklogWorthyRows(message._anchor_activity_scene)) return false;
   if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()){
-    return _renderSettledAnchorSteerRowsOnlyForMessage(message,segment,rawIdx);
+    return false;
   }
   if(typeof isTransparentStream==='function'&&isTransparentStream()){
     return _renderSettledAnchorSceneTransparentForMessage(message,segment,rawIdx);
@@ -17191,27 +17105,6 @@ function _compressionCardsNode(state){
   wrap.innerHTML=`<div class="compression-turn-blocks">${_compressionCardsHtml(state)}</div>`;
   return wrap;
 }
-/**
- * Build HTML for a session-persisted fallback notice.  The notice is stored
- * as `_fallbackNotice` on the assistant message and rendered inside
- * renderMessages(), so it survives DOM rebuilds, session switches, and page
- * reloads — unlike an ad-hoc live-turn DOM node which is wiped on the next
- * renderMessages() call.
- * @param {Object} notice - `{message, to_model, to_provider}`
- */
-function _fallbackNoticeHtml(notice){
-  if(!notice) return '';
-  const message=String(notice.message||'Fallback activated');
-  const toModel=String(notice.to_model||'');
-  const toProvider=String(notice.to_provider||'');
-  const modelLabel=toModel?(toProvider?`${toModel} (${toProvider})`:toModel):'';
-  return `<div class="fallback-notice" data-fallback-notice="1">`+
-    `<span class="fallback-notice-icon" role="img" aria-label="Warning">⚠️</span>`+
-    `<span class="fallback-notice-text">${esc(message)}</span>`+
-    (modelLabel?`<span class="fallback-notice-model" title="${esc(modelLabel)}">${esc(modelLabel)}</span>`:'')+
-    `</div>`;
-}
-
 function appendLiveCompressionCard(state){
   if(!S.session||!S.activeStreamId||!state) return false;
   if(isLiveAnchorActivitySceneOwner(S.activeStreamId)){
@@ -17925,7 +17818,7 @@ function _messageRenderCacheSignature(){
   add(messages.length);
   for(const m of messages){
     if(!m||typeof m!=='object'){ add('missing'); continue; }
-    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);add(m._fallbackNotice?JSON.stringify(m._fallbackNotice):'');
+    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);
     add(msgContent(m));
     if(Array.isArray(m.content)){
       add('content-array');
@@ -19674,7 +19567,6 @@ function renderMessages(options){
     const recoveryHtml=recoveryPayload ? _compressionRecoveryHtml(recoveryPayload, (S.session&&S.session.session_id)||'') : '';
     if(recoveryHtml) bodyHtml += recoveryHtml;
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
-    const fallbackNoticeHtml = (!isUser&&m._fallbackNotice&&window._showFallbackNotices!==false) ? _fallbackNoticeHtml(m._fallbackNotice) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
@@ -19894,27 +19786,10 @@ function renderMessages(options){
         if(isLastTextPart&&statusHtml){
           orderedSeg.insertAdjacentHTML('beforeend', statusHtml);
         }
-        if(isLastTextPart&&fallbackNoticeHtml){
-          orderedSeg.insertAdjacentHTML('afterbegin', fallbackNoticeHtml);
-        }
         _insertSegmentBlock(orderedSeg, `${isLastTextPart?filesHtml:''}<div class="msg-body">${(typeof m!=='undefined'&&m&&m._media_snapshots&&typeof m._media_snapshots==='object')?_stampMediaSnapshots(partBodyHtml,m._media_snapshots):partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
         blocks.appendChild(orderedSeg);
         if(!firstSeg) firstSeg=orderedSeg;
       });
-      // Gate-certifier finding #3: when a turn has no text parts
-      // (lastTextPartIdx === -1, e.g. tool-only turns), the notice
-      // was never inserted inside the loop. Stamp it on the first
-      // rendered segment so the notice survives even on textless turns.
-      // If firstSeg is still null (pure tool/structured turn with no
-      // text segments), insert the notice directly into blocks.
-      if(lastTextPartIdx === -1 && fallbackNoticeHtml){
-        if(firstSeg){
-          firstSeg.insertAdjacentHTML('afterbegin', fallbackNoticeHtml);
-        }else if(blocks.firstChild){
-          // Tool-only turn: prepend notice before the first tool row
-          blocks.firstChild.insertAdjacentHTML('beforebegin', `<div class="assistant-segment fallback-notice-only">${fallbackNoticeHtml}</div>`);
-        }
-      }
       assistantSegments.set(rawIdx, firstSeg||null);
       continue;
     }
@@ -19968,10 +19843,7 @@ function renderMessages(options){
       if((isCompactWorklogMode()||isTurnWorklogMode()||isTransparentStream())&&_assistantThinkingBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs)) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
-    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||recoveryHtml||fallbackNoticeHtml);
-    if(fallbackNoticeHtml){
-      seg.insertAdjacentHTML('afterbegin', fallbackNoticeHtml);
-    }
+    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||recoveryHtml);
     if(statusHtml){
       seg.insertAdjacentHTML('beforeend', statusHtml);
       if(hasVisibleBody) _insertSegmentBlock(seg, `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
@@ -21855,22 +21727,15 @@ function clearLiveToolCards(){
   if(container){container.innerHTML='';container.style.display='none';}
 }
 function _hideLiveActivityForFinalAnswerOnly(){
-  // Keep durable user-authored Steer rows; the selective cleanup below removes
-  // every assistant activity row while leaving those transcript boundaries.
+  // Retired custom Steer presentation (#7188): consumed steers persist as
+  // native user rows outside the live anchor scene, so the selective
+  // steer-row preservation below is no longer needed.
   clearLiveToolCards({preserveDom:true});
   if(typeof removeThinking==='function') removeThinking();
   const turn=$('liveAssistantTurn');
   const inner=_assistantTurnBlocks(turn);
   if(inner){
-    // Compact Worklog nests Steer rows inside the group that is about to be
-    // removed. Promote them to the turn block first so deleting assistant
-    // activity cannot take the user-authored boundary with its parent.
-    const deliveredSteers=Array.from(inner.querySelectorAll('[data-steer-delivery="delivered"]'));
-    deliveredSteers.forEach(row=>{
-      if(row&&row.parentElement!==inner) inner.appendChild(row);
-    });
-    if(deliveredSteers.length&&turn&&typeof turn.setAttribute==='function') turn.setAttribute('data-steer-only','1');
-    inner.querySelectorAll('.transparent-event-row,.agent-activity-thinking,.wl-reason,#liveRunStatus,.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid],[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]:not([data-steer-delivery="delivered"])').forEach(el=>el.remove());
+    inner.querySelectorAll('.transparent-event-row,.agent-activity-thinking,.wl-reason,#liveRunStatus,.live-worklog[data-live-worklog-shell],.tool-worklog-group[data-live-tool-call-group],.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid],[data-anchor-scene-owner="1"],[data-anchor-scene-row="1"]').forEach(el=>el.remove());
   }
   const legacyThinking=$('thinkingRow');
   if(legacyThinking) legacyThinking.remove();
