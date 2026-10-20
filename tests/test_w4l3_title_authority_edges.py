@@ -60,23 +60,26 @@ def _update(s):
 
 
 @pytest.mark.parametrize("reset_label", ["Untitled", "New Chat"])
-def test_reset_labels_stored_in_db_are_currently_canonical(title_state, monkeypatch, reset_label):
-    """PINNED current behavior + GAP: the DB winner is authoritative even when
-    it equals a reset label. Plan S01 wants reset labels (incl. New Chat) never
-    treated as authority; that exemption belongs in the canonical read
-    (api/state_sync.py / api/streaming.py) which are NOT owned by W4-L3. This
-    test documents today's literal DB-authority semantics so the exemption
-    cannot land silently elsewhere; it must be updated by the lane that owns
-    state_sync/streaming when the reset-label carve-out is implemented.
+def test_reset_labels_stored_in_db_are_not_canonical(title_state, monkeypatch, reset_label):
+    """S01 carve-out (implemented in api/streaming.py): a DB row holding only a
+    reset label with llm provenance is a leftover from a manual reset, never a
+    generated title — the generator result wins and the reset label does not
+    become canonical.
     """
     db, make, _path, _sessions = title_state
     s = make("edge-reset", reset_label, "llm")
     monkeypatch.setattr(streaming, "_generate_llm_session_title_via_aux",
                         lambda *a, **kw: ("[FF] Sleeper league roster audit", "llm_aux", ""))
     _update(s)
-    # Current DB-authority semantics: the stored reset label wins.
-    assert s.compact()["title"] == reset_label
-    assert db.get_session_title(s.session_id) == reset_label
+    # The reset label must NOT win; the generated title is published instead.
+    assert s.compact()["title"] != reset_label
+    assert s.compact()["title"] == "[FF] Sleeper league roster audit"
+    # A genuinely generated DB title with llm provenance still wins.
+    s2 = make("edge-reset-real", "[FF] Draft hub rankings", "llm")
+    monkeypatch.setattr(streaming, "_generate_llm_session_title_via_aux",
+                        lambda *a, **kw: ("[FF] Different generated name", "llm_aux", ""))
+    _update(s2)
+    assert s2.compact()["title"] == "[FF] Draft hub rankings"
 
 
 def test_hidden_reset_row_is_not_overwritten_by_generator(title_state, monkeypatch):

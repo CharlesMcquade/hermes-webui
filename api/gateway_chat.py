@@ -27,6 +27,7 @@ from api.config import (
     _get_session_agent_lock,
     _parse_provider_qualified_model_id,
     clear_session_writeback_owner_if_owned,
+    resolve_reasoning_effort_for_request,
     coerce_reasoning_effort_for_model,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
@@ -363,18 +364,17 @@ def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | No
 
 
 def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=None):
-    """Read and coerce user-configured reasoning effort for a gateway request."""
+    """Resolve reasoning effort for a gateway request.
+
+    Scoped per-model/provider overrides (frozen 'provider:model' key) win over
+    the global agent.reasoning_effort, matching the local streaming lane.
+    """
     try:
-        cfg_data = cfg if isinstance(cfg, dict) else {}
-        effort_cfg = cfg_data.get("agent", {}) if isinstance(cfg_data, dict) else {}
-        effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
-        coerced = coerce_reasoning_effort_for_model(
-            effort_raw,
+        return resolve_reasoning_effort_for_request(
             model,
-            provider_id=model_provider,
+            model_provider,
+            cfg=cfg if isinstance(cfg, dict) else None,
         )
-        # Preserve explicit "none" while still omitting absent or invalid effort.
-        return None if not coerced else str(coerced)
     except Exception:
         return None
 

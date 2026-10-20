@@ -6779,6 +6779,24 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
     return None, 'llm_invalid_aux', str(raw)[:120]
 
 
+_RESET_TITLE_LABELS = {'untitled', 'new chat'}
+
+
+def _canonical_reset_label_exempt_title(canonical):
+    """S01 carve-out: a DB winner is authoritative unless it is only a reset
+    label ('Untitled'/'New Chat') with llm provenance — those are leftovers
+    from a manual reset, never a generated title. Returns the winner title
+    or None."""
+    if not canonical or not canonical[0]:
+        return None
+    title, provenance = canonical[0], canonical[1]
+    if provenance == 'derived':
+        return None
+    if provenance == 'llm' and str(title).strip().lower() in _RESET_TITLE_LABELS:
+        return None
+    return title
+
+
 def _put_title_status(put_event, session_id: str, status: str, reason: str = '', title: str = '', raw_preview: str = '') -> None:
     payload = {'session_id': session_id, 'status': status}
     if reason:
@@ -6986,8 +7004,11 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             # Snapshot-side (S01, freeze F6): the DB winner/provenance from
             # get_session_title_state outranks every generation path — a
             # canonical (non-derived) title is authoritative, not a proposal.
-            if canonical and canonical[0] and canonical[1] != 'derived':
-                next_title, llm_status, raw_preview = canonical[0], 'canonical_title', ''
+            # Reset labels left in the DB by a manual reset are leftovers, not
+            # a generated title, and never win (S01 carve-out).
+            _canonical_winner = _canonical_reset_label_exempt_title(canonical)
+            if _canonical_winner:
+                next_title, llm_status, raw_preview = _canonical_winner, 'canonical_title', ''
             elif agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
                 rejected_model_output = llm_status in ('llm_invalid', 'llm_language_mismatch')
@@ -13843,18 +13864,16 @@ def _run_agent_streaming(
             except Exception:
                 _max_tokens_cfg = None
 
-            # CLI-parity reasoning effort: read agent.reasoning_effort from the
-            # active profile's config.yaml (the same key the CLI writes via
-            # `/reasoning <level>`) and hand the parsed dict to AIAgent.  When
-            # the key is absent or invalid, pass None → agent uses its default.
+            # CLI-parity reasoning effort: resolve scoped per-model/provider
+            # overrides first (frozen 'provider:model' key), falling back to the
+            # global agent.reasoning_effort — the same precedence the settings
+            # UI writes. None → agent uses its default.
             try:
-                _effort_cfg = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
-                _effort_raw = _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
-                _effort = coerce_reasoning_effort_for_model(
-                    _effort_raw,
+                _effort = resolve_reasoning_effort_for_request(
                     resolved_model,
-                    provider_id=resolved_provider,
-                    base_url=resolved_base_url,
+                    resolved_provider,
+                    resolved_base_url,
+                    cfg=_cfg if isinstance(_cfg, dict) else None,
                 )
                 _reasoning_config = parse_reasoning_effort(_effort)
             except Exception:
