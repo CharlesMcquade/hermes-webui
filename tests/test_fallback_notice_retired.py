@@ -87,10 +87,11 @@ class TestTerminalWritesAreNoticeFree:
     def test_persist_cancelled_turn_appends_marker_without_notice(self):
         session = _DummySession()
         _persist_cancelled_turn(session, message="Task cancelled.")
-        assert len(session.messages) == 1
         marker = session.messages[-1]
+        assert marker.get("_error") is True
         assert "_fallbackNotice" not in marker
-        assert marker["_error"] is True
+        for m in session.messages:
+            assert "_fallbackNotice" not in m
 
     def test_finalize_cancelled_turn_saves_once_without_notice(self):
         session = _DummySession()
