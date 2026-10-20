@@ -6608,7 +6608,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           // #6112 settle guard.
-          S.messages=_adoptDoneSnapshotMessages(_preSettle, S.messages, _doneFinalAnswer).messages;
+          // K04a: pass owner identity so a snapshot from a
+          // different session/stream cannot replace the resident transcript.
+          S.messages=_adoptDoneSnapshotMessages(_preSettle, S.messages, _doneFinalAnswer, {
+            preOwner:activeSid+':'+(_settledStreamId||''),
+            settledOwner:((d.session&&d.session.session_id)||activeSid||'')+':'+((d&&d.stream_id)||_settledStreamId||''),
+          }).messages;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
           if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
@@ -7490,11 +7495,82 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return false;
   }
-  function _adoptDoneSnapshotMessages(preSettleMessages, settledMessages, finalAnswer){
+  // K04a: owner identity gate + resident-prefix merge helpers.
+  // Owner identity format `<session_id>:<stream_id>`. A mismatch rejects
+  // adoption of the settled snapshot entirely (wrong session / stream must never
+  // replace the resident transcript). A revision/generation mismatch, when both
+  // sides carry the field, rejects the same way. Comparison is lenient when one
+  // side omits a component (journal-replayed `done` frames can lack stream_id),
+  // but a CONFLICTING non-empty component always rejects.
+  function _ownerIdentityConflict(a,b){
+    if(a==null||b==null) return false;
+    if(typeof a==='object'||typeof b==='object'){
+      const aSid=a&&a.sessionId!=null?String(a.sessionId):null;
+      const bSid=b&&b.sessionId!=null?String(b.sessionId):null;
+      const aSt=a&&a.streamId!=null?String(a.streamId):'';
+      const bSt=b&&b.streamId!=null?String(b.streamId):'';
+      if(aSid!=null&&bSid!=null&&aSid!==bSid) return true;
+      if(aSid!=null&&bSid!=null&&aSt&&bSt&&aSt!==bSt) return true;
+      const aRev=a&&a.revision!=null?String(a.revision):null;
+      const bRev=b&&b.revision!=null?String(b.revision):null;
+      if(aRev!=null&&bRev!=null&&aRev!==bRev) return true;
+      const aGen=a&&a.generation!=null?String(a.generation):null;
+      const bGen=b&&b.generation!=null?String(b.generation):null;
+      if(aGen!=null&&bGen!=null&&aGen!==bGen) return true;
+      return false;
+    }
+    const as=String(a), bs=String(b);
+    const ap=as.split(':'), bp=bs.split(':');
+    if(ap[0]!==bp[0]) return true;                 // different session
+    const aSt=ap.slice(1).join(':'), bSt=bp.slice(1).join(':');
+    return !!(aSt&&bSt&&aSt!==bSt);                // same session, conflicting stream
+  }
+  // K04a: a non-empty settled snapshot that begins at a LATER point of the
+  // already-loaded transcript is a narrower recovery tail (server retention /
+  // bounded snapshot window), not a replacement for the resident history. When
+  // the snapshot's first message identity exists in `pre` at index > 0, retain
+  // the already-loaded prefix (deduped against the snapshot by stable
+  // identity — never equal-text heuristics) ahead of the snapshot tail. Returns
+  // null when there is nothing to merge (snapshot covers or is unrelated to the
+  // loaded window — server-wins).
+  function _mergeResidentPrefix(pre, settled){
+    if(!Array.isArray(pre)||!Array.isArray(settled)||!pre.length||!settled.length) return null;
+    const settledKeys=new Set();
+    for(const sm of settled){ const k=_messageIdentityKey(sm); if(k) settledKeys.add(k); }
+    if(!settledKeys.size) return null;
+    let overlap=-1;
+    for(let i=0;i<pre.length;i++){
+      const k=_messageIdentityKey(pre[i]);
+      if(k&&settledKeys.has(k)){ overlap=i; break; }
+    }
+    if(overlap<=0) return null;
+    const retained=[];
+    for(let i=0;i<overlap;i++){
+      const k=_messageIdentityKey(pre[i]);
+      if(!k||settledKeys.has(k)) continue;
+      retained.push(pre[i]);
+    }
+    if(!retained.length) return null;
+    return retained.concat(settled);
+  }
+  function _adoptDoneSnapshotMessages(preSettleMessages, settledMessages, finalAnswer, owner){
     const pre=Array.isArray(preSettleMessages)?preSettleMessages:[];
     const settled=Array.isArray(settledMessages)?settledMessages:[];
+    // K04a: a settled snapshot from a different owner (session/stream, or a
+    // conflicting revision/generation when both sides carry one) must never
+    // replace the resident transcript — reject adoption and keep what is loaded.
+    if(owner&&_ownerIdentityConflict(owner.preOwner,owner.settledOwner)){
+      return {adopted:false,messages:pre,rejected:'owner-mismatch'};
+    }
     const adopted=settled.length>0;
-    const messages=(adopted||!pre.length)?settled:pre;
+    let messages=(adopted||!pre.length)?settled:pre;
+    // K04a: retain the already-loaded prefix when the adopted snapshot is a
+    // narrower tail of it (recovery/bounded snapshot). Identity/range merge —
+    // never naive array replacement.
+    if(adopted&&pre.length){
+      const merged=_mergeResidentPrefix(pre,settled);
+      if(merged) messages=merged;
+    }
     const answer=String(finalAnswer||'').trim();
     if(!answer) return {adopted:adopted,messages:messages};
     if(_finalAnswerIsInTranscript(messages,answer)) return {adopted:adopted,messages:messages};
@@ -7508,6 +7584,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   if(typeof window!=='undefined'){
     window._adoptDoneSnapshotMessages=_adoptDoneSnapshotMessages;
+    window._ownerIdentityConflict=_ownerIdentityConflict;
+    window._mergeResidentPrefix=_mergeResidentPrefix;
     window._snapshotHasUsableFinalAssistantRow=_snapshotHasUsableFinalAssistantRow;
   }
 

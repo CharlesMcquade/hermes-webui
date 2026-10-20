@@ -310,6 +310,8 @@ def test_in_place_collapse_preserves_detail_disclosure_for_deferred_materialize(
     collapse = _extract("_collapseJustSettledWorklogInPlace")
     visible_segment = _extract("_assistantTurnHasVisibleRenderedSegment")
     materialize = _extract("_materializeDeferredWorklogRows")
+    # K04c: the collapse pass resolves the owning message via this helper.
+    message_for_group = _extract("_messageForWorklogGroup")
     harness = textwrap.dedent(f"""
         const assert = require('assert');
         const rows = [{{id: 'row-1'}}];
@@ -407,6 +409,7 @@ def test_in_place_collapse_preserves_detail_disclosure_for_deferred_materialize(
         function _worklogDetailsExpandedDefault() {{ return defaultExpanded; }}
         {visible_segment}
         {collapse}
+        {message_for_group}
         {materialize}
 
         activeGroup = makeGroup();
