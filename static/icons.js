@@ -95,3 +95,20 @@ function li(name, size = 16) {
        + `stroke-linejoin="round" aria-hidden="true" `
        + `style="display:inline-block;vertical-align:-0.15em;flex-shrink:0">${p}</svg>`;
 }
+
+/**
+ * True when a workspace-tree row renders the *download* glyph for this entry
+ * (DOWNLOAD_EXTS archive/binary formats and .pdf, minus image/markdown
+ * families which render their own preview icons). Only download-glyph rows
+ * get the direct-download icon action; every other file-type icon keeps the
+ * row's preview behavior (#7810 repair of fb6296e8).
+ * @param {string} name  – entry file name
+ * @param {string} type  – entry type ('file'|'dir'|'symlink'|…)
+ * @returns {boolean}
+ */
+function isDownloadGlyph(name, type){
+  if(type==='dir'||type==='symlink')return false;
+  const e=fileExt(name);
+  if(IMAGE_EXTS.has(e)||MD_EXTS.has(e))return false;
+  return (typeof DOWNLOAD_EXTS!=='undefined'&&DOWNLOAD_EXTS.has(e))||e==='.pdf';
+}

@@ -9,15 +9,31 @@ the icon promised "download" and delivered "preview".
 
 Fix contract (#user report: "Clicking the actual item (the name of it) opens
 preview. Clicking the download icon to the left of the name actually downloads
-that item."):
+that item."), as repaired from PR #7810 (fb6296e8):
 
-  * file-like rows bind iconEl.onclick → downloadFile(item.path) with
+  * ONLY download glyphs (DOWNLOAD_EXTS + .pdf, minus image/markdown families)
+    bind the download action — every other file-type icon keeps bubbling to
+    the row's preview handler, so filename and icon hit regions stay distinct;
+  * download-glyph icons bind iconEl.onclick → downloadFile(item.path) with
     e.stopPropagation() so the row's preview handler never fires;
   * the file NAME click keeps the #1707 debounce → el.onclick delegation
     (single click previews, double click renames) — untouched;
   * directory-like rows keep the expand/collapse toggle (no download handler);
   * read-only escape rows (authorized external symlinks) keep their gated
-    navigation flow — no direct download bypass.
+    navigation flow — no direct download bypass;
+  * keyboard: role="button", tabindex=0, aria-label; Enter or Space downloads
+    exactly once — held-key auto-repeat (e.repeat) is suppressed, Space never
+    page-scrolls (preventDefault on the keydown), and activation never
+    bubbles to the row preview;
+  * double-click on the icon downloads once, not twice (e.detail guard);
+  * the download-glyph CSS class must not inflate PDF row geometry
+    (no min-height/min-width:44px on .file-icon-download — compact tree rows
+    and narrow containers keep their height).
+
+LIMITED renderer-level evidence: these tests drive the icon block through a
+Node VM and static-analyze ui.js/style.css. Native browser download behavior
+(content-disposition attachment, actual file save) is a parent/functional
+gate, not covered here.
 
 These tests static-analyze static/ui.js and drive the icon block through a
 Node VM.
@@ -32,6 +48,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
 I18N_JS_PATH = REPO_ROOT / "static" / "i18n.js"
+ICONS_JS_PATH = REPO_ROOT / "static" / "icons.js"
+STYLE_CSS_PATH = REPO_ROOT / "static" / "style.css"
 NODE = shutil.which("node")
 
 
@@ -90,11 +108,12 @@ class TestIconDownloadHandlerShape:
             "does not also fire"
         )
 
-    def test_icon_handler_gated_to_writable_file_rows(self):
+    def test_icon_handler_gated_to_writable_file_rows_with_download_glyph(self):
         block = _icon_block()
-        assert "if(isFileLike && !isReadOnlyEscape){" in block, (
+        assert "if(isFileLike && !isReadOnlyEscape && hasDownloadGlyph){" in block, (
             "download handler must be gated to file-like rows that are not "
-            "read-only escape rows (dirs toggle; escape rows keep their gate)"
+            "read-only escape rows AND render a download glyph — other file "
+            "icons keep the row's preview behavior"
         )
 
     def test_icon_has_download_tooltip(self):
@@ -117,6 +136,92 @@ class TestIconDownloadHandlerShape:
         start = src.index("const iconEl=document.createElement('span');")
         end = src.index("el.appendChild(iconEl);", start)
         assert end > start
+
+
+class TestKeyboardAccessibility:
+    """Keyboard/ARIA correctness for the download glyph (#7810 repair)."""
+
+    def test_icon_is_a_keyboard_reachable_button(self):
+        block = _icon_block()
+        assert "setAttribute('role','button')" in block, (
+            "download glyph must expose role=button"
+        )
+        assert "setAttribute('tabindex','0')" in block, (
+            "download glyph must be focusable via keyboard"
+        )
+        assert "aria-label" in block, (
+            "download glyph must carry an aria-label naming the file"
+        )
+
+    def test_keydown_handles_enter_and_space(self):
+        block = _icon_block()
+        assert "e.key==='Enter'||e.key===' '" in block, (
+            "Enter and Space must both activate the download glyph"
+        )
+
+    def test_keydown_prevents_default(self):
+        """preventDefault must run before any early return so held Space
+        never page-scrolls the document."""
+        block = _icon_block()
+        assert "e.preventDefault();" in block
+
+    def test_keydown_suppresses_auto_repeat(self):
+        block = _icon_block()
+        assert "e.repeat" in block, (
+            "held-key auto-repeat must be suppressed — one download per "
+            "intentional Enter/Space press"
+        )
+
+    def test_keydown_stops_propagation(self):
+        block = _icon_block()
+        # Both the click and keydown paths must stop propagation.
+        assert block.count("e.stopPropagation();") >= 2, (
+            "click and keydown activation must not bubble to the row preview"
+        )
+
+    def test_double_click_downloads_once(self):
+        block = _icon_block()
+        assert "e.detail>1" in block, (
+            "the second click of a double-click must not start another download"
+        )
+
+
+class TestDownloadGlyphHelper:
+    """The glyph predicate lives in static/icons.js beside the icon mapping."""
+
+    def test_helper_exists_in_icons_js(self):
+        src = _read(ICONS_JS_PATH)
+        assert "function isDownloadGlyph(" in src, (
+            "static/icons.js must define isDownloadGlyph(name, type)"
+        )
+
+    def test_helper_gates_to_download_glyphs(self):
+        src = _read(ICONS_JS_PATH)
+        start = src.index("function isDownloadGlyph(")
+        end = src.index("\n}", start)
+        body = src[start:end]
+        assert "DOWNLOAD_EXTS" in body, "predicate must consult DOWNLOAD_EXTS"
+        assert "'.pdf'" in body or '".pdf"' in body, (
+            "predicate must treat .pdf as a download glyph (fileIcon renders "
+            "the download glyph for .pdf)"
+        )
+
+    def test_css_class_has_geometry_safe_rule(self):
+        css = _read(STYLE_CSS_PATH)
+        assert ".file-icon-download{" in css, (
+            "style.css must style .file-icon-download"
+        )
+        start = css.index(".file-icon-download{")
+        end = css.index("}", start)
+        rule = css[start:end]
+        assert "min-height" not in rule and "min-width" not in rule, (
+            ".file-icon-download must not use min-width/min-height hit-area "
+            "inflation (44px) — it inflates PDF row height and breaks narrow "
+            "containers; keep compact row geometry"
+        )
+        assert "focus-visible" in css[start:end + 200], (
+            ".file-icon-download needs a :focus-visible ring for keyboard use"
+        )
 
 
 class TestNameClickContractUntouched:
@@ -148,17 +253,18 @@ class TestI18nKey:
 
 # ── Behavioral tests via Node VM ──────────────────────────────────────────────
 
-
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 
-def _run_node_vm(item_type: str, read_only_escape: bool) -> dict:
-    """Execute the icon block with mocked DOM/globals and click the icon."""
+def _run_node_vm(item_type: str, read_only_escape: bool,
+                 name: str = "foo.pdf") -> dict:
+    """Execute the icon block with mocked DOM/globals and drive interactions."""
     block = _icon_block()
     payload = {
         "block": block,
         "itemType": item_type,
         "readOnlyEscape": read_only_escape,
+        "name": name,
     }
     js = (
         "const params = " + json.dumps(payload) + ";\n"
@@ -169,23 +275,36 @@ const readOnlyEscape = params.readOnlyEscape;
 
 let downloadCalls = [];
 let stopPropagationCalls = 0;
+let openCalls = 0;
+let preventDefaultCalls = 0;
 let appendedTo = null;
 
 const document = {
   createElement: (tag) => ({
     tagName: tag.toUpperCase(),
-    className: '', textContent: '', title: '', innerHTML: '',
-    onclick: null,
+    className: '', classList: {add() {}}, textContent: '', title: '',
+    innerHTML: '', onclick: null, onkeydown: null, attributes: {},
+    setAttribute(key, val) { this.attributes[key] = val; },
     style: {},
     appendChild(child) {},
   }),
 };
 const li = () => '';
-const fileIcon = () => '';
+const fileExt = (p) => { const i = p.lastIndexOf('.'); return i >= 0 ? p.slice(i).toLowerCase() : ''; };
+const IMAGE_EXTS = new Set(['.png', '.jpg']);
+const MD_EXTS = new Set(['.md']);
+const DOWNLOAD_EXTS = new Set(['.zip', '.tar.gz', '.whl']);
+const isDownloadGlyph = (n, ty) => {
+  if (ty === 'dir' || ty === 'symlink') return false;
+  const e = fileExt(n);
+  if (IMAGE_EXTS.has(e) || MD_EXTS.has(e)) return false;
+  return DOWNLOAD_EXTS.has(e) || e === '.pdf';
+};
+const fileIcon = (n) => isDownloadGlyph(n) ? 'download' : 'file-text';
 const t = (key) => ({media_download: 'Download'}[key] || key);
 const downloadFile = (path) => { downloadCalls.push(path); };
-const el = { appendChild(child) { appendedTo = child; } };
-const item = { type: itemType, name: 'foo' + (itemType === 'dir' ? '' : '.pdf'), path: 'dir/foo.pdf' };
+const el = { appendChild(child) { appendedTo = child; }, onclick() { openCalls++; } };
+const item = { type: itemType, name: params.name, path: 'dir/' + params.name };
 
 const isLk = itemType === 'symlink';
 const isExternalLink = false;
@@ -194,25 +313,49 @@ const isFileLike = !isDirLike;
 const isReadOnlyEscape = readOnlyEscape;
 
 const runner = new Function(
-  'document', 'li', 'fileIcon', 't', 'downloadFile', 'el', 'item',
+  'document', 'li', 'fileIcon', 'fileExt', 'IMAGE_EXTS', 'MD_EXTS',
+  'DOWNLOAD_EXTS', 'isDownloadGlyph', 't', 'downloadFile', 'el', 'item',
   'isLk', 'isExternalLink', 'isDirLike', 'isFileLike', 'isReadOnlyEscape',
   '(()=>{' + block + '})();'
 );
-runner(document, li, fileIcon, t, downloadFile, el, item,
+runner(document, li, fileIcon, fileExt, IMAGE_EXTS, MD_EXTS, DOWNLOAD_EXTS,
+       isDownloadGlyph, t, downloadFile, el, item,
        isLk, isExternalLink, isDirLike, isFileLike, isReadOnlyEscape);
 
 const iconEl = appendedTo;
-let clicked = false;
-if (iconEl && typeof iconEl.onclick === 'function') {
-  iconEl.onclick({ stopPropagation: () => { stopPropagationCalls++; } });
-  clicked = true;
+let stoppedClick = false;
+function click(detail) {
+  stoppedClick = false;
+  const event = {detail, stopPropagation() { stoppedClick = true; stopPropagationCalls++; }};
+  if (typeof iconEl.onclick === 'function') iconEl.onclick(event);
+  if (!stoppedClick) el.onclick(event);
+}
+click(1);
+if (params.name === 'double.pdf') click(2);
+function key(k, repeat) {
+  const event = {key: k, repeat: !!repeat,
+                 preventDefault() { preventDefaultCalls++; },
+                 stopPropagation() { stopPropagationCalls++; }};
+  if (typeof iconEl.onkeydown === 'function') iconEl.onkeydown(event);
+  // Unstopped keydown would scroll/bubble to the row: model the preview leak.
+  else el.onclick(event);
+}
+if (params.name === 'keyboard.pdf') {
+  key('Enter', false);
+  key(' ', false);
+  // Held Space: OS auto-repeat delivers repeated keydown events.
+  key(' ', true); key(' ', true); key(' ', true);
 }
 
 console.log(JSON.stringify({
   iconHasHandler: !!(iconEl && typeof iconEl.onclick === 'function'),
-  clicked,
   downloadCalls,
+  openCalls,
   stopPropagationCalls,
+  preventDefaultCalls,
+  role: iconEl ? iconEl.attributes.role : null,
+  tabindex: iconEl ? iconEl.attributes.tabindex : null,
+  label: iconEl ? iconEl.attributes['aria-label'] : null,
   title: iconEl ? iconEl.title : null,
 }));
 """
@@ -228,10 +371,10 @@ console.log(JSON.stringify({
 
 class TestIconDownloadBehavior:
     def test_file_icon_click_downloads(self):
-        """Clicking a file row's icon calls downloadFile with the item path."""
+        """Clicking a PDF (download glyph) calls downloadFile with item path."""
         out = _run_node_vm(item_type="file", read_only_escape=False)
         assert out["iconHasHandler"] is True, (
-            f"file row icon must have a click handler; got {out}"
+            f"PDF row icon must have a click handler; got {out}"
         )
         assert out["downloadCalls"] == ["dir/foo.pdf"], (
             f"icon click must call downloadFile('dir/foo.pdf'); got {out}"
@@ -239,9 +382,38 @@ class TestIconDownloadBehavior:
         assert out["stopPropagationCalls"] == 1, (
             f"icon click must stopPropagation exactly once; got {out}"
         )
+        assert out["openCalls"] == 0, (
+            f"icon click must not bubble to the row preview; got {out}"
+        )
         assert out["title"] == "Download", (
             f"icon must carry the Download tooltip; got {out}"
         )
+
+    def test_archive_glyph_downloads(self):
+        out = _run_node_vm(item_type="file", read_only_escape=False,
+                           name="archive.zip")
+        assert out["iconHasHandler"] is True, out
+        assert out["downloadCalls"] == ["dir/archive.zip"], out
+        assert out["openCalls"] == 0, out
+
+    def test_non_download_glyph_keeps_row_preview(self):
+        """Non-download file-type icons must NOT bind a download handler —
+        their click bubbles to the row's preview handler (distinct hit
+        regions: download glyph downloads, everything else previews)."""
+        for name in ("analysis.md", "main.py", "config.json", "data.csv",
+                     "photo.png", "notes.txt"):
+            out = _run_node_vm(item_type="file", read_only_escape=False,
+                               name=name)
+            assert out["iconHasHandler"] is False, (name, out)
+            assert out["downloadCalls"] == [], (name, out)
+            assert out["openCalls"] == 1, (name, out)
+
+    def test_unicode_and_spaced_pdf_names_download(self):
+        for name in ("résumé final.pdf", "报告 报告.pdf", "a b c d e f g.pdf"):
+            out = _run_node_vm(item_type="file", read_only_escape=False,
+                               name=name)
+            assert out["downloadCalls"] == ["dir/" + name], (name, out)
+            assert out["openCalls"] == 0, (name, out)
 
     def test_dir_icon_has_no_download_handler(self):
         """Directory rows keep the expand/collapse toggle — no download."""
@@ -263,3 +435,32 @@ class TestIconDownloadBehavior:
             f"read-only escape icon click must not download (bypasses the "
             f"escape gate); got {out}"
         )
+
+
+class TestDoubleClickAndKeyboardBehavior:
+    def test_double_click_downloads_once(self):
+        out = _run_node_vm(item_type="file", read_only_escape=False,
+                           name="double.pdf")
+        assert out["downloadCalls"] == ["dir/double.pdf"], out
+        assert out["openCalls"] == 0, out
+
+    def test_enter_and_space_download_once_despite_auto_repeat(self):
+        out = _run_node_vm(item_type="file", read_only_escape=False,
+                           name="keyboard.pdf")
+        assert out["role"] == "button", out
+        assert out["tabindex"] == "0", out
+        assert out["label"] == "Download keyboard.pdf", out
+        # Icon click + one Enter press + one intentional Space press = 3
+        # downloads. The 3 held-Space repeat events must not add more.
+        assert out["downloadCalls"] == ["dir/keyboard.pdf"] * 3, out
+        assert out["openCalls"] == 0, out
+        # preventDefault ran for every Enter/Space keydown (incl. repeats)
+        # so held Space never page-scrolls.
+        assert out["preventDefaultCalls"] == 5, out
+
+    def test_symlink_icon_keeps_original_behavior(self):
+        out = _run_node_vm(item_type="symlink", read_only_escape=False,
+                           name="foo.pdf")
+        assert out["iconHasHandler"] is False, out
+        assert out["openCalls"] == 1, out
+        assert out["downloadCalls"] == [], out

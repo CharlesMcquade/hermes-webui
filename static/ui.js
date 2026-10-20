@@ -23707,14 +23707,34 @@ function _renderTreeItems(container, entries, depth){
       : isDirLike
         ? (isLk ? li('link', 14) : li('folder', 14))
         : (isLk ? li('link', 14) : fileIcon(item.name, item.type));
-    // File rows: the icon is the download affordance. Clicking it downloads the
-    // file directly instead of bubbling to the row's openFile (preview) handler.
-    // Name clicks keep preview; the row body keeps its existing behavior.
-    if(isFileLike && !isReadOnlyEscape){
-      iconEl.title = (typeof t==='function' ? t('media_download') : 'Download');
+    // Only glyphs that actually advertise download get a distinct download
+    // action (#7810 repair of fb6296e8). Other file-type icons still bubble to
+    // the row's preview handler, so the filename and icon hit regions stay
+    // distinct: download glyph downloads, name/icon click previews.
+    const hasDownloadGlyph = typeof isDownloadGlyph==='function'
+      ? isDownloadGlyph(item.name, item.type) : false;
+    if(isFileLike && !isReadOnlyEscape && hasDownloadGlyph){
+      const label=(typeof t==='function' ? t('media_download') : 'Download');
+      iconEl.classList.add('file-icon-download');
+      iconEl.title=label;
+      iconEl.setAttribute('role','button');
+      iconEl.setAttribute('tabindex','0');
+      iconEl.setAttribute('aria-label',label+' '+item.name);
       iconEl.onclick=(e)=>{
         e.stopPropagation();
+        // The second click of a double-click must not start another download.
+        if(e.detail>1)return;
         if(typeof downloadFile==='function') downloadFile(item.path);
+      };
+      iconEl.onkeydown=(e)=>{
+        if(e.key==='Enter'||e.key===' '){
+          // preventDefault runs even on repeats so held Space never scrolls.
+          e.preventDefault();
+          e.stopPropagation();
+          // One download per intentional press: suppress OS auto-repeat.
+          if(e.repeat)return;
+          if(typeof downloadFile==='function') downloadFile(item.path);
+        }
       };
       iconEl.style.cursor='pointer';
     }
