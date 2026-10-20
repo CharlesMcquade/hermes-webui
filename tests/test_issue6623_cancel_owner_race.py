@@ -384,7 +384,7 @@ def test_issue6623_stale_recovery_successor_survives_delayed_cancel_finalizer(
 
     # 2) Cancel through the real production path.
     with patch("api.streaming.get_session", return_value=s):
-        assert streaming.cancel_stream(old_stream) is True
+        assert streaming.cancel_stream(old_stream)["cancelled"] is True
     assert s.active_stream_id is None
     assert streaming._session_has_cancel_marker(s)
 
@@ -520,7 +520,7 @@ def test_issue6623_replaced_session_successor_survives_delayed_cancel_finalizer(
     config.register_active_run(old_stream, session_id=sid, phase="running")
 
     # 2) Cancel through the real production path.
-    assert streaming.cancel_stream(old_stream) is True
+    assert streaming.cancel_stream(old_stream)["cancelled"] is True
     assert s_old.active_stream_id is None
     assert streaming._session_has_cancel_marker(s_old)
     _old_messages_after_cancel = len(s_old.messages)
@@ -624,7 +624,7 @@ def test_issue6623_replaced_session_completed_successor_still_protected_by_owner
     config.STREAMS[old_stream] = queue.Queue()
     config.CANCEL_FLAGS[old_stream] = threading.Event()
     config.register_active_run(old_stream, session_id=sid, phase="running")
-    assert streaming.cancel_stream(old_stream) is True
+    assert streaming.cancel_stream(old_stream)["cancelled"] is True
 
     monkeypatch.setattr(models, "SESSIONS_MAX", 2)
     for i in range(4):
@@ -710,7 +710,7 @@ def test_issue6623_replaced_session_process_wakeup_pause_merges_into_current(
     config.STREAMS[old_stream] = queue.Queue()
     config.CANCEL_FLAGS[old_stream] = threading.Event()
     config.register_active_run(old_stream, session_id=sid, phase="running")
-    assert streaming.cancel_stream(old_stream) is True
+    assert streaming.cancel_stream(old_stream)["cancelled"] is True
 
     monkeypatch.setattr(models, "SESSIONS_MAX", 2)
     for i in range(4):
@@ -810,7 +810,7 @@ def test_issue6623_completed_successor_teardown_cleared_owner_blocks_old_finaliz
     config.register_active_run(old_stream, session_id=sid, phase="running")
 
     # 2) Cancel the old turn through the real production path.
-    assert streaming.cancel_stream(old_stream) is True
+    assert streaming.cancel_stream(old_stream)["cancelled"] is True
     assert s_old.active_stream_id is None
     assert streaming._session_has_cancel_marker(s_old)
     _old_messages_after_cancel = len(s_old.messages)

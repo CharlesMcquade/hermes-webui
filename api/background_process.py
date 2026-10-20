@@ -2343,6 +2343,10 @@ def _start_server_side_wakeup_turn(
             )
             status = int((resp or {}).get("_status", 200) or 200)
             if status == 409 and (resp or {}).get("error") == "process_wakeup_paused":
+                for entry in pending:
+                    if entry.get("process_id"):
+                        _mark_registry_completion_consumed(entry["process_id"])
+                _retire_wakeup_ownership(session_id, pending)
                 logger.info(
                     "server-side wakeup suppressed for session %s: provider credential state is paused",
                     session_id,

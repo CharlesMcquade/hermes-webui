@@ -4744,10 +4744,6 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
     const entryProvider=_entryProvider(existing);
     return !provider||!entryProvider||entryProvider===provider;
   })) return true;
-  // @provider:model is an equivalent routing spelling only when an existing
-  // picker row belongs to that same provider. This supports named custom
-  // providers (@custom:name:model) without collapsing matching model IDs from
-  // different providers.
   const rawId=String(modelId||'');
   // `<provider>/<model>` is another routing spelling of `<model>`, so its badge
   // key must not become a second picker row. configured_model_badges holds every

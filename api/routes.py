@@ -15629,6 +15629,10 @@ def _handle_session_get(handler, parsed) -> bool:
 
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
+    # Live voice was retired. Fail closed even for stale tabs or direct callers;
+    # ordinary transcription/TTS endpoints have a separate lifecycle.
+    if parsed.path.startswith("/api/voice/live/"):
+        return j(handler, {"error": "live_voice_retired"}, status=410) or True
     from api import extension_auth
     if parsed.path == "/extension-pair" or parsed.path.startswith(extension_auth.PREFIX):
         return extension_auth.handle_get(handler, parsed)
@@ -17334,6 +17338,11 @@ def _llm_update_summary(system_prompt: str, user_prompt: str, active_profile: st
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
+    # Reject every legacy action before reading its body or touching voice
+    # session state. Close pending request bodies on keep-alive connections.
+    if parsed.path.startswith("/api/voice/live/"):
+        arm_connection_close_if_body_pending(handler)
+        return j(handler, {"error": "live_voice_retired"}, status=410) or True
     from api import extension_auth
     if parsed.path.startswith(extension_auth.PREFIX):
         return extension_auth.handle_post(handler, parsed)

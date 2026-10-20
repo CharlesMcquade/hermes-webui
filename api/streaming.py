@@ -7869,7 +7869,12 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 return
             aux_title_configured = _aux_title_configured()
             rejected_model_output = False
-            if agent and not aux_title_configured:
+            # Snapshot-side (S01, freeze F6): the DB winner/provenance from
+            # get_session_title_state outranks every generation path — a
+            # canonical (non-derived) title is authoritative, not a proposal.
+            if canonical and canonical[0] and canonical[1] != 'derived':
+                next_title, llm_status, raw_preview = canonical[0], 'canonical_title', ''
+            elif agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
                 rejected_model_output = llm_status in ('llm_invalid', 'llm_language_mismatch')
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
@@ -12885,7 +12890,11 @@ def _run_agent_streaming(
         # Retire the worker settlement participant that cancel_stream() may have
         # registered for this stream (gate-certifier blocker #1: SILENT lifecycle
         # leak — pre-start local exits never retire the registered worker
-        # participant). A no-op for streams that never entered settlement.
+        # participant, leaking _STREAM_SETTLEMENT_PARTICIPANTS and the terminal
+        # fence indefinitely).  When the worker never started, there is no
+        # durable save to compare against, so retire unconditionally under the
+        # lock.  _retire_worker_cancelled_state_locked is a no-op for streams
+        # that never entered cancellation settlement.
         try:
             _retire_worker_cancelled_state(stream_id)
         except Exception:
@@ -19027,10 +19036,6 @@ def cancel_stream(stream_id: str) -> bool:
             )
             result['cancelled'] = False
             result['persistence_failed'] = True
-            logger.error(
-                "cancel_stream: terminal persistence failure for stream %s; "
-                "fallback notice durability unconfirmed", stream_id,
-            )
             return False
         result['cancelled'] = True
         return True

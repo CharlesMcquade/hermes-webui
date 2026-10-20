@@ -97,7 +97,7 @@ class TestCancelInterrupt:
         result = cancel_stream(stream_id)
 
         # Assert
-        assert result is True
+        assert result["cancelled"] is True
         mock_agent.interrupt.assert_called_once_with("Cancelled by user")
         # CANCEL_FLAGS is eagerly popped after cancel (#776 fix) so the flag
         # is no longer in the dict — verify the pop happened instead
@@ -118,7 +118,7 @@ class TestCancelInterrupt:
         result = cancel_stream(stream_id)
 
         # Assert
-        assert result is True
+        assert result["cancelled"] is True
         mock_agent.interrupt.assert_called_once()
         assert stream_id not in CANCEL_FLAGS, \
             "cancel_stream() should eagerly pop CANCEL_FLAGS even on interrupt exception"
@@ -135,7 +135,7 @@ class TestCancelInterrupt:
         result = cancel_stream(stream_id)
 
         # Assert
-        assert result is True
+        assert result["cancelled"] is True
         # CANCEL_FLAGS is eagerly popped; the agent thread checks the event
         # object it already has a reference to — pop doesn't clear the event
         assert stream_id not in CANCEL_FLAGS, \
@@ -145,7 +145,7 @@ class TestCancelInterrupt:
     def test_cancel_nonexistent_stream(self):
         """Test cancel for a stream that doesn't exist"""
         result = cancel_stream("nonexistent_stream")
-        assert result is False
+        assert result["cancelled"] is False
 
     def test_cancel_falls_back_to_active_run_registry(self):
         """Cancel should still work when STREAMS is gone but the worker is alive."""
@@ -177,7 +177,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result is True
+        assert result["cancelled"] is True
         assert ACTIVE_RUNS[stream_id]["phase"] == "cancelling"
         mock_agent.interrupt.assert_called_once_with("Cancelled by user")
         assert mock_session.active_stream_id is None
@@ -196,7 +196,7 @@ class TestCancelInterrupt:
 
         result = cancel_stream(stream_id)
 
-        assert result is True
+        assert result["cancelled"] is True
         assert cancel_event.is_set()
 
     def test_cancel_puts_sentinel_in_queue(self):
@@ -209,7 +209,7 @@ class TestCancelInterrupt:
 
         result = cancel_stream(stream_id)
 
-        assert result is True
+        assert result["cancelled"] is True
         # Check that cancel message was queued
         assert not q.empty()
         event_type, data = q.get_nowait()
@@ -269,7 +269,7 @@ class TestCancelInterrupt:
         with patch("api.streaming.get_session", return_value=mock_session):
             result = cancel_stream(stream_id)
 
-        assert result is True
+        assert result["cancelled"] is True
         mock_agent.interrupt.assert_called_once_with("Cancelled by user")
         # The cancelled turn must carry the partial text that was live BEFORE the
         # interrupt popped the buffers. Find it in the appended messages.
@@ -332,7 +332,7 @@ class TestCancelInterrupt:
                 patch("api.streaming._cached_agent_matches_session", return_value=True):
             result = cancel_stream(stream_id)
 
-        assert result is True
+        assert result["cancelled"] is True
         mock_agent.interrupt.assert_called_once_with("Cancelled by user")
         appended = [m for m in mock_session.messages if isinstance(m, dict)]
         joined = " ".join(str(m.get("content", "")) for m in appended)

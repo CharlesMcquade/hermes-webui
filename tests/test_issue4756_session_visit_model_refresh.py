@@ -367,7 +367,7 @@ def test_session_visit_overlapping_stale_calls_do_not_duplicate_over_budget_rebu
     monkeypatch.setattr(cfg, "_get_models_cache_path", lambda: cache_path)
     monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
     monkeypatch.setattr(cfg, "_models_cache_source_fingerprint", lambda: fingerprint)
-    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache, **_kwargs: None)
+    monkeypatch.setattr(cfg, "_save_models_cache_to_disk", lambda _cache, **_kwargs: published.set())
 
     def _load_stale_models_cache_from_disk():
         nonlocal delayed_ident

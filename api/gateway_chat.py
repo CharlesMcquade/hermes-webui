@@ -23,6 +23,7 @@ from api.config import (
     STREAM_LIVE_TOOL_CALLS,
     STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT,
+    RunAdmissionDrainingError,
     _get_session_agent_lock,
     _parse_provider_qualified_model_id,
     clear_session_writeback_owner_if_owned,
@@ -1964,6 +1965,10 @@ def _run_gateway_chat_streaming(
     """
     cancel_event = threading.Event()
     q = peek_stream(stream_id)
+    # Snapshot-side contract: a supervised-restart drain must refuse admission
+    # with a retryable apperror instead of running a turn the restart will
+    # orphan (upstream register_active_run raises RunAdmissionDrainingError).
+    admission_draining = False
     if q is not None:
         # A snapshot lookup is not admission. A concurrent chat/start can classify
         # this stream as an orphan (registered, no live worker, no pending turn in
@@ -1985,26 +1990,31 @@ def _run_gateway_chat_streaming(
                 STREAM_PARTIAL_TEXT[stream_id] = ""
                 STREAM_REASONING_TEXT[stream_id] = ""
                 STREAM_LIVE_TOOL_CALLS[stream_id] = []
-                register_active_run(
-                    stream_id,
-                    session_id=session_id,
-                    started_at=time.time(),
-                    phase="gateway-starting",
-                    workspace=str(workspace),
-                    model=model,
-                    provider=model_provider,
-                    backend="gateway",
-                )
-                # Worker admission ends the launch phase (#7302 finding 5): retire
-                # the claim published at registration. Ownership lives in
-                # ACTIVE_RUNS from here on.
-                from api.config import retire_pre_admission_claim_if_owned
+                try:
+                    register_active_run(
+                        stream_id,
+                        session_id=session_id,
+                        started_at=time.time(),
+                        phase="gateway-starting",
+                        workspace=str(workspace),
+                        model=model,
+                        provider=model_provider,
+                        backend="gateway",
+                    )
+                except RunAdmissionDrainingError:
+                    admission_draining = True
+                else:
+                    # Worker admission ends the launch phase (#7302 finding 5): retire
+                    # the claim published at registration. Ownership lives in
+                    # ACTIVE_RUNS from here on.
+                    from api.config import retire_pre_admission_claim_if_owned
 
-                retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
-    if q is None:
+                    retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
+    if q is None or admission_draining:
         _finish_gateway_run_starting(stream_id, result="fallback")
         _clear_gateway_run_starting(stream_id)
-        # Cancelled or orphan-cleared before the worker was admitted: no teardown
+        # Cancelled or orphan-cleared (or refused by a supervised-restart
+        # drain) before the worker was admitted: no teardown
         # finally runs on this early-return path, so release the COMPLETE set of
         # stream-owned registries the route layer registered (stream rows,
         # owners, writeback, goal classification) and then the Gateway-owned
@@ -2033,6 +2043,28 @@ def _run_gateway_chat_streaming(
                 )
         release_stream_owned_registries(stream_id, session_id=session_id)
         release_gateway_stream_state(stream_id)
+        # Snapshot-side: retire the worker settlement participant that
+        # cancel_stream() may have registered (gate-certifier blocker #1:
+        # SILENT lifecycle leak — Gateway pre-start exits never retire the
+        # registered worker participant).
+        try:
+            from api.streaming import _retire_worker_cancelled_state
+            _retire_worker_cancelled_state(stream_id)
+        except Exception:
+            logger.debug(
+                "Failed to retire worker settlement participant for pre-start "
+                "gateway stream %s", stream_id, exc_info=True,
+            )
+        if admission_draining and q is not None:
+            q.put_nowait((
+                "apperror",
+                {
+                    "type": "restart_draining",
+                    "retryable": True,
+                    "message": "Hermes WebUI is completing a supervised restart; retry shortly.",
+                    "session_id": session_id,
+                },
+            ))
         return
     try:
         run_journal = RunJournalWriter(session_id, stream_id)

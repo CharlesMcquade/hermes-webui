@@ -389,6 +389,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert payload["model"] == "alias-target-model"
     assert payload["provider"] == "openai-codex"
     assert "ambient-provider-key" not in captured["body"]
+    assert tmp_path / 'profile-test' in homes
+    assert captured['body'].count('SESSION_PROFILE_OVERLAY') == 1
+    assert 'WRONG_GLOBAL_OVERLAY' not in captured['body']
     # #3324: the gateway path's first system message is now the full WebUI
     # ephemeral system prompt (progress prompt + session/delivery context),
     # NOT the bare _WEBUI_PROGRESS_PROMPT — otherwise the delivery/session
