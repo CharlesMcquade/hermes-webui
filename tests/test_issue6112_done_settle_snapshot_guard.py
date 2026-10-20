@@ -120,6 +120,9 @@ def _harness(extra: str = "") -> dict:
     assert NODE, "node is required for behavioural #6112 tests"
     pieces = [
         _extract_function(MESSAGES_JS, "_messageIdentityKey"),
+        # K04a: _adoptDoneSnapshotMessages now depends on these helpers.
+        _extract_function(MESSAGES_JS, "_ownerIdentityConflict"),
+        _extract_function(MESSAGES_JS, "_mergeResidentPrefix"),
         _extract_function(MESSAGES_JS, "_carryForwardEphemeralTurnFields"),
         _extract_function(MESSAGES_JS, "_adoptDoneSnapshotMessages"),
         _extract_function(MESSAGES_JS, "_finalAnswerIsInTranscript"),
@@ -396,6 +399,9 @@ def _listener_settle_harness(prev_messages: str, done_session: str, final_answer
     )
     pieces = [
         _extract_function(MESSAGES_JS, "_messageIdentityKey"),
+        # K04a: _adoptDoneSnapshotMessages now depends on these helpers.
+        _extract_function(MESSAGES_JS, "_ownerIdentityConflict"),
+        _extract_function(MESSAGES_JS, "_mergeResidentPrefix"),
         _extract_function(MESSAGES_JS, "_carryForwardEphemeralTurnFields"),
         _extract_function(MESSAGES_JS, "_adoptDoneSnapshotMessages"),
         _extract_function(MESSAGES_JS, "_finalAnswerIsInTranscript"),
@@ -421,6 +427,10 @@ def _listener_settle_harness(prev_messages: str, done_session: str, final_answer
             const _pendingTitleExpectedCurrent = new Map();
             function applySessionTitleUpdate(){{}}
             const _preSettle=Array.isArray(S.messages)?S.messages:[];
+            // K04a: the settle guard now consumes owner identity; stub the
+            // listener's locals the guard reads (same values it would compute).
+            const activeSid=(d.session&&d.session.session_id)||'';
+            const _settledStreamId=(d&&d.stream_id)||'';
             {carry}
             {guard}
             const msgs = Array.isArray(S.messages) ? S.messages : [];
