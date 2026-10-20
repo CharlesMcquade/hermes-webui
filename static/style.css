@@ -3751,6 +3751,24 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
   opacity:.7;
   line-height:1;
 }
+/* Download-glyph icon action (#7810 repair of fb6296e8). Geometry-safe: no
+   min-width/min-height hit-area inflation — that inflates compact PDF tree
+   row heights and overflows narrow containers. The icon box matches the
+   existing 13px glyph metrics; keyboard focus gets a visible ring. */
+.file-icon-download{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:20px;
+  height:20px;
+  margin:-3px;
+  cursor:pointer;
+  border-radius:4px;
+}
+.file-icon-download:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:-2px;
+}
 
 /* ── Resizable panels ── */
 .resize-handle{
