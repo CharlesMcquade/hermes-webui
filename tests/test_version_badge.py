@@ -184,6 +184,48 @@ class TestDetectWebUIVersion:
         result = self._fresh_detect(mock_run_git=fake_run_git, tmp_path=tmp_path)
         assert result == 'v0.50.123-dirty'
 
+    def test_dirty_check_suppresses_suffix_for_stale_index_empty_diff(self, tmp_path):
+        """Sealed releases: diff-index says dirty (stale stat cache) but the
+        content diff is empty -> no -dirty suffix (prod showed a6c277c-dirty)."""
+        def fake_run_git(args, cwd, timeout=10):
+            if args[:3] == ['describe', '--tags', '--always']:
+                return ('a6c277c', True)
+            if args[:2] == ['diff-index', '--quiet']:
+                return ('git exited with status 1', False)
+            if args[:3] == ['diff', '--binary', 'HEAD']:
+                return ('', True)
+            return ('unexpected', False)
+
+        result = self._fresh_detect(mock_run_git=fake_run_git, tmp_path=tmp_path)
+        assert result == 'a6c277c'
+
+    def test_stale_index_on_readonly_checkout_reads_clean(self, tmp_path):
+        """Real git: chmod after commit + 1s makes diff-index stale; badge stays clean."""
+        import os, time
+        import api.updates as upd
+
+        def git(*args):
+            subprocess.run(['git', *args], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+        git('init')
+        git('config', 'user.name', 'Test User')
+        git('config', 'user.email', 'test@example.invalid')
+        tracked = tmp_path / 'tracked.txt'
+        tracked.write_text('base\n', encoding='utf-8')
+        git('add', 'tracked.txt')
+        git('commit', '-m', 'base')
+        time.sleep(1.1)
+        os.chmod(tracked, 0o444)
+        os.chmod(tmp_path / '.git' / 'index', 0o444)
+        try:
+            assert upd._dirty_suffix(tmp_path) == ''
+            tracked.chmod(0o644)
+            tracked.write_text('edit\n', encoding='utf-8')
+            assert upd._dirty_suffix(tmp_path).startswith('-dirty-')
+        finally:
+            os.chmod(tmp_path / '.git' / 'index', 0o644)
+            tracked.chmod(0o644)
+
     def test_dirty_suffix_changes_when_tracked_diff_changes(self, tmp_path):
         """Real git diff hashing should produce a new suffix for each tracked edit."""
         import api.updates as upd

@@ -550,6 +550,12 @@ def _dirty_suffix(path: Path, timeout=1) -> str:
     if diff_ok and diff:
         digest = hashlib.sha1(diff.encode('utf-8', errors='replace')).hexdigest()[:8]
         return f"-dirty-{digest}"
+    if diff_ok:
+        # diff-index trusts cached stat data; a stale index (e.g. a read-only
+        # sealed release whose ctimes moved after checkout) flags every file
+        # while the content diff is empty. Mode changes still produce a diff,
+        # so an empty successful diff means the tree matches HEAD.
+        return ""
     return "-dirty"
 
 
