@@ -16182,8 +16182,52 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, get_provider_quota(provider_id, refresh=refresh))
 
     if parsed.path == "/api/provider/cost-history":
-        query = parse_qs(parsed.query)
+        query = parse_qs(parsed.query, keep_blank_values=True)
         provider_id = (query.get("provider", [""])[0] or None)
+        # S03 fork delta: absolute start/end (YYYY-MM-DD, inclusive both ends)
+        # composes with upstream's relative-days API. The route translates the
+        # absolute window into the equivalent days count for the provider call
+        # and annotates the response with the requested range, so a response is
+        # always ONE atomic window — never mixed authoritative/legacy buckets.
+        start_raw = (query.get("start", [""])[0] or "").strip()
+        end_raw = (query.get("end", [""])[0] or "").strip()
+        if start_raw or end_raw:
+            def _parse_iso_date(raw, label):
+                from datetime import date as _date
+                try:
+                    return _date.fromisoformat(raw)
+                except ValueError:
+                    raise ValueError(f"{label} must be an ISO date (YYYY-MM-DD), got {raw!r}")
+            if not (start_raw and end_raw):
+                return bad(handler, "start and end must both be supplied (YYYY-MM-DD)")
+            if len(query.get("start", [])) > 1 or len(query.get("end", [])) > 1:
+                return bad(handler, "start and end must each appear exactly once")
+            try:
+                start_date = _parse_iso_date(start_raw, "start")
+                end_date = _parse_iso_date(end_raw, "end")
+            except ValueError as exc:
+                return bad(handler, str(exc))
+            if start_date > end_date:
+                return bad(handler, "start must not be after end")
+            from datetime import date as _date
+            today = _date.today()
+            clamped = end_date > today
+            if clamped:
+                end_date = today
+            span_days = (end_date - start_date).days + 1
+            if span_days > 365:
+                return bad(handler, "absolute range spans more than 365 days")
+            payload = get_provider_cost_history(provider_id, span_days)
+            if isinstance(payload, dict):
+                payload.setdefault("range", {})
+                payload["range"] = {
+                    "start": start_date.isoformat(),
+                    "end": end_date.isoformat(),
+                    "inclusive": True,
+                }
+                payload["range_source"] = "absolute"
+                payload["clamped"] = clamped
+            return j(handler, payload)
         days_raw = (query.get("days", ["7"])[0] or "7").strip()
         try:
             days = max(1, min(int(days_raw), 365))
