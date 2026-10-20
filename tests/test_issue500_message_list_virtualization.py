@@ -655,6 +655,28 @@ console.log(JSON.stringify({ordinary,preserving,healthy,schedules}));
 """
     assert json.loads(_run_node(source)) == dict(ordinary=False,preserving=False,healthy=False,schedules=0)
 
+    render_start = js.index("function renderMessages(options)")
+    render_end = js.index("function _toolDisplayName", render_start)
+    render_body = js[render_start:render_end]
+
+    assert "const virtualFallback=!!(options&&options._virtualFallback);" in render_body
+    assert "const virtualWindow=virtualFallback" in render_body
+    # #7591: both render paths capture viewport ownership BEFORE the restore and
+    # pass it into recovery, so recovery can tell an independent in-flight
+    # programmatic write from the render's own (the old depth-counter guard was
+    # dead: recovery only ever ran inside the depth-incremented block).
+    assert render_body.count("const recoveryOwnership=_captureMessageRecoveryOwnership();") == 2
+    assert (
+        render_body.count(
+            "if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, "
+            "virtualWindow, recoveryOwnership)) return;"
+        )
+        == 2
+    )
+    assert "if(_sessionHtmlCacheSid&&S.session&&S.session.session_id===_sessionHtmlCacheSid){" in js
+    assert "_sessionHtmlCache.delete(_sessionHtmlCacheSid);" in js
+    assert "renderMessages({preserveScroll:true,_virtualFallback:true});" in js
+
 
 def test_virtual_blank_viewport_recovery_evicts_stale_cache_before_fallback():
     js = UI_JS_PATH.read_text(encoding="utf-8")
@@ -666,8 +688,13 @@ const _sessionHtmlCache = {
 };
 let _sessionHtmlCacheSid = 'sid-123';
 const S = { session: { session_id: 'sid-123' } };
+let _messageVirtualBlankClampAttempts = 0;
 function _messageViewportIntersectsRenderedRow(){ return false; }
-function _scheduleMessageVirtualizedRender(force){ renderCalls.push(force); }
+function renderMessages(options){ renderCalls.push(true); }
+// Module state the extracted clamp / compensation wrapper touch.
+let _blankViewportRecoveryToken = 0;
+let _blankViewportRecoveryApplied = 0;
+eval(extractFunc('_clampVirtualizedBlankViewportToRenderedEdge'));
 eval(extractFunc('_maybeRecoverVirtualizedBlankViewport'));
 const recovered = _maybeRecoverVirtualizedBlankViewport({preserveScroll:false, someFlag:true}, true, {virtualized:true});
 console.log(JSON.stringify({recovered, deletes, renderCalls}));
@@ -1129,6 +1156,9 @@ let _programmaticScroll = false;
 let _lastScrollTop = 0;
 function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function requestAnimationFrame(cb){ cb(); }
+// Module state the extracted clamp / compensation wrapper touch.
+let _blankViewportRecoveryToken = 0;
+let _blankViewportRecoveryApplied = 0;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({
@@ -1179,6 +1209,9 @@ function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollReset
 let renderCalls = [];
 function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function requestAnimationFrame(cb){ cb(); }
+// Module state the extracted clamp / compensation wrapper touch.
+let _blankViewportRecoveryToken = 0;
+let _blankViewportRecoveryApplied = 0;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({
@@ -1231,6 +1264,9 @@ function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollReset
 let renderCalls = [];
 function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function requestAnimationFrame(cb){ cb(); }
+// Module state the extracted clamp / compensation wrapper touch.
+let _blankViewportRecoveryToken = 0;
+let _blankViewportRecoveryApplied = 0;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({
@@ -1283,6 +1319,9 @@ function _scheduleMessageVirtualizedRender(){ renderCalls.push(true); }
 function _deferClearProgrammaticScroll(ms){clearTimeout(_programmaticScrollResetTimer);_programmaticScrollResetTimer=setTimeout(()=>{_programmaticScroll=false;},ms||80);}
 function requestAnimationFrame(cb){ cb(); }
 function setTimeout(cb, delay){ cb(); return 1; }
+// Module state the extracted clamp / compensation wrapper touch.
+let _blankViewportRecoveryToken = 0;
+let _blankViewportRecoveryApplied = 0;
 eval(extractFunc('_compensateScrollForMeasurementDelta'));
 _compensateScrollForMeasurementDelta(()=>{ _scheduleMessageVirtualizedRender(true); });
 console.log(JSON.stringify({

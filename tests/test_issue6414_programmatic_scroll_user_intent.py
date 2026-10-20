@@ -193,6 +193,7 @@ function renderMessages(options) {{
 function _captureMessageViewportAnchor() {{ return null; }}
 function _restoreMessageViewportAnchor() {{ return false; }}
 function _messageVirtualPrependedHeightDelta() {{ return null; }}
+function _advanceVisibleBaselineForServerKnownRows() {{}}
 function requestAnimationFrame() {{ return 0; }}
 {_function_body('_freshProgrammaticScrollActive')}
 {_function_body('_restoreMessageWindowReader')}

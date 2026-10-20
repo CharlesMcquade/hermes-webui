@@ -25,7 +25,8 @@ class TestSidebarCancelAction:
         # Rename action item, then to 5200 in #2111 for response-aware archive
         # toast handling, then to 6400 in #2294 for the new "Hide from list"
         # action prepended for external sessions, then to 7600 in #3106 for
-        # manual title regeneration controls.
+        # manual title regeneration controls, then to 8000 in #7731 for the
+        # all-profiles archive payload.
         # The `session.active_stream_id` / cancelSessionStream / delete checks
         # are positional further down in the function, so growing the prefix
         # required growing this read window.

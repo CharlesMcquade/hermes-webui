@@ -272,6 +272,7 @@ let _loadingSessionId = null;
 let _messageRenderWindowSid = null;
 let _messageUserUnpinned = false;
 let _programmaticScroll = false;
+let _messageRenderScrollRestoreDepth = 0;
 let _programmaticScrollSetAt = 0;
 let _sessionHtmlCacheSid = null;
 let _messagesTruncated = false;
@@ -315,6 +316,7 @@ function _wireMessageWindowLoadEarlierButton() {}
 function _compressionAnchorIndex() { return null; }
 function _assistantTurnFinalVisibleContentMap() { return new Map(); }
 function _assistantTurnVisibleContentMap() { return new Map(); }
+function _rawTurnBoundaryByRawIdx() { return new Map(); }
 function _engineAwareCompressionCopy() {
   return { label: 'context_compaction_label', preview: 'reference_only_label' };
 }
@@ -372,6 +374,7 @@ function _syncToolCallGroupSummary() {}
 function _restoreWorklogDetailDisclosureState() {}
 function _scrollAfterMessageRender() {}
 function _maybeRecoverVirtualizedBlankViewport() { return false; }
+function _captureMessageRecoveryOwnership() { return { programmatic:false, jumpOwner:false }; }
 function _updateMessageVirtualMeasurements() {}
 function postProcessRenderedMessages() {}
 function _postProcessWithAnchorSuppression() {}
