@@ -67,7 +67,17 @@ def test_initial_adopts_exact_agent_title_without_second_generation(title_state,
     events = _update(s)
     _assert_projected(s, path, title)
     assert db.get_session_title(s.session_id) == title
-    assert ("title", {"session_id": s.session_id, "title": title}) in events
+    # Current contract: the canonical adoption publishes a `title` event keyed
+    # on the title target (with stream_owner_session_id) plus a title_status
+    # breadcrumb; the exact DB winner is what both carry.
+    assert any(
+        e == "title" and d.get("session_id") == s.session_id and d.get("title") == title
+        for e, d in events
+    )
+    assert any(
+        e == "title_status" and d.get("status") == "canonical_title" and d.get("title") == title
+        for e, d in events
+    )
 
 
 def test_refresh_updates_equal_provenance_db_and_projection(title_state, monkeypatch):
@@ -135,7 +145,10 @@ def test_shared_generator_failure_keeps_provisional_title(title_state, monkeypat
         pytest.fail("Modern generator failure must not use a divergent fallback")
     monkeypatch.setattr(streaming, "generate_title_raw_via_aux", divergent_fallback)
     monkeypatch.setattr(streaming, "generate_title_raw_via_agent", divergent_fallback)
-    monkeypatch.setattr(streaming, "_fallback_title_from_exchange", divergent_fallback)
+    # The local exchange-summary fallback is a deliberate #7318 behavior, not a
+    # divergent LLM title; stub it out so this test isolates the LLM failure
+    # path (provisional title kept, nothing published).
+    monkeypatch.setattr(streaming, "_fallback_title_from_exchange", lambda *a, **kw: None)
     if mode == "initial":
         events = _update(s)
         assert events[-1][0] == "stream_end"
