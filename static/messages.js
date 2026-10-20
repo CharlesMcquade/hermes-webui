@@ -4031,9 +4031,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     for(const row of rows){
       if(!row||typeof row!=='object') continue;
       const role=String(row.role||'');
-      // Steer is user-authored, but it still needs a persisted Anchor scene even
-      // when the rest of the turn is prose-only.
-      if(String(row.source_event_type||'')==='steer_delivered') return true;
       if(scene.mode==='turn_worklog'&&role==='prose'
         && (row.source_event_type==='interim_assistant'||row.source_event_type==='settled_message')) return true;
       if(role==='tool'||role==='thinking') return true;
@@ -6864,20 +6861,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         return;
       }
       _finalizeStreamEndFallback(source);
-    });
-
-    source.addEventListener('steer_delivered',e=>{
-      try{
-        const d=JSON.parse(e.data||'{}');
-        const sid=d.session_id||activeSid;
-        const txt=String(d.text||'').trim();
-        const files=Array.isArray(d.files)?d.files.filter(Boolean):[];
-        if((!txt&&!files.length)||sid!==activeSid) return;
-        _applyToAnchor('steer_delivered',d,e);
-        // Persist the live anchor snapshot so settlement and reconnect retain
-        // the user-authored row instead of reverting to a pre-Steer scene.
-        snapshotLiveTurn();
-      }catch(_){}
     });
 
     source.addEventListener('pending_steer_leftover',e=>{

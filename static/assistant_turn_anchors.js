@@ -91,7 +91,6 @@
     // Accepted mid-run Steer is durable run-journal activity.  Live SSE and
     // journal replay carry the same event_id, so both paths must classify it as
     // the same user-authored control boundary rather than dropping it as unknown.
-    steer_delivered:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     pending_steer_leftover:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     goal_continue:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     artifact_reference:Object.freeze({classification:'artifact',kind:'artifact_reference',source:'derived'}),
@@ -959,7 +958,6 @@
   function _activityRowRole(kind, sourceType){
     // Steer stays a control boundary semantically, but it is user-authored and
     // therefore belongs in the visual timeline as a user message.
-    if(sourceType==='steer_delivered') return 'user';
     if(kind==='process_prose') return 'prose';
     if(kind==='reasoning') return 'thinking';
     if(_isToolActivityKind(kind)) return 'tool';
@@ -970,7 +968,6 @@
   }
 
   function _activityRowDisplayHint(kind, mode, sourceType){
-    if(sourceType==='steer_delivered') return 'user_message';
     if(mode==='transparent_stream') return 'chronological_activity';
     if(kind==='process_prose') return 'main_prose';
     if(kind==='reasoning') return 'collapsed_thinking';

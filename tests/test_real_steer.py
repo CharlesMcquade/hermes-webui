@@ -143,9 +143,12 @@ class TestHandleChatSteerHappyPath:
         assert body["accepted"] is True
         assert body["fallback"] is None
         assert body["stream_id"] == stream_id
-        assert body["durable"] is True
-        assert body["published"] is True
-        assert body["steer_event"]["type"] == "steer_delivered"
+        # Retired independent admission (#7188): no custom durable/published
+        # receipt and no steer_event journal envelope; consumed guidance
+        # persists natively as a display_kind=steer user row.
+        assert "durable" not in body
+        assert "published" not in body
+        assert "steer_event" not in body
 
     def test_steers_exact_active_stream_agent_not_retired_session_cache(self, _clear_caches, monkeypatch):
         from api.streaming import _handle_chat_steer
@@ -165,21 +168,11 @@ class TestHandleChatSteerHappyPath:
         monkeypatch.setattr(config, "ACTIVE_RUNS", {stream_id: {"session_id": sid, "backend": "legacy", "phase": "running"}})
 
         session = MagicMock(active_stream_id=stream_id)
-        with patch("api.streaming.get_session", return_value=session), patch(
-            "api.streaming._accept_and_publish_steer_event",
-            return_value={
-                "accepted": True,
-                "fallback": None,
-                "durable": True,
-                "published": True,
-                "event": None,
-                "payload": {},
-            },
-        ) as publish:
+        with patch("api.streaming.get_session", return_value=session):
             handler = _make_handler()
             _handle_chat_steer(handler, {"session_id": sid, "text": "current run only"})
 
-        assert publish.call_args.args[0] is active_agent
+        active_agent.steer.assert_called_once_with("current run only")
         retired_agent.steer.assert_not_called()
         assert _captured_response(handler)["accepted"] is True
 
@@ -463,11 +456,12 @@ class TestFrontendWiring:
         assert "_steerSetComposerStatusForOwner(ownerSid,t('uploading')||'Uploading…')" in steer_helpers
         assert "_steerSetComposerStatusForOwner(ownerSid,'')" in steer_helpers
         assert "function _steerIndicatorText" in steer_helpers
-        degraded_idx = try_body.index("if(persistenceDegraded)")
+        # Retired independent admission (#7188): no persistenceDegraded gate
+        # remains; the transient indicator is unconditional on acceptance and
+        # is the documented accepted-loss redraw surface.
+        assert "persistenceDegraded" not in try_body
         indicator_idx = try_body.index("_showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot))")
-        assert indicator_idx > degraded_idx, (
-            "the legacy banner may appear only when accepted delivery could not be journaled"
-        )
+        assert indicator_idx > try_body.index("if(result&&result.accepted)")
         assert "_showSteerIndicator(steerText)" not in try_body
 
     def test_file_steer_sends_clean_display_payload_without_transient_indicator(self):

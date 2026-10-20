@@ -1750,39 +1750,6 @@ function _steerAttachmentPathsForRequest(ownerSid, filesSnapshot){
   return _steerUploadCache.paths.slice();
 }
 
-function _recordSteerEventFromResponse(ownerSid, result){
-  const event=result&&result.steer_event;
-  if(!ownerSid||!event||typeof event!=='object'||typeof window==='undefined') return false;
-  const eventSid=String(event.session_id||event.payload&&event.payload.session_id||'');
-  const streamId=String(event.stream_id||event.payload&&event.payload.stream_id||result.stream_id||'');
-  if(eventSid!==String(ownerSid)||!streamId||!event.event_id) return false;
-  const api=window.HermesAssistantTurnAnchors;
-  const registries=window._liveAnchorRegistries;
-  const registry=registries&&typeof registries.get==='function'?registries.get(streamId):null;
-  if(!api||!registry||typeof api.applyAssistantTurnAnchorSourceEvent!=='function') return false;
-  try{
-    const applied=api.applyAssistantTurnAnchorSourceEvent(registry,{
-      ...event,
-      source_event_type:'steer_delivered',
-    },{
-      session_id:String(ownerSid),
-      stream_id:streamId,
-      run_id:event.run_id||streamId,
-    });
-    // HTTP and SSE deliberately carry one event_id. Whichever arrives second is
-    // an idempotent duplicate, while both paths converge on the same row.
-    if(applied&&applied.reason==='mismatched_anchor') return false;
-    if(_steerOwnerStreamIsCurrent(ownerSid,streamId)
-       && typeof window._renderLiveAnchorActivitySceneForStream==='function'){
-      window._renderLiveAnchorActivitySceneForStream(streamId,String(ownerSid));
-    }
-    return true;
-  }catch(err){
-    if(typeof console!=='undefined'&&console.warn) console.warn('steer response event projection failed',err);
-    return false;
-  }
-}
-
 async function _trySteer(msg, explicitSteer){
   let result=null;
   const originalMsg=String(msg||'').trim();
@@ -1846,9 +1813,9 @@ async function _trySteer(msg, explicitSteer){
     // the upload/API await, which is fine: we're clearing the OWNER's draft).
     _steerUploadCache=null; // delivered — invalidate the retry cache
     if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
-    // The durable steer_delivered event owns transcript feedback. Keep the old
-    // transient indicator only when runtime acceptance succeeded but journal
-    // persistence failed, because that degraded path cannot broadcast a row.
+    // Native contract: the consumed steer persists as a display_kind=steer
+    // user row at the Agent drain boundary; the toast is only a transient
+    // accepted indicator (accepted-loss is documented in the R02 retirement).
     if(_steerOwnerIsCurrent(ownerSid)){
       // Remove ONLY the files we captured+delivered, by object identity, so any
       // files staged during the upload/API await are preserved (#5459 gate).
@@ -1858,15 +1825,8 @@ async function _trySteer(msg, explicitSteer){
         if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
       }
     }
-    const responseRecorded=_recordSteerEventFromResponse(ownerSid,result);
-    const persistenceDegraded=result.durable===false||result.fallback==='persistence_error';
-    const publicationDegraded=result.published===false&&!responseRecorded&&!persistenceDegraded;
-    if(persistenceDegraded){
-      if(_steerOwnerIsCurrent(ownerSid)) _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
-      showToast(t('steer_delivery_not_durable'),5000,'warning');
-    }
-    else if(publicationDegraded) showToast(t('steer_delivery_live_delayed'),5000,'warning');
-    else showToast(t('cmd_steer_delivered'),2500);
+    if(_steerOwnerIsCurrent(ownerSid)) _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
+    showToast(t('cmd_steer_delivered'),2500);
     return true;
   }
   if(result&&result.fallback==='gateway_steer_queued'&&typeof queueSessionMessage==='function'){

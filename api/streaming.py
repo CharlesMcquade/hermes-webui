@@ -12367,8 +12367,6 @@ def _run_agent_streaming(
             target = AGENT_INSTANCES.get(stream_id) or agent
             if stream_id in STREAMS and not cancel_event.is_set():
                 update_active_run(stream_id, phase="finalizing")
-        if run_journal is not None:
-            run_journal.close_acceptance_fence()
         leftovers = list(_returned_pending_steer)
         try:
             drain = getattr(target, '_drain_pending_steer', None)
@@ -16798,12 +16796,16 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str, *, display_text: st
         if not callable(getattr(agent, "steer", None)):
             return {"accepted": False, "fallback": "agent_lacks_steer", "stream_id": None}
         try:
-            outcome = _accept_and_publish_steer_event(agent, sid, stream_id, text,
-                display_text=display_text, files=files, stream=cfg.STREAMS[stream_id])
+            # Upstream contract: Steer admission is the in-memory Agent queue
+            # (agent.steer -> _pending_steer). The fork-only independent
+            # durable steer admission/journal publication (#7188) is retired;
+            # consumption persistence happens natively as a display_kind=steer
+            # user row at the Agent drain boundary.
+            agent.steer(text)
         except Exception:
             logger.debug("Stream-bound steer failed for session %s", sid, exc_info=True)
             return {"accepted": False, "fallback": "steer_error", "stream_id": stream_id}
-        return _steer_response(outcome, sid, stream_id)
+        return _steer_response({"accepted": True}, sid, stream_id)
 
 
 def _steer_attachment_paths(value) -> list[str]:
@@ -16963,105 +16965,11 @@ def _steer_runtime_text(user_text: str, attachment_paths) -> str:
     return f"{text}\n\n{note}" if text else note
 
 
-def _accept_and_publish_steer_event(
-    agent,
-    session_id: str,
-    stream_id: str,
-    runtime_text: str,
-    *,
-    display_text: str,
-    files=None,
-    stream=None,
-):
-    """Accept, durably journal, and publish one ordered Steer event."""
-    created_at = time.time()
-    payload = {
-        "session_id": str(session_id),
-        "stream_id": str(stream_id),
-        # Attachment steers append an internal read_file hint to ``runtime_text``;
-        # that belongs in model context, not in the visible transcript.
-        "text": str(display_text),
-        "files": _steer_display_file_names(files),
-        "status": "delivered",
-        "created_at": created_at,
-    }
-    if stream is None:
-        with STREAMS_LOCK:
-            stream = STREAMS.get(str(stream_id))
-    writer = RunJournalWriter(str(session_id), str(stream_id))
-
-    def publish(journaled):
-        event_id = journaled.get("event_id")
-        payload["created_at"] = journaled.get("created_at", created_at)
-        if stream is None or not callable(getattr(stream, "put_nowait", None)):
-            raise RuntimeError("active stream channel unavailable during steer publication")
-        item = (
-            ("steer_delivered", payload, event_id)
-            if event_id
-            else ("steer_delivered", payload)
-        )
-        stream.put_nowait(item)
-        if event_id:
-            STREAM_LAST_EVENT_ID[str(stream_id)] = str(event_id)
-
-    accepted, journaled, reason, error = writer.accept_and_append_if_nonterminal(
-        "steer_delivered",
-        payload,
-        lambda: agent.steer(runtime_text),
-        publish=publish,
-    )
-    outcome = {
-        "accepted": bool(accepted),
-        "fallback": None,
-        "durable": False,
-        "published": False,
-        "event": journaled if isinstance(journaled, dict) else None,
-        "payload": payload,
-    }
-    if reason == "terminal":
-        outcome["fallback"] = "stream_dead"
-        return outcome
-    if reason == "fence_closed":
-        # The production caller holds STREAMS_LOCK across its ownership check
-        # and this journal transaction. Only a still-owned stream can report
-        # orderly finalization; a missing stream has already torn down.
-        outcome["fallback"] = "not_running" if stream is not None else "stream_dead"
-        return outcome
-    if reason == "journal_malformed":
-        outcome["fallback"] = "steer_error"
-        return outcome
-    if reason == "persistence_error" or (error is not None and journaled is None):
-        logger.warning(
-            "Failed to persist accepted steer for session=%s stream=%s",
-            session_id,
-            stream_id,
-            exc_info=(type(error), error, error.__traceback__) if error is not None else None,
-        )
-        outcome["fallback"] = "persistence_error"
-        return outcome
-    if not accepted or not isinstance(journaled, dict):
-        return outcome
-
-    outcome["durable"] = True
-    if reason == "publication_error":
-        logger.warning(
-            "Failed to broadcast durable steer for session=%s stream=%s",
-            session_id,
-            stream_id,
-            exc_info=(type(error), error, error.__traceback__) if error is not None else None,
-        )
-        outcome["fallback"] = "publication_error"
-        return outcome
-    outcome["published"] = True
-    return outcome
-
-
 def _handle_chat_steer(handler, body: dict) -> bool:
     """Inject a /steer payload into the active agent for a session.
 
     Mirrors the CLI's `/steer <text>` command (cli.py:6140-6155):
       - Resolve the current stream with explicit worker and run ownership.
-      - Journal and publish accepted guidance before responding.
       - Call agent.steer(text) — thread-safe, stashes text in
         _pending_steer for application at the next tool-result boundary.
 
@@ -17077,8 +16985,7 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     Steer is active-run guidance, not implicit permission to Queue, Interrupt,
     or Stop-and-send.
 
-    Returns 200 with the legacy accepted/fallback/stream_id fields plus explicit
-    durable/published state and the canonical journal envelope when accepted.
+    Returns 200 with the legacy accepted/fallback/stream_id fields.
     """
     from api.helpers import j, bad
 
@@ -17134,28 +17041,16 @@ def _handle_chat_steer(handler, body: dict) -> bool:
 
 
 def _steer_response(outcome: dict, sid: str, active_stream_id: str) -> dict:
-    """Preserve the legacy response and expose the durable journal envelope."""
-    accepted = bool(outcome.get("accepted"))
-    response = {"accepted": accepted, "fallback": outcome.get("fallback"),
-                "stream_id": active_stream_id}
-    if accepted:
-        response["durable"] = bool(outcome.get("durable"))
-        response["published"] = bool(outcome.get("published"))
-        journaled = outcome.get("event")
-        if isinstance(journaled, dict):
-            response["steer_event"] = {
-                "version": journaled.get("version", 1),
-                "type": "steer_delivered",
-                "event": "steer_delivered",
-                "event_id": journaled.get("event_id"),
-                "seq": journaled.get("seq"),
-                "run_id": journaled.get("run_id"),
-                "session_id": journaled.get("session_id", sid),
-                "stream_id": active_stream_id,
-                "created_at": journaled.get("created_at"),
-                "payload": dict(outcome.get("payload") or {}),
-            }
-    return response
+    """Legacy accepted/fallback/stream_id response.
+
+    The retired independent steer admission (#7188) exposed an extra
+    durable/published receipt and a steer_event journal envelope; consumed
+    guidance now persists exactly once as the native display_kind=steer user
+    row, so no custom receipt successor exists.
+    """
+    return {"accepted": bool(outcome.get("accepted")),
+            "fallback": outcome.get("fallback"),
+            "stream_id": active_stream_id}
 
 
 def cancel_stream(stream_id: str) -> bool:
