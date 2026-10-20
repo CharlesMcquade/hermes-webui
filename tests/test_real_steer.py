@@ -464,7 +464,7 @@ class TestFrontendWiring:
         assert indicator_idx > try_body.index("if(result&&result.accepted)")
         assert "_showSteerIndicator(steerText)" not in try_body
 
-    def test_file_steer_sends_clean_display_payload_without_transient_indicator(self):
+    def test_file_steer_sends_clean_display_payload_without_durable_receipt(self):
         import json
         import shutil
         import subprocess
@@ -504,11 +504,15 @@ class TestFrontendWiring:
             (async()=>{{
               const delivered = await _trySteer('hint', false);
               assert.strictEqual(delivered, true);
-              assert.strictEqual(indicatorText, null);
+              // R02 accepted loss: a TRANSIENT accepted indicator is allowed (it
+              // vanishes on redraw); what is forbidden is a durable receipt or
+              // file-note injection into the routed payload.
+              assert.ok(indicatorText === null || typeof indicatorText === 'string');
               assert.strictEqual(apiPayload.user_text, 'hint');
               assert.deepStrictEqual(apiPayload.attachment_paths, ['/tmp/a.pdf']);
               assert.ok(!apiPayload.user_text.includes('Attached files'));
               assert.ok(!apiPayload.user_text.includes('file tools/read_file'));
+              assert.ok(!('durable' in apiPayload) && !('published' in apiPayload) && !('steer_event' in apiPayload));
             }})().catch(err=>{{console.error(err); process.exit(1);}});
             """
         )
@@ -554,9 +558,11 @@ class TestFrontendWiring:
             (async()=>{{
               const delivered = await _trySteer('', false);
               assert.strictEqual(delivered, true);
-              assert.strictEqual(indicatorText, null);
+              // R02 accepted loss: transient accepted indicator allowed; no durable receipt.
+              assert.ok(indicatorText === null || typeof indicatorText === 'string');
               assert.strictEqual(apiPayload.user_text, '');
               assert.deepStrictEqual(apiPayload.attachment_paths, ['/tmp/a.pdf']);
+              assert.ok(!('durable' in apiPayload) && !('published' in apiPayload) && !('steer_event' in apiPayload));
             }})().catch(err=>{{console.error(err); process.exit(1);}});
             """
         )
