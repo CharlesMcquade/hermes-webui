@@ -81,18 +81,12 @@ def assert_cancelled(result):
 
 
 def assert_delivered(result):
+    # Frozen native Steer contract: {accepted, fallback, stream_id} only;
+    # durable/published/steer_event receipts are retired (#7188 machinery).
     assert result["accepted"] is True
     assert result["fallback"] is None
     assert result["stream_id"] == "run"
-    assert result["durable"] is True
-    assert result["published"] is True
-    event = result["steer_event"]
-    assert event["event"] == event["type"] == "steer_delivered"
-    assert event["event_id"] == f'run:{event["seq"]}'
-    assert event["run_id"] == event["stream_id"] == "run"
-    assert event["session_id"] == "original"
-    assert event["payload"]["text"] == "guidance"
-    assert event["payload"]["status"] == "delivered"
+    assert set(result) == {"accepted", "fallback", "stream_id"}
 
 
 @pytest.mark.parametrize("registered", [True, False])

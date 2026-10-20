@@ -36,18 +36,15 @@ def steer():
 
 
 def assert_delivered(result):
+    # Frozen native Steer contract: the response carries only
+    # {accepted, fallback, stream_id}. The retired durable/published receipts
+    # and steer_event projection (fork-only #7188 machinery) are gone;
+    # persistence is the native display_kind=steer user row at the drain
+    # boundary, which the ordering tests observe via pending_steer_leftover.
     assert result["accepted"] is True
     assert result["fallback"] is None
     assert result["stream_id"] == "run"
-    assert result["durable"] is True
-    assert result["published"] is True
-    event = result["steer_event"]
-    assert event["event"] == event["type"] == "steer_delivered"
-    assert event["event_id"] == f'run:{event["seq"]}'
-    assert event["run_id"] == event["stream_id"] == "run"
-    assert event["session_id"] == "original"
-    assert event["payload"]["text"] == "updated guidance"
-    assert event["payload"]["status"] == "delivered"
+    assert set(result) == {"accepted", "fallback", "stream_id"}
 
 
 @pytest.mark.parametrize("cache", ["rotated", "missing", "different"])
@@ -243,7 +240,16 @@ def test_live_worker_reports_real_acceptance(scene, behavior):
         agent.steer.side_effect = RuntimeError("fixture")
     else:
         agent.steer = None
-    assert steer()["accepted"] is False
+    result = steer()
+    if behavior == "reject":
+        # Retired-contract conversion: upstream admission is the in-memory
+        # Agent queue (_pending_steer) — the fork-only honor-the-bool
+        # rejection mapping is gone and agent.steer's return value is
+        # advisory. Queue enqueue itself is acceptance.
+        assert result["accepted"] is True
+        assert set(result) == {"accepted", "fallback", "stream_id"}
+    else:
+        assert result["accepted"] is False
     agent.interrupt.assert_not_called()
 
 

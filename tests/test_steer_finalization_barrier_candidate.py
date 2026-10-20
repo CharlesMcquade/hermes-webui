@@ -32,7 +32,8 @@ def test_accepted_before_finalization_is_drained_once(worker_scene):
             assert running.wait(5), "worker never reached running phase"
             response = _steer()
             assert response["accepted"] is True
-            assert response["durable"] is True
+            # Retired receipt: response no longer carries durable/published.
+            assert set(response) == {"accepted", "fallback", "stream_id"}
             assert scene.agent.pending == ["last guidance"]
         finally:
             release.set()
