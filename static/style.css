@@ -3820,12 +3820,14 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
   opacity:.7;
   line-height:1;
 }
+/* Download glyph keeps the plain .file-icon layout box so PDF/ZIP rows match
+   every other row's height and name alignment. No min-width or min-height
+   here: a larger touch target either inflates the row or its ::before
+   overlap steals taps from the filename / adjacent rows. */
 .file-icon-download{
   display:inline-flex;
   align-items:center;
   justify-content:center;
-  min-width:44px;
-  min-height:44px;
   cursor:pointer;
   border-radius:4px;
 }

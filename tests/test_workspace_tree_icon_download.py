@@ -118,6 +118,44 @@ class TestIconDownloadHandlerShape:
         end = src.index("el.appendChild(iconEl);", start)
         assert end > start
 
+    def test_icon_keydown_ignores_auto_repeat(self):
+        block = _icon_block()
+        assert "if(e.repeat)return;" in block, (
+            "icon keydown must return early on e.repeat — a held Space/Enter "
+            "would otherwise start one download per key auto-repeat"
+        )
+
+
+class TestIconGeometryContract:
+    """The download icon must not change the tree's row geometry: every row
+    keeps the same height and the file names stay left-aligned (2026-10-06
+    review: .pdf rows rendered 56px tall next to 31px, names shifted 30px)."""
+
+    def _rule(self) -> str:
+        import re
+        css = _read(REPO_ROOT / "static" / "style.css")
+        m = re.search(r"\.file-icon-download\{[^}]*\}", css)
+        assert m, ".file-icon-download rule missing from static/style.css"
+        return m.group(0)
+
+    def test_download_icon_rule_has_no_layout_inflation(self):
+        rule = self._rule()
+        assert "min-width" not in rule and "min-height" not in rule, (
+            ".file-icon-download must not set min-width/min-height — a larger "
+            "layout box inflates PDF/ZIP rows and shifts their file names"
+        )
+
+    def test_download_icon_rule_keeps_inline_box_and_pointer(self):
+        rule = self._rule()
+        for decl in ("display:inline-flex", "cursor:pointer"):
+            assert decl in rule, f".file-icon-download must keep {decl}; got {rule}"
+
+    def test_download_icon_focus_ring_retained(self):
+        css = _read(REPO_ROOT / "static" / "style.css")
+        assert ".file-icon-download:focus-visible" in css, (
+            "keyboard focus ring (.file-icon-download:focus-visible) must stay"
+        )
+
 
 class TestNameClickContractUntouched:
     """The #1707 contract (single click on name → preview after debounce,
@@ -220,10 +258,24 @@ function click(detail) {
 click(1);
 clicked = true;
 if (params.name === 'double.pdf') click(2);
+let keydownPreventDefaultCalls = 0;
+let keydownStopPropagationCalls = 0;
+const keyEvent = (key, repeat) => ({
+  key, repeat,
+  preventDefault() { keydownPreventDefaultCalls++; },
+  stopPropagation() { keydownStopPropagationCalls++; },
+});
 if (params.name === 'keyboard.pdf') {
-  for (const key of ['Enter', ' ']) {
-    iconEl.onkeydown({key, preventDefault() {}, stopPropagation() {}});
-  }
+  for (const key of ['Enter', ' ']) iconEl.onkeydown(keyEvent(key, false));
+}
+if (params.name === 'repeat.pdf') {
+  // One press + three auto-repeats (a held Space), then keyup (no keyup
+  // handler exists), then a fresh press after release.
+  iconEl.onkeydown(keyEvent(' ', false));
+  iconEl.onkeydown(keyEvent(' ', true));
+  iconEl.onkeydown(keyEvent(' ', true));
+  iconEl.onkeydown(keyEvent(' ', true));
+  iconEl.onkeydown(keyEvent(' ', false));
 }
 
 console.log(JSON.stringify({
@@ -231,6 +283,8 @@ console.log(JSON.stringify({
   clicked, openCalls,
   downloadCalls,
   stopPropagationCalls,
+  keydownPreventDefaultCalls,
+  keydownStopPropagationCalls,
   role: iconEl ? iconEl.attributes.role : null,
   tabindex: iconEl ? iconEl.attributes.tabindex : null,
   label: iconEl ? iconEl.attributes['aria-label'] : null,
@@ -301,6 +355,29 @@ class TestIconDownloadBehavior:
         assert out['tabindex'] == '0'
         assert out['label'] == 'Download keyboard.pdf'
         assert out['downloadCalls'] == ['dir/keyboard.pdf'] * 3
+        assert out['openCalls'] == 0
+
+    def test_held_key_repeat_downloads_once(self):
+        """Holding Space (press + 3 auto-repeats) starts exactly one download
+        from the held key: repeats are swallowed but still preventDefault'ed
+        (no row scroll), and a fresh press after release downloads again.
+
+        downloadCalls = [initial click, first press, post-release press] —
+        three entries, NOT six; leaked repeats would add three more.
+        """
+        out = _run_node_vm('file', False, 'repeat.pdf')
+        assert out['downloadCalls'] == ['dir/repeat.pdf'] * 3, (
+            f"held Space must download once (press), not per auto-repeat; "
+            f"got {len(out['downloadCalls'])} calls: {out}"
+        )
+        assert out['keydownPreventDefaultCalls'] == 5, (
+            f"all 5 keydowns (press + 3 repeats + fresh press) must be "
+            f"preventDefault'ed; got {out['keydownPreventDefaultCalls']}"
+        )
+        assert out['keydownStopPropagationCalls'] == 5, (
+            f"all 5 keydowns must stopPropagation; got "
+            f"{out['keydownStopPropagationCalls']}"
+        )
         assert out['openCalls'] == 0
 
     def test_symlink_icon_keeps_original_navigation(self):
