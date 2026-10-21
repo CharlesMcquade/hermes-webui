@@ -27934,6 +27934,9 @@ function _renderTreeItems(container, entries, depth){
       iconEl.onkeydown=(e)=>{
         if(e.key==='Enter'||e.key===' '){
           e.preventDefault();e.stopPropagation();
+          // A real <button> activates once per press: auto-repeat keydowns
+          // (held Space/Enter) stay suppressed but keep their preventDefault.
+          if(e.repeat)return;
           if(typeof downloadFile==='function') downloadFile(item.path);
         }
       };
