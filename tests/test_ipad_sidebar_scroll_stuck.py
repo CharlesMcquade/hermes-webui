@@ -145,23 +145,39 @@ def test_deferred_timer_cleared_on_render():
     assert "clearTimeout(_pendingTouchDeferredRenderTimer)" in fn
 
 
-def test_virtual_scroll_render_uses_force():
+def test_virtual_scroll_render_deferral_aware():
     """The scroll-driven virtual render path must exist (desktop path only).
 
     On touch devices, _scheduleSessionVirtualizedRender bails early — the
-    IntersectionObserver handles incremental appends. On desktop, the scroll
-    listener calls renderSessionListFromCache() to recompute the virtual window.
+    touch batch machinery owns scroll and the RAF below never runs during a
+    gesture. On desktop, the scroll listener repaints through the sidebar's
+    single deferral path: the background-churn wrapper (which the admission
+    chain in renderSessionListFromCache defers during an active gesture or an
+    open picker), or — when the project picker's anchor lives outside the
+    rebuilt rows — the keep-picker paint-now contract. A bare force call here
+    would wipe the list mid-gesture and freeze momentum.
     """
     fn = _extract_fn(SESSIONS_JS, "_scheduleSessionVirtualizedRender")
-    assert "renderSessionListFromCache()" in fn, \
-        "Virtual scroll render must call renderSessionListFromCache()"
+    assert "_repaintSidebarForBackgroundChurn()" in fn, \
+        "Virtual scroll render must repaint through the background-churn wrapper so the unified deferral chain can defer it"
+    assert "_repaintSidebarKeepingProjectPicker()" in fn, \
+        "Virtual scroll render must keep a picker anchored outside the rebuilt rows (paint-now contract)"
+    assert "renderSessionListFromCache({force:true})" not in fn, \
+        "Scroll-driven repaints must not force-bypass the deferral chain (mid-gesture wipe freezes momentum)"
 
 
-def test_virtual_resync_render_uses_force():
-    """The post-render virtual window resync must exist for scroll correction."""
+def test_virtual_resync_render_deferral_aware():
+    """The post-render virtual window resync must exist for scroll correction.
+
+    The resync repair repaints through the background-churn wrapper: the
+    unified deferral chain (touch gesture / open picker) defers it and the
+    release event replays it, instead of wiping DOM mid-gesture.
+    """
     fn = _extract_fn(SESSIONS_JS, "_resyncSessionVirtualWindowAfterRender")
-    assert "renderSessionListFromCache()" in fn, \
-        "Virtual resync render must call renderSessionListFromCache()"
+    assert "_repaintSidebarForBackgroundChurn()" in fn, \
+        "Virtual resync must repaint through the background-churn wrapper (deferral-aware)"
+    assert "renderSessionListFromCache({force:true})" not in fn, \
+        "Resync must not force-bypass the deferral chain"
 
 
 def test_virtualization_disabled_on_touch():
