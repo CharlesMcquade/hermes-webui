@@ -6667,13 +6667,13 @@ function _openSessionActionMenu(session, anchorEl){
         if(cached) cached.pinned=newPinned;
         if(S.session&&S.session.session_id===session.session_id) S.session.pinned=newPinned;
         // Explicit intent: the pin landed on the server, so the row chrome
-        // must paint now. A direct non-churn render proceeds past both
-        // deferral anchors — the open picker stays mounted and is re-anchored
-        // by the render's own qualification (the keep-picker outcome, since a
-        // pin never removes the row) — and {force:true} clears the touch
-        // cooldown so the stale pin state never shows for ~1.25s (#6426
-        // SHOULD-FIX).
-        renderSessionListFromCache({force:true});
+        // must paint now. The routed keep-picker render proceeds past the
+        // picker gate (non-churn); a scroll just before the pin leaves the
+        // touch idle cooldown running, so end it here — the routed render
+        // paints now instead of waiting out the ~1.25s idle window (#6426),
+        // while an active gesture still defers and replays on release.
+        _sessionListLastScrollAt=0;
+        _repaintSidebarKeepingProjectPicker();
         void renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
       }catch(err){
         showToast(t('session_pin_failed')+err.message);
