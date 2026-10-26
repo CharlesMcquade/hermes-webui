@@ -5483,7 +5483,15 @@ function _positionModelDropdown(){
     if(dd.parentNode!==document.body) document.body.appendChild(dd);
     dd.classList.add('model-dropdown--floating');
     const anchorRect=anchor.getBoundingClientRect();
-    const visualViewport=_plausibleVisualViewport();
+    // Validated read (#8531): garbage fold-transition viewport geometry must
+    // fall back to window dimensions. Inlined + self-contained for the
+    // extracted-function Node harness (no boot.js in that scope).
+    const vvRaw=window.visualViewport;
+    const visualViewport=vvRaw
+      &&Number.isFinite(Number(vvRaw.height))&&Number(vvRaw.height)>0&&Number(vvRaw.height)<=window.innerHeight*1.5
+      &&Number.isFinite(Number(vvRaw.width))&&Number(vvRaw.width)>0&&Number(vvRaw.width)<=window.innerWidth*1.5
+      ?{height:Number(vvRaw.height),width:Number(vvRaw.width),offsetTop:Math.max(0,Number(vvRaw.offsetTop)||0),offsetLeft:Math.max(0,Number(vvRaw.offsetLeft)||0)}
+      :null;
     const viewportWidth=Math.max(1,Number(visualViewport&&visualViewport.width)||window.innerWidth||1);
     const viewportHeight=Math.max(1,Number(visualViewport&&visualViewport.height)||window.innerHeight||1);
     const viewportTop=Math.max(0,Number(visualViewport&&visualViewport.offsetTop)||0);

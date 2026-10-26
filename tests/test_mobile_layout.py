@@ -2414,11 +2414,13 @@ def test_visualviewport_garbage_height_is_rejected_everywhere():
         "window resize must resync the inset even when visualViewport exists"
     sessions_js = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
     assert "function _projectPickerVisibleBounds" in sessions_js and \
-        "_plausibleVisualViewport()" in sessions_js, \
-        "sessions.js picker bounds must use the validated visualViewport read"
+        "Validated read (#8531)" in sessions_js and \
+        "Number(vv.height)>0" in sessions_js, \
+        "sessions.js picker bounds must validate viewport geometry inline (self-contained for the Node harness)"
     ui_js = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
-    assert "_plausibleVisualViewport()" in ui_js, \
-        "ui.js model dropdown must use the validated visualViewport read"
+    assert "Validated read (#8531)" in ui_js and \
+        "Number(vvRaw.height)>0" in ui_js, \
+        "ui.js model dropdown must validate viewport geometry inline (self-contained for the Node harness)"
 
 
 def test_touch_keyboard_inset_primes_during_visual_viewport_setup():
