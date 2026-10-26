@@ -222,6 +222,31 @@ def release_binding():
             "execution_digest": execution_digest}
 
 
+# Only identity and ownership belong in the binding digest. Tokens, costs,
+# titles, cwd, git generations, activity timestamps and composer drafts settle
+# asynchronously after run counters go quiet, so fingerprinting them invalidates
+# published bindings mid-restart without any real intervention.
+_SIDECAR_IDENTITY_FIELDS = ("session_id", "profile", "workspace", "model", "model_provider")
+_ROW_OWNERSHIP_FIELDS = ("id", "source", "profile_name", "parent_session_id", "ended_at", "end_reason")
+_MESSAGE_PROJECTION_FIELDS = ("id", "session_id", "role", "message_uid", "content", "display_kind")
+_NOTIFICATION_PREFIXES = ("[IMPORTANT: Background process", "[ASYNC DELEGATION BATCH")
+_WORKSPACE_ENVELOPE = re.compile(r"^\[Workspace::v1: [^\r\n]+\]\r?\n")
+
+
+def _binding_view(record, fields):
+    return {key: record.get(key) for key in fields}
+
+
+def _transcript_view(message):
+    """Stable content projection; framework notifications are not interventions."""
+    text = _WORKSPACE_ENVELOPE.sub("", message.get("content") or "", count=1)
+    if message.get("display_kind") != "steer" and text.startswith(_NOTIFICATION_PREFIXES):
+        return None
+    view = _binding_view(message, _MESSAGE_PROJECTION_FIELDS)
+    view["content"] = text
+    return view
+
+
 def inspect_binding(session_id, profile, workspace, *, session_dir=None, profile_home=None):
     """Read durable state; explicit publisher paths require no application imports."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", profile):
@@ -266,10 +291,14 @@ def inspect_binding(session_id, profile, workspace, *, session_dir=None, profile
             raise Refused("unknown or external owner")
         if row.get("ended_at") is not None or row.get("end_reason") or row.get("parent_session_id"):
             raise Refused("closed or rotated session")
-        messages = [dict(r) for r in db.execute("SELECT * FROM messages WHERE session_id=? ORDER BY id", (session_id,))]
+        messages = [view for view in
+                    (_transcript_view(dict(r)) for r in db.execute("SELECT * FROM messages WHERE session_id=? ORDER BY id", (session_id,)))
+                    if view is not None]
     return {"session_id": session_id, "profile": profile, "workspace": workspace,
             "model": sidecar["model"], "model_provider": sidecar["model_provider"],
-            "session_revision": digest({"sidecar": sidecar, "row": row, "messages": messages})}
+            "session_revision": digest({"sidecar": _binding_view(sidecar, _SIDECAR_IDENTITY_FIELDS),
+                                        "row": _binding_view(row, _ROW_OWNERSHIP_FIELDS),
+                                        "messages": messages})}
 
 
 def supported_backend(routes):

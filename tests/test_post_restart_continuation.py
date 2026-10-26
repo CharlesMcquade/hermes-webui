@@ -48,6 +48,56 @@ def test_binding_digest_tolerates_binary_display_identity(armed):
     assert first == second and first["session_revision"]
 
 
+def test_binding_digest_ignores_volatile_metadata_and_notifications(armed):
+    """cwd, git generations, tokens and framework notifications settle after
+    idle counters; none of them may invalidate a published binding."""
+    a = armed
+    paths = {"session_dir": a.dbpath.parent / "sessions", "profile_home": a.dbpath.parent}
+    first = a.resume.inspect_binding(a.session.session_id, "default", a.session.workspace, **paths)
+    with sqlite3.connect(a.dbpath) as db:
+        db.execute("ALTER TABLE sessions ADD COLUMN cwd TEXT")
+        db.execute("ALTER TABLE sessions ADD COLUMN git_metadata_generation INTEGER")
+        db.execute("ALTER TABLE sessions ADD COLUMN last_activity_at REAL")
+        db.execute("ALTER TABLE sessions ADD COLUMN input_tokens INTEGER")
+        db.execute("ALTER TABLE messages ADD COLUMN display_kind TEXT")
+        db.execute("UPDATE sessions SET cwd='/elsewhere', git_metadata_generation=4, last_activity_at=99.0, input_tokens=1234")
+        db.execute("INSERT INTO messages(id, session_id, role, content, display_kind) VALUES (50, ?, 'user', ?, NULL)",
+                   (a.session.session_id, "[Workspace::v1: /workspace]\n[IMPORTANT: Background process proc_1 completed]"))
+        db.execute("INSERT INTO messages(id, session_id, role, content, display_kind) VALUES (51, ?, 'user', '[ASYNC DELEGATION BATCH done]', NULL)",
+                   (a.session.session_id,))
+    sidecar_path = paths["session_dir"] / (a.session.session_id + ".json")
+    sidecar = json.loads(sidecar_path.read_text())
+    sidecar["title"] = "renamed"
+    sidecar["updated_at"] = (sidecar.get("updated_at") or 0) + 5
+    sidecar_path.write_text(json.dumps(sidecar))
+    second = a.resume.inspect_binding(a.session.session_id, "default", a.session.workspace, **paths)
+    assert second == first
+
+
+def test_binding_digest_moves_with_genuine_transcript_change(armed):
+    a = armed
+    paths = {"session_dir": a.dbpath.parent / "sessions", "profile_home": a.dbpath.parent}
+    first = a.resume.inspect_binding(a.session.session_id, "default", a.session.workspace, **paths)
+    with sqlite3.connect(a.dbpath) as db:
+        db.execute("ALTER TABLE messages ADD COLUMN display_kind TEXT")
+        db.execute("INSERT INTO messages(id, session_id, role, content, display_kind) VALUES (60, ?, 'user', ?, 'steer')",
+                   (a.session.session_id, "[IMPORTANT: Background process text from human]"))
+    second = a.resume.inspect_binding(a.session.session_id, "default", a.session.workspace, **paths)
+    assert second["session_revision"] != first["session_revision"]
+
+
+def test_binding_digest_moves_with_identity_change(armed):
+    a = armed
+    paths = {"session_dir": a.dbpath.parent / "sessions", "profile_home": a.dbpath.parent}
+    first = a.resume.inspect_binding(a.session.session_id, "default", a.session.workspace, **paths)
+    sidecar_path = paths["session_dir"] / (a.session.session_id + ".json")
+    sidecar = json.loads(sidecar_path.read_text())
+    sidecar["model"] = "other-model"
+    sidecar_path.write_text(json.dumps(sidecar))
+    second = a.resume.inspect_binding(a.session.session_id, "default", a.session.workspace, **paths)
+    assert second["model"] == "other-model" and second["session_revision"] != first["session_revision"]
+
+
 @pytest.mark.parametrize("field", ["session_dir", "profile_home"])
 @pytest.mark.parametrize("kind", ["relative", "symlink", "missing"])
 def test_explicit_binding_paths_refuse_noncanonical(armed, field, kind):
@@ -234,11 +284,11 @@ def test_busy_before_mutation(armed, monkeypatch):
     assert not a.calls
 
 
-@pytest.mark.parametrize("change", ["workspace", "profile", "revision", "closed", "rotated", "foreign", "missing"])
+@pytest.mark.parametrize("change", ["workspace", "profile", "model", "closed", "rotated", "foreign", "missing"])
 def test_changed_binding_is_refused_without_mutation(armed, change):
     a = armed
-    if change in ("workspace", "profile", "revision"):
-        setattr(a.session, {"revision": "title"}.get(change, change), "changed")
+    if change in ("workspace", "profile", "model"):
+        setattr(a.session, change, "changed")
         a.session.save()
     else:
         with sqlite3.connect(a.dbpath) as db:
@@ -416,6 +466,9 @@ def test_human_wins_consumer_waits_until_before_claim_revalidation(armed, monkey
         assert release.wait(3)
         session.title = "Human changed binding"
         session.save()
+        with sqlite3.connect(a.dbpath) as db:
+            db.execute("INSERT INTO messages(id, session_id, role, content) VALUES (900, ?, 'user', 'Human')",
+                       (session.session_id,))
         raise ValueError("deterministic rejection after workspace binding update")
     monkeypatch.setattr(a.routes, "_resolve_chat_workspace_with_recovery", workspace)
     def human():
