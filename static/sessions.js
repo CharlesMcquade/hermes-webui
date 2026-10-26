@@ -13398,7 +13398,9 @@ function _projectPickerAnchorRect(anchorEl, bounds){
 // Fixed coordinates and getBoundingClientRect use the layout viewport. The
 // visible part can be smaller AND offset (keyboard, browser chrome, zoom).
 function _projectPickerVisibleBounds(){
-  const vv=window.visualViewport;
+  // Validated read (#8531): garbage fold-transition geometry must fall back to
+  // window dimensions, not invert the picker's visible bounds.
+  const vv=_plausibleVisualViewport();
   const top=vv?vv.offsetTop:0;
   const left=vv?vv.offsetLeft:0;
   return {

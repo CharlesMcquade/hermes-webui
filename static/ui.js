@@ -5483,7 +5483,7 @@ function _positionModelDropdown(){
     if(dd.parentNode!==document.body) document.body.appendChild(dd);
     dd.classList.add('model-dropdown--floating');
     const anchorRect=anchor.getBoundingClientRect();
-    const visualViewport=window.visualViewport;
+    const visualViewport=_plausibleVisualViewport();
     const viewportWidth=Math.max(1,Number(visualViewport&&visualViewport.width)||window.innerWidth||1);
     const viewportHeight=Math.max(1,Number(visualViewport&&visualViewport.height)||window.innerHeight||1);
     const viewportTop=Math.max(0,Number(visualViewport&&visualViewport.offsetTop)||0);

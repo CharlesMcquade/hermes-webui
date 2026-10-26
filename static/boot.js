@@ -250,6 +250,25 @@ function _isTouchKeyboardViewport(){
   try{return matchMedia('(hover:none) and (pointer:coarse)').matches&&!_hasFinePointerCoexisting();}catch(_){return false;}
 }
 
+// Validated visualViewport read (#8531): iOS 27 standalone PWAs on foldables
+// (iPhone Duo) can report garbage geometry after fold/unfold — observed
+// height -33554432 (= -2^25) — with no corrective resize event until the
+// device rotates. Returns null when the reading is implausible so callers
+// fall back to window dimensions instead of poisoning layout math.
+function _plausibleVisualViewport(){
+  const vv=window.visualViewport;
+  if(!vv) return null;
+  const h=Number(vv.height), w=Number(vv.width);
+  const ih=window.innerHeight, iw=window.innerWidth;
+  if(!Number.isFinite(h)||h<=0||h>ih*1.5) return null;
+  if(!Number.isFinite(w)||w<=0||w>iw*1.5) return null;
+  return {
+    width:w, height:h,
+    offsetTop:Math.max(0,Number(vv.offsetTop)||0),
+    offsetLeft:Math.max(0,Number(vv.offsetLeft)||0)
+  };
+}
+
 function _syncKeyboardBottomInset(){
   const root=document.documentElement;
   if(!root) return;
@@ -266,23 +285,16 @@ function _syncKeyboardBottomInset(){
     root.style.removeProperty('--keyboard-bottom-inset');
     return;
   }
-  // Fold/unfold on foldables (observed on iPhone Duo, iOS 26 standalone PWA,
-  // nesquena/hermes-webui#8531) can report a garbage visualViewport.height
-  // (measured -33554432 = -2^25) with no corrective resize event until the
-  // device rotates. Trusting it yields a ~33M px keyboard inset that inflates
-  // the composer and buries the transcript. Treat non-finite, non-positive, or
-  // implausible heights as "no keyboard occlusion".
-  const vh=Number(vv.height);
-  if(!Number.isFinite(vh)||vh<=0||vh>window.innerHeight*1.5){
+  // Compute from one validated snapshot (#8531): a garbage reading clears the
+  // inset entirely — a cleared inset at worst lets the keyboard overlap the
+  // composer for one frame until the next sane viewport event, while any
+  // bogus-but-capped inset buries the transcript.
+  const vvOk=_plausibleVisualViewport();
+  if(!vvOk){
     root.style.removeProperty('--keyboard-bottom-inset');
     return;
   }
-  // Defensive upper bound: an on-screen keyboard never covers ~90% of the
-  // viewport; clamp so any future bogus geometry stays bounded.
-  const inset=Math.min(
-    Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop))),
-    Math.ceil(window.innerHeight*0.9)
-  );
+  const inset=Math.max(0,Math.ceil(window.innerHeight-(vvOk.height+vvOk.offsetTop)));
   if(inset>0){
     root.style.setProperty('--keyboard-bottom-inset',`${inset}px`);
   }else{
@@ -3283,6 +3295,10 @@ function applyEmptyStatePanelPref(){
 }
 
 window.addEventListener('resize',()=>{
+  // Resync the keyboard inset on every window resize even when visualViewport
+  // exists (#8531): fold transitions can change window geometry without a
+  // trustworthy visualViewport event, so the inset must be re-validated here.
+  _syncKeyboardBottomInset();
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
   // Re-apply the sidebar state on viewport change (e.g. foldable unfold:
