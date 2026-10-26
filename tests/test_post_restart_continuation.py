@@ -34,6 +34,20 @@ def test_explicit_binding_paths_import_no_application_modules(armed, monkeypatch
     assert binding == a.request["binding"]
 
 
+def test_binding_digest_tolerates_binary_display_identity(armed):
+    """Real transcripts store display_identity as BLOB; the revision digest
+    must encode bytes deterministically instead of failing serialization."""
+    a = armed
+    with sqlite3.connect(a.dbpath) as db:
+        db.execute("ALTER TABLE messages ADD COLUMN display_identity BLOB")
+        db.execute("INSERT INTO messages VALUES (?, ?, ?, ?, ?)",
+                   (1, a.session.session_id, "user", "hello", bytes(range(32))))
+    paths = {"session_dir": a.dbpath.parent / "sessions", "profile_home": a.dbpath.parent}
+    first = a.resume.inspect_binding(a.session.session_id, "default", a.session.workspace, **paths)
+    second = a.resume.inspect_binding(a.session.session_id, "default", a.session.workspace, **paths)
+    assert first == second and first["session_revision"]
+
+
 @pytest.mark.parametrize("field", ["session_dir", "profile_home"])
 @pytest.mark.parametrize("kind", ["relative", "symlink", "missing"])
 def test_explicit_binding_paths_refuse_noncanonical(armed, field, kind):

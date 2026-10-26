@@ -73,8 +73,17 @@ def serialized_start(kind):
     return decorate
 
 
+def _json_default(value):
+    """Deterministic bytes encoding: transcript BLOBs (e.g. display_identity)
+    are real session data and must digest stably across processes."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).hex()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def digest(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False,
+                                     default=_json_default).encode()).hexdigest()
 
 
 class Refused(ValueError):
