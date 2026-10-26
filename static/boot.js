@@ -266,7 +266,23 @@ function _syncKeyboardBottomInset(){
     root.style.removeProperty('--keyboard-bottom-inset');
     return;
   }
-  const inset=Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop)));
+  // Fold/unfold on foldables (observed on iPhone Duo, iOS 26 standalone PWA,
+  // nesquena/hermes-webui#8531) can report a garbage visualViewport.height
+  // (measured -33554432 = -2^25) with no corrective resize event until the
+  // device rotates. Trusting it yields a ~33M px keyboard inset that inflates
+  // the composer and buries the transcript. Treat non-finite, non-positive, or
+  // implausible heights as "no keyboard occlusion".
+  const vh=Number(vv.height);
+  if(!Number.isFinite(vh)||vh<=0||vh>window.innerHeight*1.5){
+    root.style.removeProperty('--keyboard-bottom-inset');
+    return;
+  }
+  // Defensive upper bound: an on-screen keyboard never covers ~90% of the
+  // viewport; clamp so any future bogus geometry stays bounded.
+  const inset=Math.min(
+    Math.max(0,Math.ceil(window.innerHeight-(vv.height+vv.offsetTop))),
+    Math.ceil(window.innerHeight*0.9)
+  );
   if(inset>0){
     root.style.setProperty('--keyboard-bottom-inset',`${inset}px`);
   }else{
