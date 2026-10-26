@@ -27521,9 +27521,6 @@ def _cleanup_chat_start_launch_failure(
             # alive whatever the pending age -- so a stale claim would block every
             # later chat/start for this stream id (re-gate finding 3).
             retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
-            from api.streaming import _retire_worker_cancelled_state_locked
-
-            _retire_worker_cancelled_state_locked(stream_id)
         STREAM_GOAL_RELATED.pop(stream_id, None)
     except Exception:
         logger.debug(
@@ -28342,7 +28339,7 @@ def _start_chat_stream_for_session(
                     if continuation_receipt is not None:
                         worker_target = continuation_receipt.wrap(
                             worker_target,
-                            lambda: _cleanup_chat_start_launch_failure(
+                            lambda stream_id=stream_id, snapshot=snapshot, backup_provenance=backup_provenance: _cleanup_chat_start_launch_failure(
                                 s, stream_id, snapshot,
                                 backup_provenance=backup_provenance,
                             ),

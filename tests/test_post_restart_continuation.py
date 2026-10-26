@@ -9,6 +9,48 @@ from pathlib import Path
 import pytest
 
 
+def test_explicit_binding_paths_import_no_application_modules(armed, monkeypatch):
+    import builtins
+    import importlib.util
+
+    a = armed
+    spec = importlib.util.spec_from_file_location("standalone_continuation", a.resume.__file__)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    original = builtins.__import__
+
+    def guarded(name, *args, **kwargs):
+        if name == "api" or name.startswith("api."):
+            raise AssertionError("publisher imported application: " + name)
+        return original(name, *args, **kwargs)
+
+    with monkeypatch.context() as context:
+        context.setattr(builtins, "__import__", guarded)
+        spec.loader.exec_module(module)
+        binding = module.inspect_binding(
+            a.session.session_id, "default", a.session.workspace,
+            session_dir=a.dbpath.parent / "sessions", profile_home=a.dbpath.parent,
+        )
+    assert binding == a.request["binding"]
+
+
+@pytest.mark.parametrize("field", ["session_dir", "profile_home"])
+@pytest.mark.parametrize("kind", ["relative", "symlink", "missing"])
+def test_explicit_binding_paths_refuse_noncanonical(armed, field, kind):
+    a = armed
+    paths = {"session_dir": a.dbpath.parent / "sessions", "profile_home": a.dbpath.parent}
+    if kind == "relative":
+        paths[field] = Path("relative")
+    elif kind == "missing":
+        paths[field] = a.dbpath.parent / "missing"
+    else:
+        alias = a.dbpath.parent / "alias"
+        alias.symlink_to(paths[field], target_is_directory=True)
+        paths[field] = alias
+    with pytest.raises(a.resume.Refused, match="absolute canonical"):
+        a.resume.inspect_binding(a.session.session_id, "default", a.session.workspace, **paths)
+
+
 def test_owning_routes_have_browser_independent_consumer():
     from api import routes
     assert callable(getattr(routes, "consume_post_restart_continuation", None))
@@ -57,8 +99,10 @@ def armed(monkeypatch, tmp_path):
     def publish():
         for name, value in (("request.json", request), ("terminal.json", proof)):
             path = private / name
-            path.write_text(json.dumps(value))
-            path.chmod(0o600)
+            staging = path.with_suffix(".staging")
+            staging.write_text(json.dumps(value))
+            staging.chmod(0o600)
+            staging.replace(path)
     publish()
     calls, entered = [], threading.Event()
     def worker(*args, **kwargs):
@@ -70,10 +114,12 @@ def armed(monkeypatch, tmp_path):
         entered.set()
     monkeypatch.setattr(routes, "_run_agent_streaming", worker)
     obj = SimpleNamespace(routes=routes, resume=resume, private=private, session=s, dbpath=dbpath, op=op, deployment=deployment, request=request, proof=proof, publish=publish, calls=calls, entered=entered)
+    from api.session_ops import snapshot_session_state
+    obj.snapshot = snapshot_session_state(s)
     obj.consume = lambda: routes.consume_post_restart_continuation(deployment)
     yield obj
     if s.active_stream_id:
-        routes._cleanup_chat_start_launch_failure(s, s.active_stream_id)
+        routes._cleanup_chat_start_launch_failure(s, s.active_stream_id, obj.snapshot)
 
 
 @pytest.mark.parametrize("mode", ["legacy-direct", "legacy-journal"])
@@ -112,7 +158,7 @@ def test_uncached_session_uses_real_lookup_before_real_route_launch(armed, monke
     finally:
         stream_id = (result.get("result") or {}).get("stream_id")
         if stream_id:
-            a.routes._cleanup_chat_start_launch_failure(models.get_session(a.session.session_id), stream_id)
+            a.routes._cleanup_chat_start_launch_failure(models.get_session(a.session.session_id), stream_id, a.snapshot)
 
 
 def test_startup_consumer_waits_for_terminal_proof_without_browser(armed):
@@ -131,7 +177,7 @@ def test_startup_consumer_waits_for_terminal_proof_without_browser(armed):
     thread = namespace["_start_post_restart_continuation_consumer"](stop)
     try:
         a.publish()
-        assert a.entered.wait(3)
+        assert a.entered.wait(3), a.consume()
         thread.join(3)
         assert not thread.is_alive()
         assert len(a.calls) == 1
@@ -295,8 +341,8 @@ def test_worker_entry_receipt_failure_never_enters_worker(armed, monkeypatch):
         if name.endswith(".entered.json"):
             raise OSError("receipt unavailable")
         return original(store, name, value)
-    def on_failure(*args):
-        cleanup(*args)
+    def on_failure(*args, **kwargs):
+        cleanup(*args, **kwargs)
         cleaned.set()
     monkeypatch.setattr(a.resume.Store, "write", write)
     monkeypatch.setattr(a.routes, "_cleanup_chat_start_launch_failure", on_failure)
@@ -386,6 +432,75 @@ def test_human_wins_consumer_waits_until_before_claim_revalidation(armed, monkey
     assert not a.calls
 
 
+@pytest.mark.parametrize("entry", ["http", "server"])
+def test_accepted_human_start_holds_admission_before_continuation_claim(armed, monkeypatch, entry):
+    a = armed
+    from api import compression_continuation
+    reached, release, blocked, worker_entered = (threading.Event() for _ in range(4))
+
+    class ObservedLock:
+        def __init__(self):
+            self.lock = threading.RLock()
+        def __enter__(self):
+            if not self.lock.acquire(blocking=False):
+                blocked.set()
+                self.lock.acquire()
+            return self
+        def __exit__(self, *exc):
+            self.lock.release()
+
+    monkeypatch.setitem(a.resume._LOCKS, a.session.session_id, ObservedLock())
+    monkeypatch.setattr(a.routes, "j", lambda handler, result, status=200: dict(result, _status=status))
+    monkeypatch.setattr(a.routes, "_get_or_materialize_session", lambda *args, **kw: a.session)
+    monkeypatch.setattr(a.routes, "_session_visible_to_active_profile", lambda *args: True)
+    monkeypatch.setattr(a.routes, "_get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(compression_continuation, "durable_compression_continuation", lambda s: (False, None))
+    monkeypatch.setattr(a.routes, "_resolve_compatible_session_model_state", lambda *args, **kw: ("fake-model", "fake-provider", False))
+    monkeypatch.setattr(a.routes, "_run_agent_streaming", lambda *args, **kw: worker_entered.set())
+    original = a.routes._resolve_chat_workspace_with_recovery
+
+    def workspace(session, requested):
+        reached.set()
+        assert release.wait(3)
+        return original(session, requested)
+
+    monkeypatch.setattr(a.routes, "_resolve_chat_workspace_with_recovery", workspace)
+    results, human_results = [], []
+
+    def human():
+        if entry == "http":
+            human_results.append(a.routes._handle_chat_start(object(), {"session_id": a.session.session_id, "message": "Human"}))
+        else:
+            human_results.append(a.routes.start_session_turn(a.session.session_id, "Human", source="webui"))
+
+    first = threading.Thread(target=human)
+    second = threading.Thread(target=lambda: results.append(a.consume()))
+    first.start()
+    try:
+        assert reached.wait(3)
+        second.start()
+        assert blocked.wait(3)
+        assert not list(a.private.glob("*.claim.json"))
+    finally:
+        release.set()
+        first.join(3)
+        if second.ident is not None:
+            second.join(3)
+    assert worker_entered.wait(3), human_results
+    assert human_results[0].get("_status", 200) == 200
+    assert results[0]["status"] == "busy"
+    assert not list(a.private.glob("*.claim.json"))
+    assert a.session.pending_user_message == "Human"
+
+
+def test_unknown_controller_terminal_status_is_refused(armed):
+    armed.proof["status"] = "healthy"
+    armed.publish()
+    assert armed.consume()["status"] == "refused_or_ambiguous"
+    assert not list(armed.private.glob("*.claim.json"))
+    assert not armed.calls
+
+
 def test_receipt_survives_fresh_python_process(armed):
     import subprocess
     import sys
@@ -468,7 +583,7 @@ def test_postclaim_crash_never_replays(armed, monkeypatch):
 
 
 @pytest.mark.parametrize("worker_first", [False, True])
-def test_receipt_failure_after_real_stop_retires_both_participants(armed, monkeypatch, worker_first):
+def test_receipt_failure_after_real_stop_retires_launch_ownership(armed, monkeypatch, worker_first):
     from api import streaming, config
     a = armed
     receipt_waiting, fail_receipt, cleaned = (threading.Event() for _ in range(3))
@@ -484,9 +599,9 @@ def test_receipt_failure_after_real_stop_retires_both_participants(armed, monkey
             raise OSError("deterministic entry failure after Stop admission")
         return write(store, name, value)
 
-    def observed_cleanup(*args):
+    def observed_cleanup(*args, **kwargs):
         try:
-            return cleanup(*args)
+            return cleanup(*args, **kwargs)
         finally:
             cleaned.set()
 
@@ -508,7 +623,8 @@ def test_receipt_failure_after_real_stop_retires_both_participants(armed, monkey
     stop.start()
     try:
         assert cancel_waiting.wait(3)
-        assert streaming._STREAM_SETTLEMENT_PARTICIPANTS[sid] == {"cancel", "worker"}
+        assert sid not in config.STREAMS
+        assert sid not in config.PRE_ADMISSION_CLAIMS
         if worker_first:
             fail_receipt.set()
             assert cleaned.wait(3)
@@ -518,12 +634,9 @@ def test_receipt_failure_after_real_stop_retires_both_participants(armed, monkey
         assert not stop.is_alive()
         fail_receipt.set()
         assert cleaned.wait(3)
-        assert outcomes[0]["cancelled"]
+        assert outcomes[0] is True
         assert not a.calls
-        assert sid not in streaming._STREAM_SETTLEMENT_PARTICIPANTS
-        assert sid not in streaming._STREAM_SETTLEMENT_TERMINAL
-        assert sid not in streaming._STREAM_SETTLEMENT_COMPLETED
-        assert sid not in streaming._STREAM_CANCEL_CLAIMED
+        assert sid not in config.PRE_ADMISSION_CLAIMS
         assert sid not in config.STREAMS
         assert streaming.stream_owner_session_id(sid) is None
         assert a.session.session_id not in config.SESSION_WRITEBACK_OWNERS

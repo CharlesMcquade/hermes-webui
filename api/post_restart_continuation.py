@@ -213,15 +213,24 @@ def release_binding():
             "execution_digest": execution_digest}
 
 
-def inspect_binding(session_id, profile, workspace):
-    """Read authoritative durable state without Session.load's recovery writes."""
-    from api import config
-    from api.profiles import _resolve_profile_home_for_name
+def inspect_binding(session_id, profile, workspace, *, session_dir=None, profile_home=None):
+    """Read durable state; explicit publisher paths require no application imports."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", profile):
         raise Refused("invalid session/profile")
+    if session_dir is None:
+        from api import config
+        session_dir = config.SESSION_DIR
+    if profile_home is None:
+        from api.profiles import _resolve_profile_home_for_name
+        profile_home = _resolve_profile_home_for_name(profile)
+    for value in (session_dir, profile_home):
+        path = Path(value)
+        if not path.is_absolute() or str(path) != str(path.resolve()) or not path.is_dir():
+            raise Refused("state path must be an absolute canonical directory")
+    session_dir, profile_home = Path(session_dir), Path(profile_home)
     if not Path(workspace).is_dir() or str(Path(workspace).resolve()) != workspace:
         raise Refused("workspace missing or aliased")
-    sidecar_path = config.SESSION_DIR / (session_id + ".json")
+    sidecar_path = session_dir / (session_id + ".json")
     if sidecar_path.is_symlink():
         raise Refused("aliased sidecar")
     sidecar = json.loads(sidecar_path.read_text())
@@ -233,7 +242,7 @@ def inspect_binding(session_id, profile, workspace):
         raise Refused("unknown model binding")
     if any(sidecar.get(k) for k in ("active_stream_id", "pending_user_message", "pending_started_at")):
         raise Refused("pending durable work")
-    path = Path(_resolve_profile_home_for_name(profile)) / "state.db"
+    path = profile_home / "state.db"
     with sqlite3.connect("file:" + quote(str(path), safe="/") + "?mode=ro", uri=True) as db:
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA query_only=ON")

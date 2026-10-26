@@ -46,7 +46,11 @@ is no assumption that an existing controller already emits these records.
    profile SQLite database without `Session.load()` recovery writes. The result
    binds exact session/profile/workspace/model/provider plus a SHA-256 digest
    of the entire sidecar and durable session/message rows. No binding is inferred
-   from the currently selected browser profile.
+   from the currently selected browser profile. A trusted stdlib-only publisher
+   may load this module by filename and pass keyword-only `session_dir` and
+   `profile_home` canonical absolute existing directories. Supplying both avoids
+   all application imports; omitted paths use the existing config/profile resolver.
+   All ownership, settled-state and revision checks remain identical.
 2. Publish immutable `deployment.json` in the private store **before startup**,
    with exactly `release` (canonical WebUI source directory), `release_revision`
    (full 40/64-character lowercase source commit from the independently verified
@@ -143,10 +147,12 @@ The normal accepted path calls the existing `_start_run` adapter selection and
 legacy stream start, not a separate worker launcher. The actual executing
 thread writes `<id>.entered.json` before calling the Agent worker. If that
 receipt fails, the worker is not invoked and the existing launch-failure cleanup
-retires its stream/pending state. Detachment and worker-participant retirement
-share `STREAMS_LOCK`, using the existing cancellation settlement helper. If
-Stop has registered cancel and worker participants, each retires only its own
-participation; neither retirement order leaves a phantom worker or fence.
+retires its stream/pending state through the current transactional cleanup with
+its captured session snapshot and backup provenance. Stream detachment and
+pre-admission-claim retirement share `STREAMS_LOCK`. Stop retires the same claim
+before detaching ownership; either receipt-failure/Stop ordering leaves no launch
+claim, stream owner or writeback owner. The older participant/fence registries
+referenced in the historical repair evidence below no longer exist on this base.
 `<id>.result.json` records the owning route's
 result with the same ID. A returned route result is not worker-entry proof;
 `entered.json` is not proof of model completion or an exactly-once tool effect.
@@ -182,7 +188,25 @@ trusted embedding. Such callers must share their lifecycle owner and close/join
 it in their own teardown; a standalone call without an owner is not a managed
 startup consumer. This is not a new public endpoint or controller protocol.
 
-## Reviewed-blocker repair evidence
+## Current transactional turn-start integration
+
+The consumer uses the current `_start_run` and stream transaction, retaining
+process-wakeup retry identity, profile-scoped alias routing, goal flags, pending
+state snapshots, backup compensation and pre-admission claims. The receipt wraps
+the one existing worker launch, not a second launcher. Its failure callback binds
+the launch snapshot/stream identity and invokes current transactional cleanup.
+
+Focused verification: 71 continuation tests pass, including accepted human HTTP
+and `start_session_turn` winners under deterministic admission barriers, duplicate
+claims, changed revisions, shutdown ordering, receipt/Stop cleanup ordering and
+stdlib-only publisher inspection. The combined adjacent slice passes 160 tests
+with one inherited deleted-session wakeup failure deselected; regeneration's 17
+tests pass in a separate process. On the unchanged base, the deleted-session
+wakeup case fails identically and running regeneration after the neighbor files
+also reproduces three fixture-contamination failures (`SimpleNamespace.compact`).
+No production deployment, actual process restart or provider execution is claimed.
+
+## Reviewed-blocker repair evidence (historical implementation)
 
 The repair adds deterministic receipt/Stop barriers through **real
 `cancel_stream`**, tests both cancel/worker retirement orderings, and tests goal
