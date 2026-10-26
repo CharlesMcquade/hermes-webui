@@ -577,6 +577,10 @@ const SESSION_ROW_NESTED_CONTROL_SELECTOR = '.session-select-cb-wrapper,.session
 const SESSION_ARCHIVE_SWIPE_THRESHOLD_PX = 128;
 const SESSION_DELETE_SWIPE_THRESHOLD_PX = 128;
 const SESSION_SWIPE_CANCEL_RATIO = 0.75;
+// Tap endpoints within this distance count as a tap even when intermediate
+// jitter promoted the gesture to 'dragging' (wedged foldable cover-screen
+// viewport inflates coordinates). Real swipe-reveals travel 128px+.
+const SESSION_TAP_ENDPOINT_PX = 28;
 
 function _manualTitleAuxConfigFromPayload(auxData){
   if(!auxData||typeof auxData!=='object'||Array.isArray(auxData)) return null;
@@ -12148,7 +12152,18 @@ function renderSessionListFromCache(){
     };
     const _finishSessionGesture=(clientX,clientY,target,pointerType)=>{
       if(_gestureState==='idle') return false;  // press never began on this row
-      const wasDragging=_gestureState==='dragging'||_swipeTracking;
+      // A foldable cover screen in the wedged-viewport state (stale coordinate
+      // scaling) inflates micro pointer jitter past the 5px drag-promotion
+      // threshold, so legitimate taps arrive flagged 'dragging' and used to be
+      // discarded. A tap is defined by its endpoints: if the pointer finished
+      // within _SESSION_TAP_ENDPOINT_PX of where it started and no horizontal
+      // swipe was tracked, finish it as a tap regardless of the intermediate
+      // promotion. Live-device evidence: nesquena/hermes-webui#8531.
+      const _endpointTap=!_swipeTracking
+        &&Math.abs(clientX-_pointerDownX)<=SESSION_TAP_ENDPOINT_PX
+        &&Math.abs(clientY-_pointerDownY)<=SESSION_TAP_ENDPOINT_PX;
+      const wasDragging=(_gestureState==='dragging'||_swipeTracking)&&!_endpointTap;
+      if(_endpointTap&&_gestureState==='dragging')_settleSessionSwipePaint();
       _clearLongPressTimer();
       if(_renamingSid){_gestureState='idle';return false;}
       if(_isSessionActionTarget(target)){_gestureState='idle';return false;}
