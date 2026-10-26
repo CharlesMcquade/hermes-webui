@@ -794,6 +794,100 @@ function _installPwaSidebarSwipeGesture(){
 }
 _installPwaSidebarSwipeGesture();
 
+// ── PWA tap→click synthesis bridge (iOS 27 foldable outer display) ──────────
+// On the iPhone Duo's cover screen (and any iOS 27 standalone PWA that went
+// through a fold / screen handoff), WebKit's touch→mouse compatibility layer
+// stops synthesizing mousedown/mouseup/click: pointer and touch events still
+// dispatch to the correct targets, but every click-activated control — the
+// titlebar hamburger, the drawer's Close X, the overlay, composer buttons —
+// goes dead. A synthetic .click() still runs the handlers, so the app wiring
+// is fine; the OS-level click synthesis is what breaks.
+// Live-device evidence: nesquena/hermes-webui#8531 (2026-10-26 probes: taps
+// produce pointerdown/pointerup on the correct targets with no click event,
+// while visualViewport reports 0 / -33554432 / stale sizes in the same
+// window; taps resume synthesizing exactly when the viewport returns sane).
+//
+// Bridge: arm on a clean primary-pointer tap (pointerdown→pointerup, small
+// travel, short duration, coarse pointer, standalone PWA). If no trusted
+// click follows within _PWA_TAP_CLICK_DELAY_MS, dispatch one ourselves.
+// On healthy clients a trusted click always lands first, so the bridge is a
+// no-op there; in the wedged state it restores every click-based control
+// without a reload.
+const _PWA_TAP_CLICK_DELAY_MS=220;
+const _PWA_TAP_CLICK_MAX_TRAVEL=14;
+const _PWA_TAP_CLICK_MAX_DURATION=650;
+// The session row's own tap surface is handled by that row's gesture machine
+// (which completes taps itself); everything else click-activated qualifies.
+const _PWA_TAP_CLICK_EXCLUDE='textarea,input,select,option,[contenteditable="true"],.session-item .session-text';
+let _pwaTapArm=null;
+
+function _pwaTapClickExcluded(target){
+  try{return !!(target&&target.closest&&target.closest(_PWA_TAP_CLICK_EXCLUDE));}
+  catch(_){return false;}
+}
+
+// Pure decision core (Node-testable): given the armed pointerdown observation
+// and the pointerup observation, should the tap get a synthetic click?
+function _pwaTapClickShouldSchedule(arm,up){
+  if(!arm||!up)return false;
+  if(arm.pointerId!==undefined&&up.pointerId!==undefined&&arm.pointerId!==up.pointerId)return false;
+  if(arm.pointerType==='mouse'||up.pointerType==='mouse')return false;
+  if(up.button!==undefined&&up.button!==0)return false;
+  if(arm.excluded||up.excluded)return false;
+  const dx=(up.clientX||0)-(arm.clientX||0);
+  const dy=(up.clientY||0)-(arm.clientY||0);
+  if(Math.abs(dx)>_PWA_TAP_CLICK_MAX_TRAVEL||Math.abs(dy)>_PWA_TAP_CLICK_MAX_TRAVEL)return false;
+  const duration=up.timeStamp-arm.timeStamp;
+  if(!(duration>=0)||duration>_PWA_TAP_CLICK_MAX_DURATION)return false;
+  return true;
+}
+
+function _installPwaTapClickBridge(){
+  try{
+    if(!_isPwaStandalone())return;
+    if(!(window.matchMedia&&matchMedia('(pointer: coarse)').matches))return;
+  }catch(_){return;}
+  window.addEventListener('pointerdown',e=>{
+    if(e.pointerType==='mouse'||(e.button!==undefined&&e.button!==0)){_pwaTapArm=null;return;}
+    if(_pwaTapArm)return; // a second contact is never a tap
+    _pwaTapArm={pointerId:e.pointerId,pointerType:e.pointerType,clientX:e.clientX,clientY:e.clientY,
+                timeStamp:e.timeStamp,excluded:_pwaTapClickExcluded(e.target),target:e.target,moved:false};
+  },{capture:true,passive:true});
+  window.addEventListener('pointermove',e=>{
+    if(_pwaTapArm&&e.pointerId===_pwaTapArm.pointerId){
+      const dx=(e.clientX||0)-(_pwaTapArm.clientX||0);
+      const dy=(e.clientY||0)-(_pwaTapArm.clientY||0);
+      if(Math.abs(dx)>_PWA_TAP_CLICK_MAX_TRAVEL||Math.abs(dy)>_PWA_TAP_CLICK_MAX_TRAVEL)_pwaTapArm.moved=true;
+    }
+  },{capture:true,passive:true});
+  window.addEventListener('pointercancel',e=>{
+    if(_pwaTapArm&&e.pointerId===_pwaTapArm.pointerId)_pwaTapArm=null;
+  },{capture:true,passive:true});
+  window.addEventListener('pointerup',e=>{
+    const arm=_pwaTapArm;
+    _pwaTapArm=null;
+    if(!arm||e.pointerId!==arm.pointerId||arm.moved)return;
+    const up={pointerId:e.pointerId,pointerType:e.pointerType,button:e.button,
+              clientX:e.clientX,clientY:e.clientY,timeStamp:e.timeStamp,
+              excluded:_pwaTapClickExcluded(e.target)};
+    if(!_pwaTapClickShouldSchedule(arm,up))return;
+    let trustedClick=false;
+    const confirm=ev=>{if(ev.isTrusted)trustedClick=true;};
+    window.addEventListener('click',confirm,{capture:true,passive:true,once:true});
+    setTimeout(()=>{
+      window.removeEventListener('click',confirm,{capture:true});
+      if(trustedClick)return;
+      const target=arm.target;
+      if(!target||!target.isConnected)return;
+      try{
+        target.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window,
+          clientX:up.clientX,clientY:up.clientY,detail:1}));
+      }catch(_){}
+    },_PWA_TAP_CLICK_DELAY_MS);
+  },{capture:true,passive:true});
+}
+_installPwaTapClickBridge();
+
 // ── Desktop sidebar collapse toggle ────────────────────────────────────────
 // Two discoverability paths into the same state:
 //   (1) Click the already-active rail icon → collapse / expand the sidebar.
