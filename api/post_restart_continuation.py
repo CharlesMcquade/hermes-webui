@@ -247,6 +247,27 @@ def _transcript_view(message):
     return view
 
 
+def _binding_changed(bound, current):
+    """Refuse on identity drift; report (not refuse) transcript growth.
+
+    The runner binds the request BEFORE the restart and this check runs AFTER
+    verification, minutes later. Operators message a session that looks dead
+    and the orchestrator itself may answer them; both move `session_revision`
+    without changing which session, profile, workspace, model or durable owner
+    the continuation belongs to. Pre-restart exactness stays the runner's job
+    (it compares the full binding at every service-action edge). Returns True
+    when only the transcript advanced.
+    """
+    for key, value in bound.items():
+        if key == "session_revision":
+            continue
+        if current.get(key) != value:
+            raise Refused("session binding changed")
+    if "identity_revision" in bound and bound["identity_revision"] != current.get("identity_revision"):
+        raise Refused("session binding changed")
+    return current.get("session_revision") != bound.get("session_revision")
+
+
 def inspect_binding(session_id, profile, workspace, *, session_dir=None, profile_home=None):
     """Read durable state; explicit publisher paths require no application imports."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", profile):
@@ -294,11 +315,12 @@ def inspect_binding(session_id, profile, workspace, *, session_dir=None, profile
         messages = [view for view in
                     (_transcript_view(dict(r)) for r in db.execute("SELECT * FROM messages WHERE session_id=? ORDER BY id", (session_id,)))
                     if view is not None]
+    identity = {"sidecar": _binding_view(sidecar, _SIDECAR_IDENTITY_FIELDS),
+                "row": _binding_view(row, _ROW_OWNERSHIP_FIELDS)}
     return {"session_id": session_id, "profile": profile, "workspace": workspace,
             "model": sidecar["model"], "model_provider": sidecar["model_provider"],
-            "session_revision": digest({"sidecar": _binding_view(sidecar, _SIDECAR_IDENTITY_FIELDS),
-                                        "row": _binding_view(row, _ROW_OWNERSHIP_FIELDS),
-                                        "messages": messages})}
+            "identity_revision": digest(identity),
+            "session_revision": digest({**identity, "messages": messages})}
 
 
 def supported_backend(routes):
@@ -407,9 +429,13 @@ def consume(routes, deployment, owner=None):
                 cached = routes.SESSIONS.get(sid)
                 if cached is not None and (getattr(cached, "active_stream_id", None) or getattr(cached, "pending_user_message", None)):
                     return {**identity, "status": "busy"}
-                current = inspect_binding(sid, binding["profile"], binding["workspace"])
-                if current != binding:
-                    raise Refused("session binding changed")
+                try:
+                    current = inspect_binding(sid, binding["profile"], binding["workspace"])
+                except Refused as exc:
+                    if str(exc) == "pending durable work":
+                        return {**identity, "status": "busy"}  # a human turn is live; retry
+                    raise
+                transcript_advanced = _binding_changed(binding, current)
                 if cached is not None and any(getattr(cached, key, None) != binding[key]
                         for key in ("session_id", "profile", "workspace", "model", "model_provider")):
                     raise Refused("in-memory binding changed")
@@ -426,14 +452,13 @@ def consume(routes, deployment, owner=None):
                     if any(getattr(session, key, None) != binding[key] for key in
                             ("session_id", "profile", "workspace", "model", "model_provider")):
                         raise Refused("resolved session changed binding")
-                    if inspect_binding(sid, binding["profile"], binding["workspace"]) != binding:
-                        raise Refused("session recovery changed revision")
+                    _binding_changed(binding, inspect_binding(sid, binding["profile"], binding["workspace"]))
                     receipt = WorkerReceipt(path, op)
                     result = routes._start_run(session, msg=msg, attachments=[], workspace=binding["workspace"],
                         model=binding["model"], model_provider=binding["model_provider"], normalized_model=False,
                         source="webui", route="post_restart_continuation", gateway_chat_enabled=False,
                         continuation_receipt=receipt)
-                    result = {**result, **identity}
+                    result = {**result, **identity, "transcript_advanced": transcript_advanced}
                     store.write(op + ".result.json", result)
                     return {**identity, "status": "claimed", "result": result}
     except Exception as exc:

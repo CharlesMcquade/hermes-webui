@@ -304,6 +304,53 @@ def test_changed_binding_is_refused_without_mutation(armed, change):
     assert not list(a.private.glob("*.claim.json"))
 
 
+def _append_human_message(a, text="It has been 5 minutes, no run looks like."):
+    with sqlite3.connect(a.dbpath) as db:
+        db.execute("INSERT INTO messages(id, session_id, role, content) VALUES (99, ?, 'user', ?)", (a.session.session_id, text))
+
+
+def test_transcript_growth_after_binding_still_launches_and_is_reported(armed):
+    """Regression (2026-10-26 A2/op 99ecbb0e): the user and orchestrator messaged the
+    session between arming and verification; the consumer refused for good and a
+    verified deployment never resumed. Transcript growth is reported, not refused."""
+    a = armed
+    _append_human_message(a)
+    result = a.consume()
+    assert result["status"] == "claimed", result
+    assert result["result"]["transcript_advanced"] is True
+    assert a.entered.wait(5)
+    stored = json.loads((a.private / (a.op + ".result.json")).read_text())
+    assert stored["transcript_advanced"] is True
+
+
+def test_unchanged_transcript_reports_no_advance(armed):
+    a = armed
+    result = a.consume()
+    assert result["status"] == "claimed", result
+    assert result["result"]["transcript_advanced"] is False
+    assert a.entered.wait(5)
+
+
+def test_identity_drift_is_still_refused_even_with_matching_fields(armed):
+    """identity_revision covers durable ownership columns the top-level fields don't."""
+    a = armed
+    with sqlite3.connect(a.dbpath) as db:
+        db.execute("UPDATE sessions SET profile_name='other'")
+    assert a.consume()["status"] == "refused_or_ambiguous"
+    assert not a.calls
+
+
+def test_live_human_turn_in_sidecar_is_busy_not_terminal(armed):
+    a = armed
+    a.session.pending_user_message = "typing"
+    a.session.save()
+    assert a.consume()["status"] == "busy"
+    a.session.pending_user_message = None
+    a.session.save()
+    assert a.consume()["status"] == "claimed"
+    assert a.entered.wait(5)
+
+
 @pytest.mark.parametrize("mode,backend", [(None, "legacy"), ("bogus", "legacy"), ("runner-local", "legacy"), ("legacy-direct", "gateway"), ("legacy-direct", None), ("legacy-direct", "unknown")])
 def test_unknown_external_backends_fail_closed(armed, monkeypatch, mode, backend):
     for key, value in (("HERMES_WEBUI_RUNTIME_ADAPTER", mode), ("HERMES_WEBUI_CHAT_BACKEND", backend)):
@@ -494,9 +541,12 @@ def test_human_wins_consumer_waits_until_before_claim_revalidation(armed, monkey
     second.join(3)
     assert not first.is_alive() and not second.is_alive()
     assert human_done[0]["_status"] == 400
-    assert results[0]["status"] == "refused_or_ambiguous"
-    assert not list(a.private.glob("*.claim.json"))
-    assert not a.calls
+    # The consumer waited for the admission edge and revalidated AFTER the
+    # human's persisted change. Identity is intact; only the transcript grew,
+    # so the continuation launches and says so rather than refusing.
+    assert results[0]["status"] == "claimed", results
+    assert results[0]["result"]["transcript_advanced"] is True
+    assert a.entered.wait(5)
 
 
 @pytest.mark.parametrize("entry", ["http", "server"])
