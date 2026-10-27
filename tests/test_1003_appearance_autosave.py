@@ -1,9 +1,10 @@
 """Regression checks for Issue #1003: Appearance settings autosave.
 
 Focus:
-- Theme/Skin/Font size should autosave immediately and only show inline status.
+- Theme/Skin should autosave immediately and only show inline status.
 - Appearance changes should not participate in the global unsaved-changes guard.
-- Full-save flow should still include font_size.
+- font_size is a per-device setting (localStorage-only): neither the appearance
+  autosave nor the full-save flow may send it to the server.
 - /api/settings should accept appearance-only payloads and preserve untouched fields.
 """
 import json
@@ -72,11 +73,11 @@ def test_appearance_revert_preview_no_longer_rolls_back_theme_skin_font():
     assert "_markSettingsDirty()" not in block
 
 
-def test_appearance_autosave_payload_is_theme_skin_font_only():
+def test_appearance_autosave_payload_is_theme_skin_only():
     block = _function_block(PANELS_JS, "_appearancePayloadFromUi")
     assert "theme:" in block
     assert "skin:" in block
-    assert "font_size:" in block
+    assert "font_size" not in block
     assert "language:" not in block
     assert "workspace" not in block
     assert "show_token_usage" not in block
@@ -101,12 +102,13 @@ def test_appearance_autosave_status_line_and_i18n_keys_exist():
         )
 
 
-def test_full_save_settings_still_includes_font_size():
+def test_full_save_does_not_send_font_size():
+    """font_size is per-device (localStorage-only) — no save path may POST it."""
     block = _function_block(PANELS_JS, "saveSettings")
     compact = block.replace(" ", "")
     assert "body.theme=theme;" in compact
     assert "body.skin=skin;" in compact
-    assert "body.font_size=fontSize;" in compact
+    assert "body.font_size" not in compact
 
 
 def test_settings_api_accepts_appearance_only_payload_without_overwriting_other_fields():
