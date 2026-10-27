@@ -6925,6 +6925,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof updateQueueBadge==='function') updateQueueBadge(sid);
           showToast(t('steer_leftover_queued'),3000);
         }
+        // Not consumed mid-run: it becomes the next turn's user message, so the
+        // in-turn live Steer row would misplace it.
+        if(typeof _clearLiveSteerRows==='function') _clearLiveSteerRows();
       }catch(_){}
     });
 

@@ -455,12 +455,10 @@ class TestFrontendWiring:
         assert "function _steerSetComposerStatusForOwner" in steer_helpers
         assert "_steerSetComposerStatusForOwner(ownerSid,t('uploading')||'Uploading…')" in steer_helpers
         assert "_steerSetComposerStatusForOwner(ownerSid,'')" in steer_helpers
-        assert "function _steerIndicatorText" in steer_helpers
-        # Retired independent admission (#7188): no persistenceDegraded gate
-        # remains; the transient indicator is unconditional on acceptance and
-        # is the documented accepted-loss redraw surface.
+                # Retired independent admission (#7188): no persistenceDegraded gate
+        # remains; the live steer row is unconditional on acceptance.
         assert "persistenceDegraded" not in try_body
-        indicator_idx = try_body.index("_showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot))")
+        indicator_idx = try_body.index("_showSteerIndicator(originalMsg,pendingFilesSnapshot)")
         assert indicator_idx > try_body.index("if(result&&result.accepted)")
         assert "_showSteerIndicator(steerText)" not in try_body
 
@@ -545,7 +543,8 @@ class TestFrontendWiring:
             function setComposerStatus(){{}}
             function showToast(){{}}
             function renderTray(){{}}
-            function _showSteerIndicator(text){{indicatorText = text;}}
+            let indicatorFiles = null;
+            function _showSteerIndicator(text, files){{indicatorText = text; indicatorFiles = files;}}
             function _showSteerRecovery(){{}}
             function _clearComposerDraft(){{}}
             async function uploadPendingFiles(){{return [{{path:'/tmp/a.pdf'}}];}}
