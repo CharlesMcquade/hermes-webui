@@ -9118,7 +9118,8 @@ function _appearancePayloadFromUi(){
   return {
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
-    font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
+    // Font size deliberately excluded from this payload: per-device
+    // (localStorage-only) setting — never sent to the server.
     content_width: localStorage.getItem('hermes-content-width') || 'default',
     chat_activity_display_mode: chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='turn_worklog'||chatActivityModeSel.value==='hide_all_activity')
       ? chatActivityModeSel.value
@@ -9206,7 +9207,7 @@ function _rememberAppearanceSaved(payload){
   if(!payload) return;
   _settingsThemeOnOpen=payload.theme||localStorage.getItem('hermes-theme')||'dark';
   _settingsSkinOnOpen=payload.skin||localStorage.getItem('hermes-skin')||'default';
-  _settingsFontSizeOnOpen=payload.font_size||localStorage.getItem('hermes-font-size')||'default';
+  _settingsFontSizeOnOpen=localStorage.getItem('hermes-font-size')||'default';
   if(payload.content_width) localStorage.setItem('hermes-content-width',payload.content_width);
 }
 
@@ -9226,9 +9227,6 @@ async function _autosaveAppearanceSettings(payload){
     const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
     _settingsAppearanceAutosaveRetryPayload=null;
     _rememberAppearanceSaved(payload);
-    if(saved&&saved.font_size){
-      localStorage.setItem('hermes-font-size',saved.font_size);
-    }
     if(saved&&saved.content_width){
       localStorage.setItem('hermes-content-width',saved.content_width);
       if(typeof _applyContentWidth==='function') _applyContentWidth(saved.content_width);
@@ -9778,8 +9776,8 @@ async function loadSettingsPanel(){
     const skinSel=$('settingsSkin');
     if(skinSel) skinSel.value=skinVal;
     if(typeof _buildSkinPicker==='function') _buildSkinPicker(skinVal);
-    const fontSizeVal=settings.font_size||localStorage.getItem('hermes-font-size')||'default';
-    localStorage.setItem('hermes-font-size',fontSizeVal);
+    // Per-device: localStorage only; the server-side value is legacy and ignored.
+    const fontSizeVal=localStorage.getItem('hermes-font-size')||'default';
     if(typeof _applyFontSize==='function') _applyFontSize(fontSizeVal);
     const fontSizeSel=$('settingsFontSize');
     if(fontSizeSel) fontSizeSel.value=fontSizeVal;
@@ -13582,7 +13580,8 @@ async function saveSettings(andClose){
   if(sendKey) body.send_key=sendKey;
   body.theme=theme;
   body.skin=skin;
-  body.font_size=fontSize;
+  // Font size deliberately omitted from this body: per-device
+  // (localStorage-only) setting — never sent to the server.
   body.session_jump_buttons=!!($('settingsSessionJumpButtons')||{}).checked;
   body.session_endless_scroll=!!($('settingsSessionEndlessScroll')||{}).checked;
   body.chat_activity_display_mode=((($('settingsChatActivityDisplayMode')||{}).value==='transparent_stream')

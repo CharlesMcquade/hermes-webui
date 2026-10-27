@@ -287,3 +287,60 @@ class TestFontSizeCssTargetedOverrides:
         css = _read("static/style.css")
         assert ':root[data-font-size="xlarge"] .file-item' in css, \
             "Workspace file tree text must be explicitly scaled for extra large"
+
+
+class TestFontSizePerDeviceStorage:
+    """Font size is per-device (localStorage-only), not server-synced.
+
+    The server-side font_size field is legacy: load paths must never apply or
+    mirror it, and no save path may send it. The ONLY writer of the
+    'hermes-font-size' localStorage key is _pickFontSize() — any
+    server->localStorage mirror would re-sync devices the user set apart.
+    """
+
+    def _function_block(self, src, name):
+        marker = re.search(rf"(^|\n)(?:async\s+)?function\s+{re.escape(name)}\(", src)
+        assert marker is not None, f"{name}() not found"
+        start = marker.start()
+        next_marker = re.search(r"\n(?:function\s+\w+\(|async\s+function\s+\w+\()", src[start + 1:])
+        end = start + 1 + next_marker.start() if next_marker else len(src)
+        return src[start:end]
+
+    def test_boot_settings_load_never_reads_server_font_size(self):
+        boot = _read("static/boot.js")
+        assert "s.font_size" not in boot, (
+            "boot.js settings-load must not apply the legacy server-side font_size"
+        )
+
+    def test_panels_never_reads_server_font_size(self):
+        panels = _read("static/panels.js")
+        assert "settings.font_size" not in panels, (
+            "panels.js settings hydration must not apply the legacy server-side font_size"
+        )
+
+    def test_pick_font_size_is_the_only_localstorage_writer(self):
+        count = 0
+        for name in ("static/boot.js", "static/panels.js"):
+            count += _read(name).count("localStorage.setItem('hermes-font-size'")
+        assert count == 1, (
+            "exactly one writer of 'hermes-font-size' expected (_pickFontSize); "
+            f"found {count} — a server->localStorage mirror would re-sync devices"
+        )
+
+    def test_autosave_echo_does_not_write_font_size(self):
+        panels = _read("static/panels.js")
+        block = self._function_block(panels, "_autosaveAppearanceSettings")
+        assert "hermes-font-size" not in block, (
+            "_autosaveAppearanceSettings must not echo a server font_size back to localStorage"
+        )
+
+    def test_boot_load_applies_localstorage_only(self):
+        boot = _read("static/boot.js")
+        idx = boot.find("const fontSize=localStorage.getItem('hermes-font-size')")
+        assert idx != -1, (
+            "boot.js settings-load must source font size from localStorage"
+        )
+        block = boot[idx:idx + 400]
+        assert "_applyFontSize(fontSize);" in block, (
+            "boot.js settings-load must apply the localStorage value"
+        )

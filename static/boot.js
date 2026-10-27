@@ -4368,8 +4368,10 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         api('/api/settings',{method:'POST',body:JSON.stringify({theme,skin})});
       }catch(_){}
     }
-    const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');
-    localStorage.setItem('hermes-font-size',fontSize);
+    // Font size is per-device (like browser zoom): localStorage is the only
+    // source of truth. The server-side value is legacy — never applied,
+    // never mirrored back, so each device keeps its own size by design.
+    const fontSize=localStorage.getItem('hermes-font-size')||'default';
     _applyFontSize(fontSize);
     const serverContentWidth=_normalizeContentWidth(s.content_width);
     const localContentWidth=localStorage.getItem('hermes-content-width');
