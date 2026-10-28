@@ -1566,12 +1566,10 @@ function _showSteerIndicator(text, files){
   const inner=document.getElementById('msgInner');
   if(!inner) return;
   const body=String(text||'').trim();
-  // Only successful upload destinations are passed here, never staged File.name.
-  // File.name may be sanitized or collision-renamed on disk.
-  const names=(Array.isArray(files)?files:[])
-    .map(f=>f&&(typeof f==='string'?f:(f.path||'')))
-    .map(v=>String(v||'').trim()).filter(Boolean);
-  if(!body&&!names.length) return;
+  const uploaded=(Array.isArray(files)?files:[])
+    .map(f=>typeof f==='string'?{path:f,name:f}:f)
+    .filter(f=>f&&f.path&&String(f.path).trim());
+  if(!body&&!uploaded.length) return;
   const el=document.createElement('div');
   el.className='msg-row steer-row steer-row-live';
   el.dataset.role='steer';
@@ -1579,7 +1577,7 @@ function _showSteerIndicator(text, files){
   el.dataset.rawText=body;
   const sid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||'';
   el.innerHTML=(typeof _steerRowInnerHtml==='function')
-    ? _steerRowInnerHtml(body,names,'',sid)
+    ? _steerRowInnerHtml(body,uploaded,'',sid)
     : `<div class="msg-body">${esc(body)}</div>`;
   const turn=document.getElementById('liveAssistantTurn');
   const blocks=turn&&typeof _assistantTurnBlocks==='function'?_assistantTurnBlocks(turn):null;
@@ -1657,6 +1655,15 @@ function _steerUploadedAttachmentPaths(uploaded){
   }).map(v=>String(v||'').trim()).filter(Boolean);
 }
 
+function _steerUploadedAttachmentFiles(uploaded){
+  if(!Array.isArray(uploaded))return[];
+  return uploaded.map(u=>{
+    const path=typeof u==='string'?u:u&&u.path;
+    if(!path||!String(path).trim())return null;
+    return {path:String(path).trim(),name:String((u&&u.name)||String(path).split('/').pop()||path)};
+  }).filter(Boolean);
+}
+
 function _steerOwnerIsCurrent(ownerSid){
   return !!(ownerSid&&typeof S!=='undefined'&&S.session&&S.session.session_id===ownerSid);
 }
@@ -1724,7 +1731,7 @@ async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, 
 // RETRY reuses the uploaded paths instead of re-uploading the same File objects.
 // Keyed by ownerSid; invalidated when the staged file set changes or on accepted
 // steer (see _steerUploadCacheMatches / clearing below).
-let _steerUploadCache = null; // { sid, sig, paths }
+let _steerUploadCache = null; // { sid, sig, paths, files }
 function _steerFilesSignature(files){
   try{
     return (Array.isArray(files)?files:[]).map(f=>f&&(f.name+':'+(f.size||0)+':'+(f.lastModified||0))).join('|');
@@ -1740,8 +1747,10 @@ async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot, captureU
   // Reuse a prior successful upload for the same session + identical staged file
   // set (a steer that failed and is being retried) — don't upload twice.
   let paths=null;
+  let previewFiles=[];
   if(_steerUploadCache&&_steerUploadCache.sid===ownerSid&&_steerUploadCache.sig===sig&&Array.isArray(_steerUploadCache.paths)&&_steerUploadCache.paths.length){
     paths=_steerUploadCache.paths;
+    previewFiles=Array.isArray(_steerUploadCache.files)?_steerUploadCache.files:paths.map(path=>({path,name:String(path).split('/').pop()}));
   }else{
     _steerSetComposerStatusForOwner(ownerSid,t('uploading')||'Uploading…');
     let uploaded=[];
@@ -1753,12 +1762,13 @@ async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot, captureU
       _steerSetComposerStatusForOwner(ownerSid,'');
     }
     paths=_steerUploadedAttachmentPaths(uploaded);
-    if(paths.length) _steerUploadCache={sid:ownerSid,sig,paths};
+    previewFiles=_steerUploadedAttachmentFiles(uploaded);
+    if(paths.length) _steerUploadCache={sid:ownerSid,sig,paths,files:previewFiles};
   }
   if(!paths||!paths.length)return base;
-  // Snapshot the successful upload identities for this request before acceptance
-  // clears the retry cache. Partial uploads contribute only successful paths.
-  if(typeof captureUploadedPaths==='function')captureUploadedPaths([...paths]);
+  // Snapshot successful request-owned identities before acceptance clears the
+  // retry cache. Partial uploads contribute only successfully stored files.
+  if(typeof captureUploadedPaths==='function')captureUploadedPaths(previewFiles.map(f=>({...f})));
   const note=`[Attached files for this steer: ${paths.join(', ')}]\nUse the file tools/read_file to inspect these documents if needed.`;
   return base?`${base}\n\n${note}`:note;
 }

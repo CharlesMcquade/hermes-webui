@@ -563,7 +563,7 @@ class TestFrontendWiring:
               assert.deepStrictEqual(apiPayload.attachment_paths, ['/tmp/a.pdf']);
               assert.ok(!('durable' in apiPayload) && !('published' in apiPayload) && !('steer_event' in apiPayload));
               // Live row chips use the successful upload destination, not File.name.
-              assert.deepStrictEqual(indicatorFiles, ['/tmp/a.pdf']);
+              assert.deepStrictEqual(indicatorFiles, [{{path:'/tmp/a.pdf',name:'a.pdf'}}]);
             }})().catch(err=>{{console.error(err); process.exit(1);}});
             """
         )
