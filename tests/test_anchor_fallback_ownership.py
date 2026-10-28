@@ -420,6 +420,10 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
     # evaluated with it. The shim's createElement() returns no template `content`, so the
     # helper takes its insertAdjacentHTML fallback here, exactly as before.
     insert_block_source = _function_source(_ui_js(), "_insertSegmentBlock")
+    ui = _ui_js()
+    steer_source = ui[ui.index("const _STEER_OOB_OPEN_RE"):ui.index("\nfunction setStatus", ui.index("const _STEER_OOB_OPEN_RE"))]
+    commands = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+    live_steer_source = _function_source(commands, "_showSteerIndicator")
     script = textwrap.dedent(
         f"""
         class FakeClassList {{
@@ -623,7 +627,6 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         function _messageSessionIndexForRawIdx(rawIdx) {{ return rawIdx; }}
         function _messageViewportAnchorKeyForMessage() {{ return 'k'; }}
         function _stripAttachedFilesMarkerForDisplay(value) {{ return String(value || ''); }}
-        function _isSteerDisplayMessage() {{ return false; }}
         function _stripWorkspaceDisplayPrefix(value) {{ return String(value || ''); }}
         function _stripLeadingAssistantThinkingMarkup(value) {{ return String(value || ''); }}
         function _getCachedRender(value) {{ return String(value || ''); }}
@@ -712,6 +715,8 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         eval({json.dumps(transparent_source)});
         eval({json.dumps(legacy_metadata_source)});
         eval({json.dumps(insert_block_source)});
+        eval({json.dumps(steer_source)});
+        eval({json.dumps(live_steer_source)});
         eval({json.dumps(render_source)});
 
         const toolResult = {{ role: 'tool', tool_call_id: 'toolu_1', content: 'tool result' }};
@@ -848,12 +853,47 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           sToolCalls: S.toolCalls.length,
         }};
 
+        // Drive the real live-row helper after a rendered tool turn, then drive
+        // the real settled renderer with a typed Steer at the consumption boundary.
+        // Reload uses fresh DOM and the same persisted message list.
+        elements.msgInner = new FakeElement('div');
+        legacyCards = [];
+        S = {{
+          session: {{ session_id:'steer-order' }},
+          messages: [{{role:'user',content:'run'}}, {{role:'assistant',content:'first token',
+            tool_calls:[{{id:'call1',function:{{name:'terminal',arguments:'{{}}'}}}}]}},
+            {{role:'tool',tool_call_id:'call1',content:'tool result'}}],
+          toolCalls: [], busy: true,
+        }};
+        renderMessages();
+        const liveTurns = elements.msgInner.querySelectorAll('.assistant-turn');
+        elements.liveAssistantTurn = liveTurns[liveTurns.length-1];
+        _showSteerIndicator('use B',[]);
+        const liveSteerRows=elements.msgInner.querySelectorAll('.steer-row-live').length;
+        const liveBeforeFinal=!!(elements.liveAssistantTurn&&elements.liveAssistantTurn.querySelector('.steer-row-live'));
+        const settledMessages=[...S.messages,
+          {{role:'user',display_kind:'steer',content:'use B'}},
+          {{role:'assistant',content:'final after steer'}}];
+        const orderedRows=()=>elements.msgInner.children.map(el=>el.dataset.role==='steer'?'steer':
+          el.classList.contains('assistant-turn')?'assistant':el.dataset.role||el.className);
+        S.messages=settledMessages;
+        S.busy=false;
+        elements.msgInner=new FakeElement('div');
+        renderMessages();
+        const settledOrder=orderedRows();
+        const settledSteerRows=elements.msgInner.querySelectorAll('.steer-row').length;
+        elements.msgInner=new FakeElement('div');
+        renderMessages();
+        const reloadOrder=orderedRows();
+        const reloadSteerRows=elements.msgInner.querySelectorAll('.steer-row').length;
+
         console.log(JSON.stringify({{
           selectorSanity,
           anchorSummary,
           historicalSummary,
           rawHistoricalSummary,
           duplicateReferenceSummary,
+          steerOrder:{{liveSteerRows,liveBeforeFinal,settledOrder,settledSteerRows,reloadOrder,reloadSteerRows}},
         }}));
         """
     )
@@ -900,6 +940,14 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
     assert {card["tid"] for card in duplicate_cards} == {"toolu_hist_dup"}
     assert "toolu_anchor_dup" not in {card["tid"] for card in duplicate_cards}
     assert duplicate_cards[0]["snippet"] == "historical persisted result"
+
+    order = result["steerOrder"]
+    assert order["liveSteerRows"] == 1
+    assert order["liveBeforeFinal"] is True
+    assert order["settledOrder"] == ["user", "assistant", "steer", "assistant"]
+    assert order["settledSteerRows"] == 1
+    assert order["reloadOrder"] == order["settledOrder"]
+    assert order["reloadSteerRows"] == 1
 
 
 def test_settled_legacy_tool_rebuild_excludes_anchor_owned_turns():
