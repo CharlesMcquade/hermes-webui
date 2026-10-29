@@ -21331,6 +21331,7 @@ function renderMessages(options){
   // connected and the streamed text visible. Only for the streaming session's own
   // live turn; never affects settled transcripts.
   let _preservedLiveTurn=null;
+  let _preservedLiveSteer=null;
   if(sid&&INFLIGHT[sid]){
     const _lt=document.getElementById('liveAssistantTurn');
     if(_lt&&(!_lt.dataset||!_lt.dataset.sessionId||_lt.dataset.sessionId===sid)){
@@ -21367,6 +21368,13 @@ function renderMessages(options){
       const _paneSettled=S.busy===false && !S.activeStreamId;
       if(S.activeStreamId || (_hasLiveAssistantProjection && !_paneSettled)){
         _preservedLiveTurn=_lt;
+        // #8559 review item 3: the live Steer row is a direct child of inner
+        // (commands.js _showSteerIndicator appends it after the live turn),
+        // so the same wipe that orphans the live turn also orphans it.
+        // Capture it under this same proven-live ownership guard so a
+        // mid-stream rebuild can re-attach it.
+        const _steerHost=document.getElementById('msgInner');
+        _preservedLiveSteer=_steerHost?_steerHost.querySelector('[data-live-steer="1"]'):null;
       }
     }
   }
@@ -22970,6 +22978,17 @@ function renderMessages(options){
           inner.appendChild(_preservedLiveTurn);
         }
       }
+    }
+    // #8559 review item 3: a live Steer row captured above must survive the
+    // rebuild. Re-attach at the end of inner — its correct position after the
+    // (possibly restored) live turn. Owner-walk guard keeps this idempotent
+    // when the rebuild path left the row attached (render-cache hit).
+    if(_preservedLiveSteer){
+      let _steerStillOwned=false;
+      for(let _n=_preservedLiveSteer;_n;_n=_n.parentElement){
+        if(_n===inner){_steerStillOwned=true;break;}
+      }
+      if(!_steerStillOwned) inner.appendChild(_preservedLiveSteer);
     }
   }
   // Fail-safe invariant (#3875): a settled assistant turn must never render with
