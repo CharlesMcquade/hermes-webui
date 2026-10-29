@@ -1944,6 +1944,16 @@ function _messageWindowNodeKey(node){
   const rows=node.matches('[data-msg-idx]')?[node]:Array.from(node.querySelectorAll('[data-msg-idx]'));
   return rows.length?rows.map(row=>row.dataset.sessionMsgIdx+':'+(row.dataset.messageAnchorKey||'')).join(';'):'';
 }
+// #8559 review item 3: a live Steer row captured by renderMessages() must
+// survive a mid-stream rebuild. Re-attach at the end of inner, its correct
+// position after the (possibly restored) live turn. The owner walk keeps this
+// idempotent when the rebuild left the row attached (render-cache hit).
+function _reattachPreservedLiveSteer(inner, steer){
+  if(!inner||!steer) return;
+  for(let n=steer;n;n=n.parentElement){ if(n===inner) return; }
+  inner.appendChild(steer);
+}
+
 function _reconcilePreservedLiveTurn(inner, _preservedLiveTurn){
   // Re-attach the preserved live turn (#3877). The rebuild above recreated a
   // live turn from S.messages, but the live assistant message's content lags the
@@ -20926,6 +20936,7 @@ function renderMessages(options){
   // connected and the streamed text visible. Only for the streaming session's own
   // live turn; never affects settled transcripts.
   let _preservedLiveTurn=null;
+  let _preservedLiveSteer=null;
   if(sid&&INFLIGHT[sid]){
     const _lt=document.getElementById('liveAssistantTurn');
     if(_lt&&(!_lt.dataset||!_lt.dataset.sessionId||_lt.dataset.sessionId===sid)){
@@ -20951,6 +20962,13 @@ function renderMessages(options){
       );
       if(S.activeStreamId || _hasLiveAssistantProjection){
         _preservedLiveTurn=_lt;
+        // #8559 review item 3: the live Steer row is a direct child of inner
+        // (commands.js _showSteerIndicator appends it after the live turn),
+        // so the same wipe that orphans the live turn also orphans it.
+        // Capture it under this same proven-live ownership guard so a
+        // mid-stream rebuild can re-attach it.
+        const _steerHost=document.getElementById('msgInner');
+        _preservedLiveSteer=_steerHost?_steerHost.querySelector('[data-live-steer="1"]'):null;
       }
     }
   }
@@ -22529,6 +22547,7 @@ function renderMessages(options){
   if(ownedWindow){
     for(const row of inner.querySelectorAll('[data-msg-idx]')) row.style.contentVisibility='visible';
     _reconcilePreservedLiveTurn(inner,_preservedLiveTurn);
+  _reattachPreservedLiveSteer(inner,_preservedLiveSteer);
     _commitMessageWindow(liveInner,inner,windowAnchor,windowOnly);
     // Open-state restoration during staging has no laid-out nested geometry.
     // Restore result-body offsets only after the staged nodes are connected.
@@ -22548,6 +22567,7 @@ function renderMessages(options){
   }
   if(virtualWindow.virtualized) for(const row of inner.querySelectorAll('[data-msg-idx]')) row.style.contentVisibility='visible';
   _reconcilePreservedLiveTurn(inner,_preservedLiveTurn);
+  _reattachPreservedLiveSteer(inner,_preservedLiveSteer);
   // Only force-scroll when not actively streaming — mid-stream re-renders
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.

@@ -492,9 +492,12 @@ def _scenario_script() -> str:
     evals = "\n".join(
         f"eval({json.dumps(_function_source(js, name))});" for name in _REAL_FUNCTIONS
     )
+    # renderMessages()'s lastQuestionRawIdx loop calls _isSteerDisplayMessage;
+    # the harness needs the steer helper region or it dies with a ReferenceError.
+    steer_source = js[js.index("const _STEER_OOB_OPEN_RE"):js.index("\nfunction setStatus", js.index("const _STEER_OOB_OPEN_RE"))]
     return (textwrap.dedent(_DOM_SHIM) + "\nlet _messageWindowRevision=0;\n"
             + "function _rememberMessageWindowReader(){}\n" + evals + "\n"
-            + textwrap.dedent(_SCENARIO))
+            + f"eval({json.dumps(steer_source)});\n" + textwrap.dedent(_SCENARIO))
 
 
 def test_stale_markers_do_not_suppress_current_summary_and_task_owner_is_unique():
