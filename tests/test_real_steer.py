@@ -421,7 +421,7 @@ class TestFrontendWiring:
         body = _source_between(cmds, "async function _trySteer(", "\nasync function cmdTitle")
         assert "const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;" in body
         assert "const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];" in body
-        assert "steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot)" in body
+        assert "steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot,paths=>{steerUploadedPaths=paths;})" in body
         assert "session_id:ownerSid" in body
         assert "user_text:originalMsg" in body, "one user-authored value must own visible and runtime text"
         assert "attachment_paths:attachmentPaths" in body, "uploaded paths must cross as structured data"

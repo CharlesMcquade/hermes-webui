@@ -424,7 +424,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
     # branch (INFLIGHT + activeStreamId set), which calls these helpers.
     preserve_helpers_source = "\n".join(
         _function_source(_ui_js(), name)
-        for name in ("_normalizeTransferredLiveProse", "_liveAssistantSegmentTextLength", "_reattachPreservedLiveSteer")
+        for name in ("_liveAssistantSegmentTextLength", "_reattachPreservedLiveSteer")
     )
     ui = _ui_js()
     steer_source = ui[ui.index("const _STEER_OOB_OPEN_RE"):ui.index("\nfunction setStatus", ui.index("const _STEER_OOB_OPEN_RE"))]

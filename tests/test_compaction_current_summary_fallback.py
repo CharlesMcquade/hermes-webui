@@ -25,6 +25,7 @@ from tests.test_anchor_fallback_ownership import (
 
 
 _REAL_FUNCTIONS = (
+    "_reattachPreservedLiveSteer",
     "_transparentStreamOrderedParts",
     "_legacySettledFallbackHasToolMetadata",
     "_isContextCompactionText",
