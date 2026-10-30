@@ -25440,7 +25440,13 @@ function _showFileContextMenu(e, item){
   // on touch the icon sits inside the row's tap target). The icon keeps its
   // plain file-type glyph; the row's own click flow (preview / whole-row
   // download for DOWNLOAD_EXTS) is unchanged.
-  if(!isDirLike && !isReadOnlyEscape){
+  // Display-only external symlinks (#4581: target outside the workspace) are
+  // excluded — downloadFile() builds an ordinary /api/file/raw URL that the
+  // raw resolver 404s for unauthorized outside-workspace targets, so the item
+  // would be a dead action. Their row click keeps the established escape-grant
+  // flow (2026-10-29 review P2).
+  const isDisplayOnlyExternalLink=item.type==='symlink'&&!!item.target_outside_workspace;
+  if(!isDirLike && !isReadOnlyEscape && !isDisplayOnlyExternalLink){
     const fileDlItem=document.createElement('div');
     fileDlItem.textContent=t('media_download');
     fileDlItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';

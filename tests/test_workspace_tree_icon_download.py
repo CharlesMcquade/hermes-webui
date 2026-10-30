@@ -27,8 +27,15 @@ already rejected in an earlier round):
   * the PDF preview panel's Download button (#btnDownloadFile) still covers
     one-click downloads from preview.
 
-These tests static-analyze static/ui.js and drive the icon block through a
-Node VM.
+2026-10-29 review (head 211c502c): the Download item must also stay off
+display-only external symlinks (target_outside_workspace) — downloadFile()
+builds an ordinary /api/file/raw URL that the raw resolver 404s for
+unauthorized outside-workspace targets, so the item would be a dead action.
+The menu tests below EXECUTE _showFileContextMenu against a modeled DOM and
+click the Download action (the review rejected source-only assertions).
+
+These tests static-analyze static/ui.js and drive the icon block and the
+context menu through Node VMs.
 """
 import json
 import re
@@ -173,9 +180,20 @@ class TestContextMenuDownloadItem:
 
     def test_file_download_item_off_read_only_escape_path(self):
         menu = _context_menu_fn()
-        assert re.search(r"if\(!isDirLike && !isReadOnlyEscape\)", menu), (
+        assert re.search(
+            r"if\(!isDirLike && !isReadOnlyEscape && !isDisplayOnlyExternalLink\)", menu
+        ), (
             "the file Download item must stay off the read-only escape path "
-            "(authorized external symlinks keep their gated navigation flow)"
+            "(authorized external symlinks keep their gated navigation flow) "
+            "and off display-only external links (2026-10-29 review P2)"
+        )
+
+    def test_file_download_item_excludes_display_only_external_links(self):
+        menu = _context_menu_fn()
+        assert "isDisplayOnlyExternalLink" in menu, (
+            "the file Download gate must exclude display-only external symlinks "
+            "(target_outside_workspace) — downloadFile() would build an ordinary "
+            "/api/file/raw URL the raw resolver 404s for those targets"
         )
 
     def test_download_folder_item_unchanged(self):
@@ -377,3 +395,151 @@ class TestIconClickBubblesToRow:
         out = _run_node_vm(item_type="file", read_only_escape=True)
         assert out["iconHasHandler"] is False
         assert out["downloadCalls"] == []
+
+
+# ── Behavioral tests: execute _showFileContextMenu and click items ────────────
+
+
+def _menu_vm(item: dict, escape_grant: bool = False) -> dict:
+    """Execute the real _showFileContextMenu() source against a modeled DOM.
+
+    The mock captures the menu appended to document.body, and (optionally)
+    clicks the file Download item so the action itself runs — the 2026-10-29
+    review asked for execution of the new menu action, not source assertions.
+    """
+    payload = {"fnSource": _context_menu_fn(), "item": item, "escapeGrant": escape_grant}
+    js = (
+        "const params = " + json.dumps(payload) + ";\n"
+        + r"""
+let menus = [];
+const downloadCalls = [];
+const document = {
+  body: { appendChild(el) { menus.push(el); } },
+  querySelectorAll() { return []; },
+  createElement(tag) {
+    return {
+      tagName: tag.toUpperCase(), className: '', textContent: '',
+      style: {}, children: [], removed: false,
+      appendChild(c) { this.children.push(c); },
+      remove() { this.removed = true; },
+      onclick: null, onmouseenter: null, onmouseleave: null,
+    };
+  },
+  addEventListener() {}, removeEventListener() {},
+};
+const window = { innerWidth: 1920, innerHeight: 1080 };
+// Identity label map: menu items are matched by their t() key.
+const t = (key) => ({ media_download: 'Download', download_folder: 'Download Folder' }[key] || key);
+const _workspaceContextMenuItem = (label, fn) => ({ textContent: label, _action: fn });
+const _workspaceParentDir = (p) => 'dir';
+const _workspaceEscapeGrantForPath = () => (params.escapeGrant ? { path: params.item.path } : null);
+const downloadFile = (path) => { downloadCalls.push(path); };
+const setTimeout = () => {};  // do not wire the dismiss listener
+
+const runner = new Function(
+  'document', 'window', 't', '_workspaceContextMenuItem', '_workspaceParentDir',
+  '_workspaceEscapeGrantForPath', 'downloadFile', 'setTimeout', 'event', 'item',
+  params.fnSource + '\n_showFileContextMenu(event, item);'
+);
+runner(document, window, t, _workspaceContextMenuItem, _workspaceParentDir,
+       _workspaceEscapeGrantForPath, downloadFile, setTimeout,
+       { clientX: 100, clientY: 100 }, params.item);
+
+const menu = menus[0];
+if (!menu) throw new Error('no context menu appended to document.body');
+const labels = menu.children.map((c) => c.textContent);
+const dlItem = menu.children.find((c) => c.textContent === t('media_download')) || null;
+let clickedDownload = false;
+if (dlItem && typeof dlItem.onclick === 'function') { dlItem.onclick(); clickedDownload = true; }
+
+console.log(JSON.stringify({
+  labels,
+  menuRemoved: menu.removed,
+  downloadCalls,
+  clickedDownload,
+}));
+"""
+    )
+    r = subprocess.run(
+        [str(NODE), "-e", js],
+        capture_output=True, text=True, timeout=30,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"node failed: {r.stderr}")
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+class TestContextMenuDownloadActionExecuted:
+    """Behavioral contract from the 2026-10-29 review (PRR at head 211c502c):
+
+    the file Download action must NOT be offered for display-only external
+    symlinks (target outside the workspace — downloadFile() builds an ordinary
+    /api/file/raw URL the raw resolver 404s for those targets), while ordinary
+    files and internal symlinks keep a working Download item whose click really
+    calls downloadFile(item.path).
+    """
+
+    EXTERNAL_LINK = {
+        "name": "receipt-link.pdf", "path": "receipt-link.pdf",
+        "type": "symlink", "is_dir": False, "target_outside_workspace": True,
+    }
+    INTERNAL_LINK = {
+        "name": "notes-link.txt", "path": "notes-link.txt", "type": "symlink",
+        "target": "/workspace/real/notes.txt", "is_dir": False,
+        "target_outside_workspace": False,
+    }
+    ORDINARY_FILE = {
+        "name": "report.pdf", "path": "report.pdf", "type": "file", "is_dir": False,
+    }
+
+    def test_external_symlink_row_offers_no_download(self):
+        out = _menu_vm(self.EXTERNAL_LINK)
+        assert "Download" not in out["labels"], (
+            f"display-only external symlink must not get a Download item — "
+            f"downloadFile() would hit a 404 raw URL; menu items: {out['labels']}"
+        )
+        assert out["downloadCalls"] == [], out
+        # The row keeps its other (working) file actions.
+        assert "rename_title" in out["labels"], (
+            f"external-link row must keep its regular menu items; got {out['labels']}"
+        )
+        assert not out["clickedDownload"], out
+
+    def test_external_symlink_with_escape_grant_stays_fully_gated(self):
+        """Pre-existing contract: an authorized (read-only escape) row keeps the
+        gated navigation flow — no Download, no destructive/authoring items."""
+        out = _menu_vm(self.EXTERNAL_LINK, escape_grant=True)
+        assert "Download" not in out["labels"], out
+        assert "rename_title" not in out["labels"], (
+            f"escape-granted row must keep the read-only menu shape; got {out['labels']}"
+        )
+        assert out["downloadCalls"] == [], out
+
+    def test_ordinary_file_download_click_downloads(self):
+        out = _menu_vm(self.ORDINARY_FILE)
+        assert out["clickedDownload"] is True, (
+            f"ordinary file must offer a clickable Download item; got {out}"
+        )
+        assert out["downloadCalls"] == ["report.pdf"], (
+            f"clicking Download must call downloadFile(item.path); got {out}"
+        )
+        assert out["menuRemoved"] is True, (
+            "the menu must close before the download action runs"
+        )
+
+    def test_internal_symlink_download_click_downloads(self):
+        out = _menu_vm(self.INTERNAL_LINK)
+        assert out["clickedDownload"] is True, (
+            f"internal symlink must keep a clickable Download item; got {out}"
+        )
+        assert out["downloadCalls"] == ["notes-link.txt"], out
+
+    def test_dir_row_keeps_download_folder_only(self):
+        out = _menu_vm({"name": "assets", "path": "assets", "type": "dir", "is_dir": True})
+        assert "Download Folder" in out["labels"], (
+            f"directories keep the existing Download Folder action; got {out['labels']}"
+        )
+        assert "Download" not in out["labels"], (
+            f"directory rows must not gain the file Download item; got {out['labels']}"
+        )
+        assert out["downloadCalls"] == [], out
