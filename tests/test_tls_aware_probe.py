@@ -17,6 +17,7 @@ import http.server
 import importlib.util
 import os
 import socket
+import ssl
 import subprocess
 import threading
 from pathlib import Path
@@ -41,14 +42,39 @@ def _free_port() -> int:
 
 
 class _HealthHandler(http.server.BaseHTTPRequestHandler):
+    # Frame the body with Content-Length, as the real /health does (api/routes.py
+    # answers HTTP/1.1 with a length). Without one, the body ends at connection
+    # close, and http.server closes the TLS socket without a close_notify alert.
+    # curl 8.18 on OpenSSL 3.5 (ubuntu-26.04 runners) rejects that as a possibly
+    # truncated transfer, so the probe failed against this fake server while the
+    # same probe against a length-framed server passed.
     def do_GET(self):  # noqa: N802
+        body = b'{"status": "ok"}'
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(b'{"status": "ok"}')
+        self.wfile.write(body)
 
     def log_message(self, *args):  # suppress server log noise during tests
         pass
+
+
+def _stdlib_ssl_context_class() -> type:
+    """The stdlib ``ssl.SSLContext``, even after ``truststore.inject_into_ssl()``.
+
+    Hermes Agent's ``agent/ssl_verify.py`` injects truststore process-wide, and an
+    earlier test in the same pytest process can import it. truststore's
+    ``SSLContext.wrap_socket`` then verifies a peer chain even on this
+    server-side listening socket, which has none yet, and raises
+    ``AttributeError: 'NoneType' object has no attribute 'get_unverified_chain'``.
+    Walk back to the stdlib class rather than patching global SSL state (same
+    approach as ``tests/test_bootstrap_port_preflight.py``).
+    """
+    cls = ssl.SSLContext
+    while cls.__module__ != "ssl" and cls.__bases__:
+        cls = cls.__bases__[0]
+    return cls
 
 
 class _Server:

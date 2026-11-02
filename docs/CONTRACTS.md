@@ -27,6 +27,11 @@ contributor guidance; it does not change runtime behavior or CI gates.
   opt-in private local continuation, settled-session binding, supervisor proof,
   durable admission receipts, ambiguity policy, and single-owner scope.
 
+- [`docs/architecture/model-picker-routing.md`](architecture/model-picker-routing.md):
+  current contract for provider-scoped model identity, exact OpenRouter route
+  matching, overflow promotion, routed fallback, and selected-row rendering.
+  Start here before changing model-picker deduplication, restoration, or live
+  catalog merging.
 - [`docs/remote-workspaces.md`](remote-workspaces.md):
   architecture contract for remote terminal workspaces (SSH/Docker), target-side
   POSIX path preservation against macOS synthetic firmlink expansion, and
@@ -289,6 +294,9 @@ does not match the touched subsystem.
   failures.
 - [`docs/EXTENSIONS.md`](EXTENSIONS.md): administrator-controlled WebUI
   extension injection.
+- [`docs/scripts-panel.md`](scripts-panel.md): the Tasks panel's Scripts
+  subtab — the active profile's `~/.hermes/scripts/` directory, the
+  read-only endpoints, and the containment rules.
 
 ## Quick redline checklist
 

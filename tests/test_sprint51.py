@@ -42,9 +42,9 @@ class TestCancelStreamEagerRelease:
         STREAMS[stream_id] = q
         CANCEL_FLAGS[stream_id] = threading.Event()
 
-        result = cancel_stream(stream_id)
-
-        assert result["cancelled"] is True
+        # Stale overlay-era dict asserts converted: upstream cancel_stream
+        # returns BOOL (AGENTS test gotchas; attested 2026-11-02).
+        assert cancel_stream(stream_id) is True
         assert stream_id not in STREAMS, \
             "cancel_stream() should eagerly pop from STREAMS to release the session lock"
 
@@ -154,13 +154,11 @@ class TestCancelStreamEagerRelease:
         AGENT_INSTANCES[stream_id] = mock_agent
 
         # First cancel
-        result1 = cancel_stream(stream_id)
-        assert result1["cancelled"] is True
+        assert cancel_stream(stream_id) is True
         assert stream_id not in STREAMS
 
         # Second cancel (stream already popped)
-        result2 = cancel_stream(stream_id)
-        assert result2["cancelled"] is False
+        assert cancel_stream(stream_id) is False
 
     def test_cancel_handle_get_session_failure(self):
         """Cancel should not raise even if get_session fails."""
@@ -177,5 +175,5 @@ class TestCancelStreamEagerRelease:
             # Should not raise
             result = cancel_stream(stream_id)
 
-        assert result["cancelled"] is True
+        assert result is True
         assert stream_id not in STREAMS

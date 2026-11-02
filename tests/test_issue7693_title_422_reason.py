@@ -177,7 +177,12 @@ def _post_regenerate(monkeypatch, reason, next_title=""):
         lambda s, prefer_latest=False: (next_title, reason, "raw-model-output"),
     )
 
-    def _persist(s, title, event_reason=None):
+    def _persist(s, title, event_reason=None, *args, **kwargs):
+        # Stale-stub fix (merge-candidate run, 2026-11-02): the merged
+        # regenerate route forwards the optimistic-concurrency title guards
+        # (expected_title/expected_db) to the persistence helper. The stub
+        # accepts and ignores them; the guards themselves are covered by the
+        # real _persist_generated_session_title tests.
         persisted.append(title)
         s.title = title
 

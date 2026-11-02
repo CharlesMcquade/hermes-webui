@@ -21,9 +21,21 @@ def post(path, body=None):
 
 
 def make_outside_trusted_dir(prefix):
+    # Harness fix (merge-candidate run, 2026-11-02): the fallback to REPO_ROOT
+    # (below) is only "outside trusted roots" when the repo itself lives
+    # outside the user home. In worktree checkouts under ~ (e.g.
+    # ~/hermes-dev/...), REPO_ROOT IS under home, so resolve_trusted_workspace
+    # accepts the dir via rule (A) and the endpoint legitimately returns 200.
+    # Attest: upstream e38230b5 passes this file verbatim (identical md5);
+    # only the checkout location differs. Anchor outside-home dirs on
+    # /private/tmp (macOS /tmp), which is never under Path.home() on this
+    # host; fall back to REPO_ROOT only when /private/tmp is unusable.
     home_root = pathlib.Path.home().resolve()
+    outside_base = pathlib.Path("/private/tmp") if pathlib.Path("/private/tmp").is_dir() and home_root not in pathlib.Path("/private/tmp").resolve().parents else None
     temp_root = pathlib.Path(tempfile.gettempdir()).resolve()
-    base_root = temp_root if temp_root != home_root and home_root not in (temp_root, *temp_root.parents) else REPO_ROOT
+    if outside_base is None and temp_root != home_root and home_root not in (temp_root, *temp_root.parents):
+        outside_base = temp_root
+    base_root = outside_base if outside_base is not None else REPO_ROOT
     outside_root = base_root / ".tmp-outside-trusted"
     outside_root.mkdir(exist_ok=True)
     return pathlib.Path(tempfile.mkdtemp(prefix=f"{prefix}-", dir=outside_root))

@@ -118,8 +118,15 @@ def test_issue6623_owner_must_be_captured_before_stream_pop(tmp_path, monkeypatc
         result = streaming.cancel_stream(stream_id)
 
     assert result is True
-    assert m_get_session.call_count >= 1, (
-        f"Expected 'get_session' to be called once. Called {m_get_session.call_count} times. "
+    # Union note: upstream's base impl resolves get_session once (cleanup). Our
+    # fork's #6623 re-gate (_resolve_current_session_for_write) additionally
+    # re-resolves the CURRENT session object under the canonical lock before any
+    # delayed-cancel write, so the merged impl makes exactly two get_session
+    # calls: 1 cleanup + 1 re-gate re-resolution. Cleanup still runs exactly
+    # once and the owner is still captured before the STREAMS pop.
+    assert m_get_session.call_count == 2, (
+        f"Expected 'get_session' to be called twice (1 cleanup + 1 fork re-gate "
+        f"re-resolution). Called {m_get_session.call_count} times. "
         "The stream owner must be captured BEFORE the STREAMS pop."
     )
     assert s.active_stream_id is None
@@ -163,7 +170,10 @@ def test_issue6623_newer_stream_stale_writeback_still_rejected(tmp_path, monkeyp
         result = streaming.cancel_stream(stream_id)
 
     assert result is True
-    assert m_get_session.call_count >= 1
+    # Union note: 1 cleanup call + 1 fork #6623 re-gate re-resolution
+    # (_resolve_current_session_for_write) = exactly two get_session calls in
+    # the merged impl. Stale-writeback rejection semantics unchanged.
+    assert m_get_session.call_count == 2
     assert s.active_stream_id == "newer-stream"
     assert s.pending_user_message == "newer prompt"
     s.save.assert_not_called()
@@ -299,7 +309,7 @@ def test_issue6623_delayed_cancel_finalizer_gated_by_stream_ownership():
     models.SESSIONS[s3.session_id] = s3
     config.register_session_writeback_owner(s3.session_id, old_stream)
     streaming._finalize_cancelled_turn(s3, ephemeral=False, stream_id=old_stream)
-    assert s3.save.call_count >= 1  # PR #6405: settlement path may save twice (cancel marker + active_stream_id clear)
+    s3.save.assert_called_once()
     assert s3.active_stream_id is None
     assert streaming._session_has_cancel_marker(s3) is True
 
@@ -384,7 +394,7 @@ def test_issue6623_stale_recovery_successor_survives_delayed_cancel_finalizer(
 
     # 2) Cancel through the real production path.
     with patch("api.streaming.get_session", return_value=s):
-        assert streaming.cancel_stream(old_stream)["cancelled"] is True
+        assert streaming.cancel_stream(old_stream) is True
     assert s.active_stream_id is None
     assert streaming._session_has_cancel_marker(s)
 
@@ -520,7 +530,7 @@ def test_issue6623_replaced_session_successor_survives_delayed_cancel_finalizer(
     config.register_active_run(old_stream, session_id=sid, phase="running")
 
     # 2) Cancel through the real production path.
-    assert streaming.cancel_stream(old_stream)["cancelled"] is True
+    assert streaming.cancel_stream(old_stream) is True
     assert s_old.active_stream_id is None
     assert streaming._session_has_cancel_marker(s_old)
     _old_messages_after_cancel = len(s_old.messages)
@@ -624,7 +634,7 @@ def test_issue6623_replaced_session_completed_successor_still_protected_by_owner
     config.STREAMS[old_stream] = queue.Queue()
     config.CANCEL_FLAGS[old_stream] = threading.Event()
     config.register_active_run(old_stream, session_id=sid, phase="running")
-    assert streaming.cancel_stream(old_stream)["cancelled"] is True
+    assert streaming.cancel_stream(old_stream) is True
 
     monkeypatch.setattr(models, "SESSIONS_MAX", 2)
     for i in range(4):
@@ -710,7 +720,7 @@ def test_issue6623_replaced_session_process_wakeup_pause_merges_into_current(
     config.STREAMS[old_stream] = queue.Queue()
     config.CANCEL_FLAGS[old_stream] = threading.Event()
     config.register_active_run(old_stream, session_id=sid, phase="running")
-    assert streaming.cancel_stream(old_stream)["cancelled"] is True
+    assert streaming.cancel_stream(old_stream) is True
 
     monkeypatch.setattr(models, "SESSIONS_MAX", 2)
     for i in range(4):
@@ -810,7 +820,7 @@ def test_issue6623_completed_successor_teardown_cleared_owner_blocks_old_finaliz
     config.register_active_run(old_stream, session_id=sid, phase="running")
 
     # 2) Cancel the old turn through the real production path.
-    assert streaming.cancel_stream(old_stream)["cancelled"] is True
+    assert streaming.cancel_stream(old_stream) is True
     assert s_old.active_stream_id is None
     assert streaming._session_has_cancel_marker(s_old)
     _old_messages_after_cancel = len(s_old.messages)

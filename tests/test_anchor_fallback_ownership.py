@@ -408,30 +408,32 @@ def test_transparent_raw_content_fallback_exits_for_anchor_owned_messages():
     }
 
 
-def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds():
-    """Drive the real renderMessages() gate, not only source-order assertions."""
+def _render_messages_harness() -> str:
+    """Node prelude that evaluates the real renderMessages() over a minimal fake DOM."""
 
-    render_source = _function_source(_ui_js(), "renderMessages")
-    transparent_source = _function_source(_ui_js(), "_transparentStreamOrderedParts")
-    legacy_metadata_source = _function_source(
-        _ui_js(), "_legacySettledFallbackHasToolMetadata"
-    )
+    ui = _ui_js()
+    transparent_source = _function_source(ui, "_transparentStreamOrderedParts")
+    legacy_metadata_source = _function_source(ui, "_legacySettledFallbackHasToolMetadata")
     # #2051: renderMessages() inserts a message block through this helper, so it is
     # evaluated with it. The shim's createElement() returns no template `content`, so the
     # helper takes its insertAdjacentHTML fallback here, exactly as before.
-    insert_block_source = _function_source(_ui_js(), "_insertSegmentBlock")
+    insert_block_source = _function_source(ui, "_insertSegmentBlock")
     # The mid-stream rebuild section drives renderMessages()'s #3877 preserve
     # branch (INFLIGHT + activeStreamId set), which calls these helpers.
     preserve_helpers_source = "\n".join(
         _function_source(_ui_js(), name)
         for name in ("_liveAssistantSegmentTextLength", "_reattachPreservedLiveSteer")
     )
-    ui = _ui_js()
     steer_source = ui[ui.index("const _STEER_OOB_OPEN_RE"):ui.index("\nfunction setStatus", ui.index("const _STEER_OOB_OPEN_RE"))]
     commands = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
     live_steer_source = _function_source(commands, "_showSteerIndicator")
-    script = textwrap.dedent(
-        f"""
+    sessions_js = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    # renderMessages() delegates to these on every settled worklog pass.
+    evals = "".join(f"eval({json.dumps(_function_source(src, n))});" for src, n in (
+        (ui, "_isDelegatedSubagentTranscript"), (ui, "_worklogGroupKey"),
+        (ui, "_subagentOpenWorklogTurn"), (sessions_js, "_isChildSession"),
+        (sessions_js, "_isDelegatedSubagentRow"), (ui, "renderMessages")))
+    return f"""
         class FakeClassList {{
           constructor(el) {{ this.el = el; }}
           _set() {{ return new Set(String(this.el.className || '').split(/\\s+/).filter(Boolean)); }}
@@ -472,6 +474,11 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
             if (idx < 0) this.children.push(child);
             else this.children.splice(idx, 0, child);
             return child;
+          }}
+          get previousElementSibling() {{
+            const sibs = this.parentElement ? this.parentElement.children : [];
+            const idx = sibs.indexOf(this);
+            return idx > 0 ? sibs[idx - 1] : null;
           }}
           remove() {{
             if (!this.parentElement) return;
@@ -672,6 +679,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           const group = new FakeElement('div');
           group.className = 'tool-worklog-group tool-call-group agent-activity-group';
           group.setAttribute('data-legacy-fallback-owner', '1');
+          group.setAttribute('data-collapsed', String(!!(opts && opts.collapsed)));
           const anchor = opts && opts.anchor;
           if (parent && anchor && anchor.parentElement === parent) parent.insertBefore(group, anchor);
           else if (parent) parent.appendChild(group);
@@ -732,7 +740,15 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         eval({json.dumps(preserve_helpers_source)});
         eval({json.dumps(steer_source)});
         eval({json.dumps(live_steer_source)});
-        eval({json.dumps(render_source)});
+        {evals}
+"""
+
+
+def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds():
+    """Drive the real renderMessages() gate, not only source-order assertions."""
+
+    script = textwrap.dedent(
+        f"""{_render_messages_harness()}
 
         const toolResult = {{ role: 'tool', tool_call_id: 'toolu_1', content: 'tool result' }};
         const selectorSanityElement = new FakeElement('div');
@@ -868,6 +884,7 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
           sToolCalls: S.toolCalls.length,
         }};
 
+
         // Drive the real live-row helper after a rendered tool turn, then drive
         // the real settled renderer with a typed Steer at the consumption boundary.
         // Reload uses fresh DOM and the same persisted message list.
@@ -922,7 +939,6 @@ def test_render_messages_keeps_anchor_owned_turn_out_of_legacy_activity_rebuilds
         renderMessages();
         const reloadOrder=orderedRows();
         const reloadSteerRows=elements.msgInner.querySelectorAll('.steer-row').length;
-
         console.log(JSON.stringify({{
           selectorSanity,
           anchorSummary,

@@ -53,6 +53,14 @@ const localStorage={setItem(key,value){
   stored.set(key,value);
 }};
 const _setActiveSessionUrl=URL_HELPER_AVAILABLE?(sid=>urls.push(sid)):undefined;
+// Merge-candidate harness fix (2026-11-02): the merged done-block now passes
+// K04a owner identity (preOwner/settledOwner) to _adoptDoneSnapshotMessages,
+// referencing the send-scope `activeSid` which lives OUTSIDE the extracted
+// region (defined at "const activeSid=S.session.session_id" earlier in
+// messages.js). The stubbed _adoptDoneSnapshotMessages ignores it, so pin the
+// pre-rotation value here; attested against merged static/messages.js.
+const activeSid='A';
+const _settledStreamId='';
 """ + block + """
 assert.equal(S.session.session_id,'B');
 assert.equal(stored.get('hermes-webui-session'),STORAGE_BLOCKED?'A':'B');

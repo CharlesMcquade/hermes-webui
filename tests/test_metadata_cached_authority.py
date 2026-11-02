@@ -35,6 +35,12 @@ def _source():
         "_captureSameSessionForceReloadHint",
         "_clearSameSessionForceReloadHint",
         "_messageReloadLimitForSession",
+        # Fork overlay (loaded-window provenance in reload hints + message
+        # fetches): _captureSameSessionForceReloadHint and
+        # _ensureMessagesLoaded call these; upstream's tree lacks them.
+        "_captureLoadedMessageWindow",
+        "_loadedMessageBoundarySignature",
+        "_preserveLoadedMessageWindow",
     )
     functions = [extract_function(sessions, name) for name in names]
     for name in ("loadSession", "_ensureMessagesLoaded", "_ensureAllMessagesLoaded"):

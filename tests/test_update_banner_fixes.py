@@ -491,7 +491,7 @@ class TestScheduleRestart:
 
 
 class TestApplyUpdateRestartSafety:
-    """Self-update must not re-exec while chat streams are active."""
+    """Self-update must not re-exec while WebUI-owned runs are active (unless forced, #7293)."""
 
     def test_apply_update_refuses_when_stream_active(self, tmp_path, monkeypatch):
         import queue
@@ -518,8 +518,12 @@ class TestApplyUpdateRestartSafety:
 
         assert result['ok'] is False
         assert result.get('active_streams') == 1
+        # #7293: a registered stream counts as one WebUI-owned run, and the
+        # refusal is no longer a dead end: an explicit force is offered.
+        assert result.get('active_runs') == 1
         assert result.get('restart_blocked') is True
-        assert 'active chat stream' in result['message']
+        assert result.get('force_available') is True
+        assert '1 WebUI agent run is active' in result['message']
         assert called == []
 
     def test_force_update_refuses_when_stream_active(self, tmp_path, monkeypatch):
@@ -546,8 +550,12 @@ class TestApplyUpdateRestartSafety:
 
         assert result['ok'] is False
         assert result.get('active_streams') == 1
+        # #7293: a registered stream counts as one WebUI-owned run, and the
+        # refusal is no longer a dead end: an explicit force is offered.
+        assert result.get('active_runs') == 1
         assert result.get('restart_blocked') is True
-        assert 'active chat stream' in result['message']
+        assert result.get('force_available') is True
+        assert '1 WebUI agent run is active' in result['message']
 
     def test_apply_update_refuses_when_active_run_without_stream(self, tmp_path, monkeypatch):
         import api.updates as upd
@@ -581,7 +589,8 @@ class TestApplyUpdateRestartSafety:
         assert result.get('active_streams') == 0
         assert result.get('active_runs') == 1
         assert result.get('restart_blocked') is True
-        assert 'active agent run' in result['message']
+        assert result.get('force_available') is True  # #7293
+        assert '1 WebUI agent run is active' in result['message']
         assert called == []
 
     def test_force_update_refuses_when_active_run_without_stream(self, tmp_path, monkeypatch):
@@ -615,7 +624,8 @@ class TestApplyUpdateRestartSafety:
         assert result.get('active_streams') == 0
         assert result.get('active_runs') == 1
         assert result.get('restart_blocked') is True
-        assert 'active agent run' in result['message']
+        assert result.get('force_available') is True  # #7293
+        assert '1 WebUI agent run is active' in result['message']
 
     def test_wait_until_restart_safe_waits_for_active_run_to_clear(self, monkeypatch):
         import api.updates as upd
@@ -2951,7 +2961,13 @@ class TestUpdateCompareSource:
 
     def test_update_banner_clears_stale_links_when_no_updates_remain(self):
         src = read('static/ui.js')
-        start = src.find('function _showUpdateBanner(data,recoveryGenerationAtCheck=null)')
+        # Stale-test fix (merge-candidate run, 2026-11-02): the merged banner
+        # keeps a FORK union signature — `_showUpdateBanner(data,second)` —
+        # accepting either a recoveryGeneration number or an options object,
+        # then normalizes to recoveryGenerationAtCheck internally. The literal
+        # upstream signature string no longer appears; match the merged
+        # definition instead. Attested: merged static/ui.js union retained.
+        start = src.find('function _showUpdateBanner(data,second){')
         assert start != -1, "_showUpdateBanner not found"
         fn = src[start:src.find('function dismissUpdate()', start)]
         empty_idx = fn.find('if(!parts.length)')

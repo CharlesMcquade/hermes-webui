@@ -1,9 +1,9 @@
-"""The retired Realtime voice bridge must stay unreachable after overlay replay.
+"""Realtime voice was RESTORED in this fork (2026-10-13) — its entry points must stay live.
 
-Historical implementation and tests remain in the tree for provenance, but
-credential discovery must never make its browser/API entry points available.
+Upstream retired the Realtime voice bridge; the fork overlay restores it. These
+tests pin the restored surface: browser/API entry points are wired up, the
+handlers exist, and the fail-safe CSRF exemption for disconnect remains.
 """
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -17,59 +17,69 @@ ROOT = Path(__file__).resolve().parents[1]
 LIVE_ACTIONS = (
     "sdp", "connect", "disconnect", "turn", "ask", "steer", "status", "stop", "usage",
 )
+ROUTES = ("capability",) + LIVE_ACTIONS
 
 
-@pytest.mark.parametrize("action", ("capability",) + LIVE_ACTIONS)
-def test_retired_get_routes_reject_before_voice_import(action):
+@pytest.mark.parametrize("action", ("capability",))
+def test_voice_live_get_routes_dispatch_to_voice_module(action):
     handler = Mock()
     parsed = SimpleNamespace(path=f"/api/voice/live/{action}")
+    target = f"handle_voice_live_{action}"
     with patch.object(routes, "j", return_value=True) as response, patch(
-        "api.voice_live.handle_voice_live_capability", side_effect=AssertionError("voice activated")
-    ):
-        assert routes.handle_get(handler, parsed) is True
-    response.assert_called_once_with(handler, {"error": "live_voice_retired"}, status=410)
+        f"api.voice_live.{target}"
+    ) as dispatched:
+        assert routes.handle_get(handler, parsed) is not None
+    dispatched.assert_called_once_with(handler)
 
 
-@pytest.mark.parametrize("action", ("capability",) + LIVE_ACTIONS)
-def test_retired_post_routes_reject_without_reading_body(action):
+@pytest.mark.parametrize("action", LIVE_ACTIONS)  # capability is GET-only
+def test_voice_live_post_routes_dispatch_after_body_read(action):
     handler = Mock()
     parsed = SimpleNamespace(path=f"/api/voice/live/{action}")
+    target = f"handle_voice_live_{action}"
     with patch.object(routes, "j", return_value=True) as response, patch.object(
+        routes, "_handle_extension_sidecar_proxy", return_value=False
+    ), patch.object(
+        extension_auth, "request_body_too_large", return_value=False
+    ), patch.object(
+        routes, "_check_csrf", return_value=True
+    ), patch.object(
+        routes, "read_body", return_value=b"{}"
+    ) as read_body, patch.object(
         routes, "arm_connection_close_if_body_pending"
-    ) as close_body, patch.object(routes, "read_body", side_effect=AssertionError("body read")):
-        assert routes.handle_post(handler, parsed) is True
-    close_body.assert_called_once_with(handler)
-    response.assert_called_once_with(handler, {"error": "live_voice_retired"}, status=410)
+    ), patch(f"api.voice_live.{target}") as dispatched:
+        assert routes.handle_post(handler, parsed) is not None
+    # Dispatch is direct — the voice handlers own their body parsing.
+    dispatched.assert_called_once_with(handler)
+    read_body.assert_not_called()
 
 
-def test_retired_routes_return_410_even_with_configured_key():
-    # Exercise the real JSON response writer; do not mint a provider session.
-    handler = Mock()
-    handler._pending_set_cookies = []
-    handler.headers = {"Content-Length": "2"}
-    with patch("api.voice_live._resolve_openai_key", return_value="fixture-only") as key_lookup:
-        assert routes.handle_get(handler, SimpleNamespace(path="/api/voice/live/capability")) is True
-    key_lookup.assert_not_called()
-    handler.send_response.assert_called_once_with(410)
-    assert json.loads(handler.wfile.write.call_args.args[0]) == {"error": "live_voice_retired"}
-
-    handler = Mock()
-    handler._pending_set_cookies = []
-    handler.headers = {"Content-Length": "2"}
-    with patch("api.voice_live._resolve_openai_key", return_value="fixture-only") as key_lookup:
-        assert routes.handle_post(handler, SimpleNamespace(path="/api/voice/live/connect")) is True
-    key_lookup.assert_not_called()
-    handler.send_response.assert_called_once_with(410)
-    assert handler.close_connection is True
-    assert json.loads(handler.wfile.write.call_args.args[0]) == {"error": "live_voice_retired"}
+def test_disconnect_is_failsafe_csrf_exempt_and_connect_is_not():
+    # Beacon-based disconnect can only RESTORE pre-call approval state, so it
+    # is exempt; connect enables YOLO and must keep CSRF protection.
+    assert routes._csrf_exempt_path("/api/voice/live/disconnect")
+    assert not routes._csrf_exempt_path("/api/voice/live/connect")
 
 
-def test_retired_client_and_extension_have_no_voice_entry_points():
+def test_voice_live_handlers_exist():
+    import api.voice_live as voice_live
+
+    for action in ROUTES:
+        assert callable(getattr(voice_live, f"handle_voice_live_{action}"))
+
+
+def test_restored_client_and_extension_have_voice_entry_points():
     shell = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
-    assert 'id="btnLiveVoice"' not in shell
-    assert 'src="static/voice_live.js' not in shell
+    assert 'id="btnLiveVoice"' in shell
+    assert 'src="static/voice_live.js' in shell
     assert 'id="btnVoiceMode"' in shell  # ordinary voice mode remains
-    assert not routes._csrf_exempt_path("/api/voice/live/disconnect")
-    for route in ("voice/live/capability",) + tuple(f"voice/live/{x}" for x in LIVE_ACTIONS):
-        assert route not in extension_auth.CONTROL_GET
-        assert route not in extension_auth.CONTROL_POST
+    # Extension control scope: GET routes are read-only probes; POST routes
+    # carry the mutating voice actions.
+    for route in ("voice/live/capability", "voice/live/status", "voice/live/usage"):
+        assert route in extension_auth.CONTROL_GET
+    for route in (
+        "voice/live/connect", "voice/live/disconnect", "voice/live/ask",
+        "voice/live/sdp", "voice/live/steer", "voice/live/stop", "voice/live/turn",
+        "voice/live/usage",
+    ):
+        assert route in extension_auth.CONTROL_POST

@@ -21,6 +21,7 @@ function row(){
   const attrs=new Map();
   return {
     getAttribute(name){return attrs.has(name)?attrs.get(name):null;},
+    hasAttribute(name){return attrs.has(name);},
     setAttribute(name,value){writes++;attrs.set(name,String(value));},
     removeAttribute(name){if(attrs.delete(name))writes++;},
   };

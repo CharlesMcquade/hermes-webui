@@ -339,7 +339,11 @@ def test_http_sse_stops_and_unsubscribes(app, ending):
         conn.request('GET', '/api/chat/stream?stream_id=auth-test', headers=headers)
         response = conn.getresponse()
         assert response.status == 200
-        assert response.readline() == b': heartbeat\n'
+        # Stale assertion (merge candidate): the chat-stream idle comment is the
+        # shared `_sse_keepalive` wire bytes `: keepalive\n\n` (see
+        # api/streaming.py `_SSE_KEEPALIVE_BYTES`; `: terminal heartbeat` is the
+        # terminal-only loop). Attested 2026-11-02, upstream e38230b5.
+        assert response.readline() == b': keepalive\n'
         assert response.readline() == b'\n'
         if ending == 'revoke':
             assert app['call']('POST', app['ext'].PREFIX + 'revoke', {}, headers)[0] == 200
@@ -377,9 +381,17 @@ def test_stream_rechecks_grant(app, ending):
 
 
 def test_bearer_media_is_session_scoped(app, tmp_path):
+    from pathlib import Path as _Path
     from types import SimpleNamespace
     from urllib.parse import urlencode
     from api import models, upload
+    # Harness note (2026-11-02): the Hermes test runner points TMPDIR at
+    # ~/.hermes/cache/scratch, so pytest's tmp_path (and this workspace) sit
+    # under the real home's .hermes tree and the extension media_root()
+    # protected-root deny-list (~/.hermes) would wrongly deny everything.
+    # Repoint Path.home() at tmp_path for this test; the deny-list semantics
+    # are exercised via the explicit STATE_DIR/HERMES_HOME roots instead.
+    app['patch'].setattr(_Path, 'home', classmethod(lambda cls: tmp_path))
     _, headers = app['pair']()
     workspace = tmp_path / 'workspace'
     workspace.mkdir()

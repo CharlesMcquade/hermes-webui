@@ -81,9 +81,9 @@ def test_self_heal_registration_obeys_retained_stop(worker_scene, monkeypatch, f
             release.set()
         future.result(timeout=12)
         if stop_future is not None:
-            assert stop_future.result(timeout=12) == {
-                "cancelled": True, "persistence_failed": False, "stream_id": "run",
-            }
+            # Merged cancel_stream returns bool (upstream shape), not the
+            # overlay-era structured dict.
+            assert stop_future.result(timeout=12) is True
 
     if cancellation == "none":
         assert scene.calls.count("run") == 2, "valid credential refresh must still retry"

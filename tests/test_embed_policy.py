@@ -399,7 +399,10 @@ def test_authorized_stream_writer_per_write_recheck_revoked(tmp_path, monkeypatc
         response = conn.getresponse()
         assert response.status == 200
         # First heartbeat proves the write path succeeded pre-revocation.
-        assert response.readline() == b': heartbeat\n'
+        # Stale assertion (pre-existing at r12): streaming.py has emitted ': keepalive'
+# since before the r12 freeze on every tree (fork, upstream, merged). The
+# wave-2 audit flagged line 402; updating to the shipped wire format.
+        assert response.readline() == b': keepalive\n'
         assert response.readline() == b'\n'
         assert app['call']('POST', app['ext'].PREFIX + 'revoke', {}, app['pair_headers'])[0] == 200
         assert cleaned.wait(3), 'Revoked stream remained subscribed'

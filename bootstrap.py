@@ -87,6 +87,17 @@ def _launch_default_host():
 
 def _launch_default_port():
     return int(os.getenv("HERMES_WEBUI_PORT", "8787"))
+
+
+# Union note (fork overlay): the fork replaced import-time DEFAULT_HOST /
+# DEFAULT_PORT constants with the functions above so importing bootstrap stays
+# side-effect-free (.env is no longer loaded at import). The port-preflight
+# tests and external tooling still read bootstrap.DEFAULT_PORT / DEFAULT_HOST;
+# these aliases are evaluated from the ambient environment at import — .env is
+# deliberately not loaded here, so no repo secrets can leak into os.environ.
+DEFAULT_HOST = _launch_default_host()
+DEFAULT_PORT = _launch_default_port()
+
 # Set HERMES_WEBUI_SKIP_ONBOARDING=1 to bypass the first-run wizard when
 # the environment is already fully configured (e.g. managed hosting).
 

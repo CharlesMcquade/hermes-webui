@@ -23,6 +23,26 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 
+# ── isolate the route under test from the shared Agent-title preamble ──────
+# r12 added a `_generate_shared_session_title` preamble to BOTH title routes;
+# it short-circuits before these cases' patched transports when the real
+# `agent.title_generator` import resolves (it does in this environment), and a
+# provider-less attempt returns a non-None tuple that ends the case early.
+# Route cases here exercise their own route; neutralize the preamble.
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_title_preamble(monkeypatch):
+    from api import streaming
+
+    monkeypatch.setattr(streaming, "_generate_shared_session_title",
+                        lambda user_text: None)
+
+
+
 # ── _dominant_script ────────────────────────────────────────────────────────
 
 def test_dominant_script_basic_buckets():

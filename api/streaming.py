@@ -23,6 +23,7 @@ import traceback
 import unicodedata
 import copy
 import inspect
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Optional
 
@@ -32,7 +33,6 @@ from api.config import (
     get_config,
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
-    STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
     STREAM_LAST_EVENT_ID,
     stream_owned_registries,
     release_stream_owned_registries,
@@ -66,7 +66,8 @@ from api.config import (
     load_settings,
     parse_reasoning_effort,
     resolve_reasoning_effort_for_request,
-    coerce_reasoning_effort_for_model,
+    resolve_session_reasoning_effort,
+    effective_session_reasoning_effort,
     _main_model_request_overrides,
     PROCESS_SESSION_INDEX, PROCESS_SESSION_INDEX_LOCK,
 )
@@ -85,6 +86,15 @@ from api.run_journal import RunJournalWriter, TERMINAL_SSE_EVENTS
 from api.todo_state import attach_todo_state, emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
+from api.memory_profile_scope import (
+    agent_has_memory,
+    call_as_session_owner,
+    construct_profile_scoped_agent,
+    memory_status_event,
+    session_memory_status,
+    session_profile_home_or_empty,
+    turn_memory_reason,
+)
 from api.models import (
     StateDBSessionMessagesSnapshot,
     _cancelled_journal_turn_owner,
@@ -185,6 +195,16 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
         'message_count': len(messages),
     }
     attach_todo_state(raw, messages)
+    # #8517 notice: the memory status of the agent serving THIS session (after a
+    # compression, the continuation and the cached agent moved to it). Omitted when
+    # unknown; codes only.
+    try:
+        _memory_status = session_memory_status(getattr(session, 'session_id', ''), session=session)
+    except Exception:
+        _memory_status = None
+        logger.debug('[webui] #8517: memory status unavailable for the session payload', exc_info=True)
+    if _memory_status:
+        raw['memory_status'] = _memory_status
     if tool_calls is not None:
         raw['tool_calls'] = tool_calls
     try:
@@ -219,6 +239,70 @@ def _session_payload_with_full_messages(session, *, tool_calls=None):
     except Exception:
         logger.debug("OOB payload scrub failed; leaving messages unmodified", exc_info=True)
     return raw
+
+
+def _successful_skill_view_name(tool_name, function_result) -> str | None:
+    """Return the canonical name from a successful structured skill_view."""
+    if tool_name != "skill_view":
+        return None
+    result = function_result
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(result, Mapping) or result.get("success") is not True:
+        return None
+    if result.get("error"):
+        return None
+    name = result.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return name
+
+
+def _record_streaming_skill_usage(
+    session_id,
+    tool_name,
+    function_result,
+    *,
+    stream_id,
+    skill_provenance_generation,
+    ephemeral=False,
+) -> bool:
+    """Persist a successful skill_view result for the live session owner."""
+    if ephemeral or not stream_id or skill_provenance_generation is None:
+        return False
+    name = _successful_skill_view_name(tool_name, function_result)
+    if name is None:
+        return False
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    with _get_session_agent_lock(sid):
+        try:
+            current_session = get_session(sid)
+        except Exception:
+            return False
+        if current_session is None or str(getattr(current_session, "session_id", "")) != sid:
+            return False
+        if stream_id and not _stream_writeback_is_current(current_session, stream_id):
+            return False
+        if (
+            getattr(current_session, "skill_provenance_generation", 0)
+            != skill_provenance_generation
+        ):
+            return False
+        if getattr(current_session, "read_only", False):
+            return False
+        try:
+            if not current_session.record_skill_usage(name):
+                return False
+            current_session.save(touch_updated_at=False, skip_index=True)
+        except Exception:
+            logger.debug("Failed to persist streaming skill usage for %s", sid, exc_info=True)
+            return False
+    return True
 
 
 def _compact_for_echo_compare(value: str) -> str:
@@ -394,6 +478,24 @@ def _ephemeral_session_payload(session_id: str, messages) -> dict:
     return redact_session_data(
         {'session_id': session_id, 'messages': messages if isinstance(messages, list) else []}
     )
+
+
+def _put_session_memory_status(put, session_id: str, stream_id: str, profile_home: str) -> None:
+    """#8517 notice: send the UI the memory status of the agent now serving
+    ``session_id`` (``warning``/``memory_off`` or ``memory_status``/``ok``; nothing when
+    unknown). Called after an agent is registered for the turn, including each
+    credential self-heal replacement, outside the registry locks. A one-turn
+    memoryless agent is never cached, so it never changes the reported status."""
+    try:
+        event = memory_status_event(
+            session_memory_status(session_id, profile_home),
+            session_id=session_id, stream_id=stream_id,
+        )
+    except Exception:
+        logger.debug('[webui] #8517: memory status unavailable for session %s', session_id, exc_info=True)
+        return
+    if event is not None:
+        put(*event)
 
 
 def _cancel_event_payload(
@@ -771,21 +873,27 @@ def _apply_profile_home_context_to_streaming_model(
         return model, provider_context, False
 
     try:
-        from api import yaml_compat as _yaml_pp
+        from api.config import _has_env_ref
+        from api.profiles import load_profile_config
 
         _pp_cfg_path = Path(profile_home) / "config.yaml"
         if not _pp_cfg_path.is_file():
             return model, provider_context, False
 
-        _pp_cfg = _yaml_pp.safe_load(_pp_cfg_path.read_text(encoding="utf-8")) or {}
+        # config.yaml keeps raw ``${VAR}`` references (#8032): expand them under
+        # the session profile's env binding; a provider/default that stays
+        # unresolved is absent, never a provider context or repair target.
+        _pp_cfg = load_profile_config(profile_home)
         if not isinstance(_pp_cfg, dict):
             return model, provider_context, False
 
         _pp = (_pp_cfg.get("model", {}).get("provider") or "").strip()
-        if not _pp:
+        if not _pp or _has_env_ref(_pp):
             return model, provider_context, False
 
         _pp_default = (_pp_cfg.get("model", {}).get("default") or "").strip()
+        if _has_env_ref(_pp_default):
+            _pp_default = ""
         return _apply_profile_provider_context_to_streaming_model(
             model,
             provider_context,
@@ -2073,8 +2181,50 @@ def _preferred_agent_display_name_for_session(session) -> str:
     return _preferred_agent_display_name()
 
 
-def _cancelled_turn_hint(agent_name: str | None = None) -> str:
+CANCEL_INITIATOR_USER = 'user'
+# The WebUI server itself stopped the run (#7293: shutdown drain deadline,
+# escalated stop, or a forced update restart). The copy must not claim the
+# user cancelled it.
+CANCEL_INITIATOR_SERVER = 'server'
+
+
+def _cancel_initiator_is_server(initiator) -> bool:
+    return str(initiator or '').strip().lower() == CANCEL_INITIATOR_SERVER
+
+
+# stream_id -> reason, for runs a server settle is cancelling (#7293). Recorded
+# on the cancellation's STREAMS_LOCK publication edge, after the durable-Gateway
+# check, before the cancellation is published. When the settle cannot get the session
+# lock in time it falls back to interrupting first, and the released worker may
+# then finalize the turn itself; it reads this to write the server marker and
+# keep the partial output instead of the user-cancel copy. Dropped by the
+# worker's stream teardown.
+_SERVER_SETTLE_REASONS: dict[str, str] = {}
+
+
+def _server_settle_reason(stream_id) -> str | None:
+    if not stream_id:
+        return None
+    return _SERVER_SETTLE_REASONS.get(str(stream_id))
+
+
+def _worker_cancel_event_payload(stream_id) -> dict:
+    """The worker's own terminal cancel event; names the server when it settled the run."""
+    reason = _server_settle_reason(stream_id)
+    if reason is None:
+        return _cancel_event_payload('Cancelled by user')
+    payload = _cancel_event_payload(reason)
+    payload['cancel_initiator'] = CANCEL_INITIATOR_SERVER
+    return payload
+
+
+def _cancelled_turn_hint(agent_name: str | None = None, *, initiator: str = CANCEL_INITIATOR_USER) -> str:
     name = str(agent_name or _preferred_agent_display_name()).strip() or 'Hermes'
+    if _cancel_initiator_is_server(initiator):
+        return (
+            f'The WebUI server stopped this run before {name} finished; '
+            'you did not cancel it. No provider failure occurred.'
+        )
     return f'The run was cancelled by the user before {name} finished. No provider failure occurred.'
 
 
@@ -3362,18 +3512,35 @@ def _session_has_cancel_marker(session) -> bool:
     return False
 
 
-def _cancelled_turn_content(message: str = 'Task cancelled.', agent_name: str | None = None) -> str:
-    """Return cancelled-turn copy matching the verbose provider-error layout."""
+def _cancelled_turn_content(
+    message: str = 'Task cancelled.',
+    agent_name: str | None = None,
+    *,
+    initiator: str = CANCEL_INITIATOR_USER,
+) -> str:
+    """Return cancelled-turn copy matching the verbose provider-error layout.
+
+    ``initiator`` picks who the hint says stopped the run. The default (user)
+    copy is unchanged; ``"server"`` is for runs the WebUI server settled on its
+    own (#7293). The ``**Task cancelled:**`` heading stays the same for both so
+    every cancel-marker detector (``_CANCEL_MARKER_PATTERNS``) keeps working.
+    """
     _message = str(message or 'Task cancelled.').strip()
     if not _message.endswith('.'):
         _message += '.'
     return (
         f"**Task cancelled:** {_message}\n\n"
-        f"*{_cancelled_turn_hint(agent_name)}*"
+        f"*{_cancelled_turn_hint(agent_name, initiator=initiator)}*"
     )
 
 
-def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> None:
+def _persist_cancelled_turn(
+    session,
+    *,
+    message: str = 'Task cancelled.',
+    initiator: str = CANCEL_INITIATOR_USER,
+    partial_stream_id: str | None = None,
+) -> None:
     """Persist a user-cancelled terminal state without provider-error wording.
 
     cancel_stream() usually writes this marker first, but the streaming thread can
@@ -3383,6 +3550,10 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     The retired persistent fallback-notice machinery (#6405) is removed: no
     ``_fallbackNotice`` is stamped on cancelled turns; the live SSE warning is
     the only fallback surface.
+
+    ``partial_stream_id``: when this writes the marker (cancel_stream has not),
+    first keep that stream's partial output, as cancel_stream would have.
+    ``initiator="server"`` writes the server-settle marker (#7293).
     """
     _materialize_pending_user_turn_before_error(session)
     session.pending_user_message = None
@@ -3390,16 +3561,23 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     session.pending_started_at = None
     session.pending_user_source = None
     if not _session_has_cancel_marker(session):
+        if partial_stream_id:
+            try:
+                _snapshot_and_append_partial_on_error(session, partial_stream_id)
+            except Exception:
+                logger.debug("Failed to keep partials on cancel for %s", partial_stream_id, exc_info=True)
         agent_name = _preferred_agent_display_name_for_session(session)
-        _cancel_msg = {
+        _marker = {
             'role': 'assistant',
-            'content': _cancelled_turn_content(message, agent_name),
+            'content': _cancelled_turn_content(message, agent_name, initiator=initiator),
             '_error': True,
             'provider_details': str(message or 'Task cancelled.').strip(),
             'provider_details_label': 'Cancellation details',
             'timestamp': int(time.time()),
         }
-        session.messages.append(_cancel_msg)
+        if _cancel_initiator_is_server(initiator):
+            _marker['cancel_initiator'] = CANCEL_INITIATOR_SERVER
+        session.messages.append(_marker)
 
 
 def _cleanup_ephemeral_cancelled_turn(session) -> None:
@@ -3498,8 +3676,14 @@ def _finalize_cancelled_turn(
     ephemeral: bool = False,
     message: str = 'Task cancelled.',
     stream_id: str | None = None,
+    preserve_partials: bool = False,
 ) -> None:
     """Finalize a cancelled turn for persistent or ephemeral sessions.
+
+    When this writes the cancel marker itself (cancel_stream has not yet),
+    ``preserve_partials`` keeps the stream's partial output first. A run a
+    server settle is cancelling (#7293) always keeps its partials and gets the
+    server marker with the settle's reason.
 
     Generation-guarded (#6623 re-gate): when ``stream_id`` is provided, the
     finalizer only acts while the session has not advanced past that stream.
@@ -3569,7 +3753,20 @@ def _finalize_cancelled_turn(
     # active_stream_id cleared in-memory but NOT durable, and a successor
     # could be admitted against stale durable state (#6623 re-gate).
     session.active_stream_id = None
-    _persist_cancelled_turn(session, message=message)
+    _server_reason = _server_settle_reason(stream_id)
+    if _server_reason is not None:
+        _persist_cancelled_turn(
+            session,
+            message=_server_reason,
+            initiator=CANCEL_INITIATOR_SERVER,
+            partial_stream_id=stream_id,
+        )
+    else:
+        _persist_cancelled_turn(
+            session,
+            message=message,
+            partial_stream_id=stream_id if preserve_partials else None,
+        )
     try:
         session.save()
     except Exception:
@@ -3832,6 +4029,74 @@ def _capture_turn_served_model(s, agent) -> str | None:
     return _used_model
 
 
+def _active_turn_checkpoint_index(messages, identity) -> int | None:
+    """Index of this turn's checkpoint user row in the settled display.
+
+    The token is captured by ``_active_turn_authority`` before pending fields
+    are cleared, and settlement stamps it on the user row. A count of pre-run
+    assistants is not a boundary: history recovery can insert older assistant
+    rows the count never saw. The last matching row wins, matching the
+    reversed lookup in ``_active_turn_authority``.
+    """
+    token = identity.get('token') if isinstance(identity, dict) else None
+    if not token:
+        return None
+    found = None
+    for idx, message in enumerate(messages or []):
+        if (
+            isinstance(message, dict)
+            and message.get('role') == 'user'
+            and message.get('_active_turn_token') == token
+        ):
+            found = idx
+    return found
+
+
+def _turn_prior_assistant_count(messages, previous_messages, active_turn_identity) -> int:
+    """Assistant messages that belong to turns earlier than the active one.
+
+    Shared boundary for reasoning settlement and the routing backfill: the
+    checkpoint user row ``_active_turn_authority`` captured before pending
+    fields were cleared. Assistants before that row are a previous turn.
+
+    Without a checkpoint there is no boundary worth trusting, so the pre-run
+    ``previous_messages`` snapshot decides — both callers use this one rule so
+    they cannot drift apart.
+    """
+    checkpoint_at = _active_turn_checkpoint_index(messages, active_turn_identity)
+    source = (
+        (messages or [])[:checkpoint_at]
+        if checkpoint_at is not None
+        else (previous_messages or [])
+    )
+    return sum(
+        1 for m in source if isinstance(m, dict) and m.get('role') == 'assistant'
+    )
+
+
+def _backfill_turn_gateway_routing(messages, *, routing, active_turn_identity):
+    """Label every assistant message of a finished turn with the turn routing.
+
+    The finalize loop stamps ``_gatewayRouting`` on the turn's last assistant
+    message only, so mid-turn answers render without a model after reload.
+    Backfill the rest of the turn here. Rows that already carry routing (the
+    authoritative final answer, or an older answer recovered from context)
+    keep it. Assistants before the checkpoint user row are a previous turn.
+    Without a checkpoint the backfill does nothing: guessing from a pre-run
+    count is what wrote the current model onto recovered history.
+    """
+    if not messages or not routing:
+        return
+    checkpoint_at = _active_turn_checkpoint_index(messages, active_turn_identity)
+    if checkpoint_at is None:
+        return
+    for msg in messages[checkpoint_at + 1:]:
+        if not (isinstance(msg, dict) and msg.get('role') == 'assistant'):
+            continue
+        if not msg.get('_gatewayRouting'):
+            msg['_gatewayRouting'] = routing
+
+
 def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
     """Build thread-local agent env with per-run values overriding profile defaults.
 
@@ -3870,11 +4135,13 @@ def _resolve_streaming_hermes_home_override():
     global _streaming_hermes_home_override_available
     import sys as _sys
 
-    if _streaming_hermes_home_override_available is False:
-        return None
-
+    # #8517 all-r1: a cached negative answer is never trusted. A stale False (an
+    # early failed import, a module swapped later) left the turn-level override
+    # off for the life of the process while construction was still scoped, so
+    # run_conversation, its memory hooks and built-in MEMORY.md writes followed
+    # the shared env mirror (another profile's home). Once loaded this is a dict lookup.
     mod = _sys.modules.get('hermes_constants')
-    if mod is None and _streaming_hermes_home_override_available is None:
+    if mod is None:
         try:
             import hermes_constants  # noqa: F401
             mod = _sys.modules.get('hermes_constants')
@@ -4935,7 +5202,7 @@ def _stream_reasoning_owner(msg, is_last, positional_idx, tool_call_segments, op
 
 def _settle_turn_reasoning(s, _previous_messages, _reasoning_segments,
                            tool_call_segments=None, open_segment=None, interim_segments=None,
-                           tool_start_order=None):
+                           tool_start_order=None, *, active_turn_identity=None):
     """Persist per-step reasoning on this turn's assistant messages in ``s.messages``.
 
     Contract (docs/sse-streams.md, "Reasoning settlement"): non-empty agent
@@ -4954,10 +5221,8 @@ def _settle_turn_reasoning(s, _previous_messages, _reasoning_segments,
     tool_call_segments = {k: list(v) for k, v in (tool_call_segments or {}).items()}
     interim_segments = list(interim_segments or [])
     _positional = not tool_call_segments and not interim_segments
-    _prev_asst = sum(
-        1 for m in (_previous_messages or [])
-        if isinstance(m, dict) and m.get('role') == 'assistant'
-    )
+    # Same boundary as the routing backfill: checkpoint row, else pre-run snapshot.
+    _prev_asst = _turn_prior_assistant_count(s.messages, _previous_messages, active_turn_identity)
     _total_asst = sum(1 for m in s.messages if isinstance(m, dict) and m.get('role') == 'assistant')
     _asst_count = 0
     _step_ids = _turn_step_tool_call_ids(s.messages, _prev_asst, list(tool_start_order or []))
@@ -5078,7 +5343,17 @@ def _sanitize_generated_title(text: str) -> str:
 _TITLE_OPTION_MENU_RE = re.compile(
     r'^\s*(?:(?:[-*\u2022\u2023]|\d{1,2}[).:])\s+)?'
     r'(?:(?:here (?:are|is)|some|good|possible)\s+)*(?:here (?:are|is)\s+some\s+|some\s+of\s+the\s+)?'
-    r'(?:session\s+)?title\s+(?:options?|suggestions?|ideas?|candidates?)\s*:',
+    r'(?:session\s+)?title\s+(?:options?|suggestions?|ideas?|candidates?|alternatives?)\s*:',
+    flags=re.IGNORECASE,
+)
+
+# A bare pair of quoted alternatives joined by "or"/"," with NO preamble at
+# all is still a menu, not one selected title (merge-candidate restore of the
+# fork-side S01 multi-option-leak rejection; attested against
+# tests/test_title_cot_leak_possessive.py::TestMultiOptionLeak).
+_TITLE_QUOTED_ALTERNATIVES_RE = re.compile(
+    r'^\s*(?:"[^"]+"|\u201c[^\u201d]+\u201d)'
+    r'(?:\s*(?:,|or)\s*(?:"[^"]+"|\u201c[^\u201d]+\u201d))+\s*$',
     flags=re.IGNORECASE,
 )
 
@@ -5118,7 +5393,13 @@ def _looks_like_title_option_menu(text: str) -> bool:
     s = str(text or '')
     s_m = _TITLE_OPTION_MENU_RE.match(s)
     if not s_m:
-        return False
+        # Merge-candidate restore (fork S01): two or more QUOTED alternatives
+        # joined by "or" with no preamble is still a menu of choices.
+        return bool(_TITLE_QUOTED_ALTERNATIVES_RE.match(s))
+    if re.search(r'alternative', s_m.group(0), flags=re.IGNORECASE):
+        # An "alternatives:" preamble asserts multiplicity by itself, even
+        # with a single trailing candidate.
+        return True
     rest = s[s_m.end():]
     if len(_TITLE_MENU_LIST_RE.findall(rest)) >= 2:
         return True
@@ -7303,7 +7584,25 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                     _put_title_status(put_event, session_id, 'skipped', 'manual_title', effective_title)
                     return
                 if next_title != effective_title or canonical:
-                    _apply_generated_title(s, next_title)
+                    # S01 carve-out vs Agent precedence (merge-candidate fix,
+                    # 2026-11-02): the Agent DB's _set_session_title now treats
+                    # re-running the titler on an llm-provenance row as a no-op,
+                    # so a leftover reset label ('Untitled'/'New Chat') with llm
+                    # provenance would pin the title forever. When the snapshot
+                    # canonical row is exactly that carve-out case, write the
+                    # generated title through the snapshot-fenced CAS branch of
+                    # sync_session_title (expected=canonical, replace=True),
+                    # which the Agent DB allows for llm→llm rows.
+                    _reset_canonical = (
+                        canonical is not None
+                        and len(canonical) > 1
+                        and canonical[1] == 'llm'
+                        and str(canonical[0] or '').strip().lower() in _RESET_TITLE_LABELS
+                    )
+                    if _reset_canonical:
+                        _apply_generated_title(s, next_title, expected=canonical, replace=True)
+                    else:
+                        _apply_generated_title(s, next_title)
                     # Keep chronological ordering stable in the sidebar.
                     s.save(touch_updated_at=False)
                     effective_title = s.title
@@ -9341,6 +9640,74 @@ def _is_active_turn_checkpoint_row(row, active_turn_identity, msg_text):
     )
 
 
+def _stable_message_ownership_id(message) -> tuple[str | None, bool]:
+    """Canonical stable id restricted to the ownership-granting shape.
+
+    #6310 (nesquena-hermes 2026-08-03): only a valid NON-NEGATIVE INTEGER
+    message id may prove independent ownership in the context dedupe. The
+    broadly shared ``_stable_message_identity_details`` canonicaliser accepts
+    any non-empty int/str/float — ``-7``, ``3.5`` and ``abc`` all canonicalise
+    — which is right for alias reconciliation but too permissive as an
+    ownership signal. A malformed, negative or non-integer id must fail safely
+    to the legacy content-identity collapse instead of splitting a turn.
+    """
+    stable_id, canonical_valid = _stable_message_identity_details(message)
+    if not canonical_valid or stable_id is None:
+        return None, False
+    if not stable_id.isdigit():
+        return None, False
+    return stable_id, True
+
+
+def _independently_owned_user_pair(prior_row, candidate_row) -> bool:
+    """Return True when two same-text user rows are independently owned turns.
+
+    #6310 (nesquena-hermes 2026-08-03): the dedup-local handling prefers a
+    valid non-negative integer message id when one is available. The user
+    exact-index inside ``_deduplicate_context_messages`` keys on
+    content+timestamp+source+attachments and knows nothing about durable ids,
+    so two committed turns that repeat text verbatim inside one timestamp
+    bucket collapse there before the stable-id ownership path can tell them
+    apart. When BOTH rows carry valid DISTINCT durable ids the pair is
+    independently owned and the exact index must defer to that path. Every
+    other shape — an id-less row, a matching id, or an invalid/boolean/
+    negative/non-integer id — keeps the legacy collapse unchanged.
+    """
+    prior_id, prior_valid = _stable_message_ownership_id(prior_row)
+    candidate_id, candidate_valid = _stable_message_ownership_id(candidate_row)
+    return bool(
+        prior_valid
+        and candidate_valid
+        and prior_id is not None
+        and candidate_id is not None
+        and prior_id != candidate_id
+    )
+
+
+def _register_seen_stable_id(key, msg, seen_stable_by_key) -> None:
+    """Append ``msg``'s durable stable id to the per-key kept-id registry.
+
+    #6310 bookkeeping: a row admitted through an active-turn path must
+    register its id, or a later replay of that same record (its timestamp
+    shifted across a load, so the exact index no longer matches) reaches the
+    stable-id ownership path with a registry that never saw the id and
+    survives as a duplicate the model would be sent twice. Append-only on
+    purpose: a superseded id stays in the registry so a replay of the replaced
+    record still collapses against it.
+    """
+    if key is None:
+        return
+    stable_id, stable_valid = _stable_message_ownership_id(msg)
+    if not (stable_valid and stable_id is not None):
+        return
+    kept = seen_stable_by_key.get(key)
+    if not isinstance(kept, list):
+        kept = []
+        seen_stable_by_key[key] = kept
+    if stable_id not in kept:
+        kept.append(stable_id)
+
+
 def _deduplicate_context_messages(messages, protected_rows=None):
     """Remove duplicate messages from context by identity, keeping first occurrence.
 
@@ -9393,6 +9760,16 @@ def _deduplicate_context_messages(messages, protected_rows=None):
         # Keep the display identity unchanged so ordinary transcript dedup still
         # collapses the same visible row.
         key = _message_replay_key(msg)
+        # #6310 bookkeeping (PR #8519 round 1): the exact-key index may only
+        # ever name a row that was actually RETAINED, and it is published
+        # after retention is decided. The historical code published the
+        # prospective append slot (``len(deduped)``) before the stable-id
+        # branch could drop the row, so a discarded replay left the index
+        # pointing past the list and the next same-key lookup dereferenced a
+        # slot that was never filled. ``retained_exact_key`` carries the key
+        # to the publish site at the bottom of the loop; a dropped row simply
+        # never publishes, and the previously retained owner stays indexed.
+        retained_exact_key = None
         if isinstance(msg, dict) and msg.get('role') == 'user' and key is not None:
             user_exact_key = (
                 key,
@@ -9401,18 +9778,32 @@ def _deduplicate_context_messages(messages, protected_rows=None):
                 msg.get('_source') or 'webui',
                 json.dumps(msg.get('attachments') or [], sort_keys=True, ensure_ascii=False),
             )
+            retained_exact_key = user_exact_key
             prior_exact_idx = user_exact_index.get(user_exact_key)
             if msg.get('_active_turn_token'):
                 if prior_exact_idx is not None:
                     deduped[prior_exact_idx] = msg
+                    _register_seen_stable_id(key, msg, seen_stable_by_key)
                     continue
                 if key in seen:
                     deduped.append(msg)
+                    _register_seen_stable_id(key, msg, seen_stable_by_key)
                     user_exact_index[user_exact_key] = len(deduped) - 1
                     continue
             elif prior_exact_idx is not None:
-                continue
-            user_exact_index[user_exact_key] = len(deduped)
+                # #6310 (nesquena-hermes 2026-08-03): this exact index keys on
+                # content+timestamp+source+attachments and knows nothing about
+                # durable ids, so two independently settled turns repeating
+                # text verbatim inside one timestamp bucket would collapse here
+                # before the stable-id ownership path below could tell them
+                # apart. When BOTH rows carry valid DISTINCT stable ids the id
+                # is the preferred ownership signal — defer to that path. An
+                # id-less, id-matching or invalid-id row keeps the legacy
+                # collapse exactly as before. Every stored index names a
+                # retained row (see the publish site below), so this lookup is
+                # always in range.
+                if not _independently_owned_user_pair(deduped[prior_exact_idx], msg):
+                    continue
         if key is not None and key in seen:
             # #7237 round 7 finding 2 (nesquena-hermes 2026-10-14): a content
             # collision is a replay of an already-kept row UNLESS this row and
@@ -9424,8 +9815,10 @@ def _deduplicate_context_messages(messages, protected_rows=None):
             # occurrence from the outbound history and from the cold
             # ``context_messages``. Distinct durable ids prove the rows are
             # different turns; a missing/matching id stays conservative and
-            # collapses exactly like before.
-            stable_id, stable_valid = _stable_message_identity_details(msg)
+            # collapses exactly like before. #6310 (2026-08-03): the ownership
+            # signal is a valid NON-NEGATIVE INTEGER id — a malformed,
+            # negative or non-integer id fails safely to this legacy collapse.
+            stable_id, stable_valid = _stable_message_ownership_id(msg)
             kept_ids = seen_stable_by_key.get(key) or [None]
             if not (
                 stable_valid
@@ -9439,11 +9832,16 @@ def _deduplicate_context_messages(messages, protected_rows=None):
             kept_ids.append(stable_id)
         if key is not None and key not in seen:
             seen.add(key)
-            stable_id, stable_valid = _stable_message_identity_details(msg)
+            stable_id, stable_valid = _stable_message_ownership_id(msg)
             seen_stable_by_key[key] = [
                 stable_id if (stable_valid and stable_id is not None) else None
             ]
         deduped.append(msg)
+        # #6310 bookkeeping: publish the exact-key index only now that the row
+        # is retained, and name the slot it actually occupies. A dropped row
+        # never reaches this site, so no index can outlive its row.
+        if retained_exact_key is not None:
+            user_exact_index[retained_exact_key] = len(deduped) - 1
     return deduped
 
 
@@ -9801,6 +10199,16 @@ def _hard_prune_post_compression_tool_results(messages, *, compressor=None):
         )
         msg[_POST_COMPRESSION_TOOL_RESULT_SUMMARY_FLAG] = True
     return pruned, len(replacements)
+
+
+def _should_prune_tool_results_after_compression(agent) -> bool:
+    """True when the active context engine is the native ContextCompressor (or absent)."""
+    _compressor = getattr(agent, 'context_compressor', None)
+    try:
+        from agent.context_compressor import ContextCompressor as _NativeCC
+    except ImportError:
+        return True
+    return (_compressor is None) or isinstance(_compressor, _NativeCC)
 
 
 def _prune_context_tool_results_after_compression(agent, context_messages):
@@ -13677,6 +14085,8 @@ def _build_run_conversation_kwargs(
     ``persist_user_timestamp`` is signature-gated (#6935): an older
     hermes-agent whose ``run_conversation()`` predates the kwarg must not
     receive it, or the call trips a TypeError before the turn starts.
+    The title-only override is gated the same way and uses the submitted
+    prompt, not the workspace/notification-enriched model input.
     """
     _preserve_legacy_agent_row_identity(callable_obj, legacy_row_identity_owner)
     kwargs = {
@@ -13697,6 +14107,12 @@ def _build_run_conversation_kwargs(
         kwargs,
         "conversation_history_revision",
         conversation_history_revision,
+    )
+    _add_supported_run_conversation_kwarg(
+        callable_obj,
+        kwargs,
+        "title_user_message",
+        persist_user_message,
     )
     return kwargs
 
@@ -13875,6 +14291,14 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
         return True
 
     should_close_evicted_agent = True
+    # #8517: the owner's profile, captured before a clean commit discards the
+    # lifecycle entry; the provider shutdown below must run as that profile too.
+    _owner_home = ''
+    try:
+        from api.session_lifecycle import recorded_owner_profile_home
+        _owner_home = recorded_owner_profile_home(session_id)
+    except Exception:
+        logger.debug("No recorded owner profile for evicted session %s", session_id, exc_info=True)
     try:
         _lifecycle_commit_session_memory(session_id, agent=agent, wait=True)
         if not _lifecycle_has_uncommitted_work(session_id):
@@ -13896,7 +14320,13 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
         shutdown_memory_provider = getattr(agent, 'shutdown_memory_provider', None)
         if callable(shutdown_memory_provider):
             session_messages = vars(agent).get('_session_messages', [])
-            shutdown_memory_provider(session_messages)
+            call_as_session_owner(
+                agent,
+                lambda: shutdown_memory_provider(session_messages),
+                session_id=session_id,
+                owner_home=_owner_home,
+                what="memory provider shutdown",
+            )
     except Exception:
         logger.debug("Failed to shut down evicted agent memory provider for session %s", session_id, exc_info=True)
 
@@ -14191,6 +14621,7 @@ def _run_agent_streaming(
     # once. Sentinel: None=not computed, 0=not applicable/failed, >0=real cap.
     _real_ctx_cache = [None]
     _live_usage_session_cache = [None]
+    _stream_clear_generation = None
 
     def _current_live_usage_session():
         return _live_usage_session_snapshot(
@@ -14659,6 +15090,9 @@ def _run_agent_streaming(
     _streaming_cron_profile_home_token = None
     _turn_pending_source = 'webui'
     _streaming_hermes_home_override_ctx = (None, None, False)
+    # #8517 all-r2 finding 2: memory runs only on a turn that verifiably holds its
+    # session's profile home; set right after the turn-level override below.
+    _turn_memory_reason = 'the turn-level profile home was not established'
     _streaming_skill_home_snapshot = None
     _restore_streaming_skill_home_modules = False
     _acquired_streaming_skill_home_patch_lock = False
@@ -14788,6 +15222,9 @@ def _run_agent_streaming(
         # session lock before dispatch, so a mismatch here means a newer picker
         # write won the race and must not be clobbered by the worker thread.
         with _agent_lock:
+            _skill_provenance_generation = getattr(
+                s, "skill_provenance_generation", 0,
+            )
             _last_persisted_model = getattr(s, "model", None)
             _last_persisted_provider = getattr(s, "model_provider", None)
             if _last_persisted_provider is not None:
@@ -14834,7 +15271,9 @@ def _run_agent_streaming(
             _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
             _safe_profile_runtime_env = filter_runtime_env_for_gateway_parity(_profile_runtime_env)
         except ImportError:
-            _profile_home = os.environ.get('HERMES_HOME', '')
+            # #8517: never the shared HERMES_HOME env mirror (another profile's
+            # worker may hold it); '' turns memory off for the turn.
+            _profile_home = session_profile_home_or_empty(s)
             _profile_runtime_env = {}
             _safe_profile_runtime_env = {}
             patch_skill_home_modules = None
@@ -14896,6 +15335,17 @@ def _run_agent_streaming(
             _profile_home,
         )
         _streaming_hermes_home_override_ctx = _set_streaming_hermes_home_override(_profile_home)
+        # #8517 all-r2 finding 2: the override set here is held until the outermost
+        # finally, across construction AND run_conversation (memory hooks, built-in
+        # MEMORY.md writes). A construction-time scope alone does not cover the turn,
+        # and a cached agent runs no constructor at all, so the decision is made once
+        # for the whole turn: when the override is not set or not effective, every
+        # construction below builds without memory (not cached, unless the Agent has
+        # no override at all: construct_profile_scoped_agent) and a memory-enabled
+        # cached agent is not reused for this turn.
+        _turn_memory_reason = turn_memory_reason(
+            _profile_home, override_installed=bool(_streaming_hermes_home_override_ctx[2]),
+        )
         _set_thread_env(**_thread_env)
         # process_complete agent-wakeup wiring (ours-original, Option B): bind
         # this session's HERMES_SESSION_KEY to its WebUI session_id so the
@@ -15674,6 +16124,17 @@ def _run_agent_streaming(
                     put('metering', _tool_stats)
                 except Exception:
                     logger.debug('Failed to update live prompt estimate on tool completion', exc_info=True)
+                try:
+                    _record_streaming_skill_usage(
+                        getattr(s, "session_id", None) or session_id,
+                        name,
+                        function_result,
+                        stream_id=stream_id,
+                        skill_provenance_generation=_skill_provenance_generation,
+                        ephemeral=ephemeral,
+                    )
+                except Exception:
+                    logger.debug('Failed to persist streaming skill usage', exc_info=True)
 
             _AIAgent = _get_ai_agent()
             if _AIAgent is None:
@@ -15862,6 +16323,7 @@ def _run_agent_streaming(
 
             # Per-session toolset override (#493): if the session has
             # enabled_toolsets set, use that instead of the global config.
+            _session_meta = None
             try:
                 from api.models import Session, SESSION_DIR
                 _session_path = SESSION_DIR / f"{session_id}.json"
@@ -15973,16 +16435,33 @@ def _run_agent_streaming(
             except Exception:
                 _max_tokens_cfg = None
 
-            # CLI-parity reasoning effort: resolve scoped per-model/provider
-            # overrides first (frozen 'provider:model' key), falling back to the
-            # global agent.reasoning_effort — the same precedence the settings
-            # UI writes. None → agent uses its default.
+            # Reasoning effort: an explicit session effort wins (upstream);
+            # legacy sessions (None) fall through to the r12 scoped
+            # per-model/provider override (frozen 'provider:model' key), then
+            # the profile/CLI default — the same precedence the settings UI
+            # writes. None → agent uses its default.
             try:
-                _effort = resolve_reasoning_effort_for_request(
-                    resolved_model,
-                    resolved_provider,
-                    resolved_base_url,
-                    cfg=_cfg if isinstance(_cfg, dict) else None,
+                _session_effort = getattr(s, 'reasoning_effort', None)
+                if _session_effort is None:
+                    _effort = resolve_reasoning_effort_for_request(
+                        resolved_model,
+                        resolved_provider,
+                        resolved_base_url,
+                        cfg=_cfg if isinstance(_cfg, dict) else None,
+                    )
+                else:
+                    try:
+                        _session_effort = effective_session_reasoning_effort(
+                            _session_effort, _profile_home,
+                        )
+                    except Exception:
+                        logger.warning("isolated reasoning config read failed; using session config", exc_info=True)
+                    _effort = resolve_session_reasoning_effort(
+                        _cfg,
+                        session_effort=_session_effort,
+                        model_id=resolved_model,
+                        provider_id=resolved_provider,
+                        base_url=resolved_base_url,
                 )
                 _reasoning_config = parse_reasoning_effort(_effort)
             except Exception:
@@ -16060,7 +16539,11 @@ def _run_agent_streaming(
             # injectionFrequency: "first-turn" actually suppresses after turn 1.
             _cache_new_agent = False
             if ephemeral:
-                agent = _AIAgent(**_agent_kwargs)
+                agent, _ = construct_profile_scoped_agent(
+                    _AIAgent, _agent_kwargs, profile_home=_profile_home,
+                    agent_params=_agent_params, session_id=session_id,
+                    fail_closed_reason=_turn_memory_reason,
+                )
                 _current_agent[0] = agent
                 logger.debug('[webui] Created ephemeral agent for session %s', session_id)
             else:
@@ -16088,14 +16571,22 @@ def _run_agent_streaming(
 
                 agent = None
                 _identity_mismatch_entry = None
+                _bypassed_memory_agent = False
                 with SESSION_AGENT_CACHE_LOCK:
                     _cached = SESSION_AGENT_CACHE.get(session_id)
                     if _cached and _cached[1] == _agent_sig:
                         _cached_agent = _cached[0]
                         if _cached_agent_matches_session(_cached_agent, session_id):
-                            agent = _cached_agent
-                            SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
-                            logger.debug('[webui] Reusing cached agent for session %s', session_id)
+                            if _turn_memory_reason and agent_has_memory(_cached_agent):
+                                # #8517 all-r2 finding 2: this turn cannot hold its
+                                # profile home, and a cached agent keeps its memory.
+                                # Leave it cached for the next scoped turn; this turn
+                                # gets a memoryless, uncached agent built below.
+                                _bypassed_memory_agent = True
+                            else:
+                                agent = _cached_agent
+                                SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
+                                logger.debug('[webui] Reusing cached agent for session %s', session_id)
                         else:
                             _identity_mismatch_entry = SESSION_AGENT_CACHE.pop(session_id, None)
                             logger.warning(
@@ -16103,6 +16594,13 @@ def _run_agent_streaming(
                                 session_id,
                                 _cached_agent_session_identity(_cached_agent),
                             )
+
+                if _bypassed_memory_agent:
+                    logger.warning(
+                        '[webui] #8517: cached agent for session %s not reused this turn: %s '
+                        '(profile home %r). The turn runs without memory.',
+                        session_id, _turn_memory_reason, _profile_home,
+                    )
 
                 if _identity_mismatch_entry is not None:
                     try:
@@ -16172,18 +16670,22 @@ def _run_agent_streaming(
                     if hasattr(agent, '_interrupt_message'):
                         agent._interrupt_message = None
                 else:
-                    agent = _AIAgent(**_agent_kwargs)
-                    _cache_new_agent = True
+                    agent, _cache_new_agent = construct_profile_scoped_agent(
+                        _AIAgent, _agent_kwargs, profile_home=_profile_home,
+                        agent_params=_agent_params, session_id=session_id,
+                        fail_closed_reason=_turn_memory_reason,
+                    )
                     _current_agent[0] = agent
                     # Triage may inspect only this exact profile's agent.
                     agent._webui_profile_home = _profile_home
-                    # Lifecycle/cache publication stays on the stream-lock admission edge.
 
             if not _register_agent_if_current(agent, _agent_sig if _cache_new_agent else None):
                 with _agent_lock:
                     _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                 put('cancel', _cancel_event_payload('Cancelled by user'))
                 return
+            if not ephemeral:
+                _put_session_memory_status(put, session_id, stream_id, _profile_home)
 
             # Cache publication is already fenced with Stop above. Keep LRU
             # eviction and any memory-provider close outside the stream lock.
@@ -16999,7 +17501,11 @@ def _run_agent_streaming(
                                 _agent_kwargs['acp_args'] = _runtime_bundle['acp_args']
                             if 'credential_pool' in _agent_params:
                                 _agent_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
-                            agent = _AIAgent(**_agent_kwargs)
+                            agent, _heal_cacheable = construct_profile_scoped_agent(
+                                _AIAgent, _agent_kwargs, profile_home=_profile_home,
+                                agent_params=_agent_params, session_id=session_id,
+                                fail_closed_reason=_turn_memory_reason,
+                            )
                             _agent_sig = _compute_agent_cache_signature(
                                 resolved_model,
                                 resolved_api_key,
@@ -17017,11 +17523,16 @@ def _run_agent_streaming(
                                 profile_home=_profile_home,
                                 safe_profile_runtime_env=_safe_profile_runtime_env,
                             )
+                            if not _heal_cacheable:
+                                _agent_sig = None  # #8517: memory scope failed; never cache it
                             if not _register_agent_if_current(agent, _agent_sig):
                                 # Returned-error settlement already owns _agent_lock.
                                 _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                                 put('cancel', _cancel_event_payload('Cancelled by user'))
                                 return
+                            if not ephemeral:
+                                # #8517 notice: the replacement now serves the session.
+                                _put_session_memory_status(put, session_id, stream_id, _profile_home)
                             # Retry the conversation once with fresh credentials
                             _self_healed = True
                             _token_sent = False
@@ -17089,7 +17600,12 @@ def _run_agent_streaming(
                                 _heal_projected_history = _agent_replay_settle_projection(
                                     _heal_kwargs.get("conversation_history") or []
                                 )
-                                _heal_result = agent.run_conversation(**_heal_kwargs)
+                                # Skill completion callbacks persist through this same lock.
+                                _agent_lock.release()
+                                try:
+                                    _heal_result = agent.run_conversation(**_heal_kwargs)
+                                finally:
+                                    _agent_lock.acquire()
                                 _remember_pending_steer_result(_heal_result)
                                 _active_turn_identity = _resolve_active_turn_authority(
                                     _active_turn_identity,
@@ -17113,6 +17629,38 @@ def _run_agent_streaming(
                                     '[webui] self-heal: retry also failed: %s', _retry_exc,
                                 )
                                 _heal_ok = False
+                            if cancel_event.is_set():
+                                # A Stop or a server settle (#7293) during the retry
+                                # publishes its cancel and interrupts it; the turn's
+                                # terminal state is written here. Finalize it as
+                                # cancelled, keeping the streamed partial, never as
+                                # an auth failure.
+                                _finalize_cancelled_turn(
+                                    s, ephemeral=ephemeral, stream_id=stream_id,
+                                    preserve_partials=True,
+                                )
+                                if not ephemeral:
+                                    try:
+                                        append_turn_journal_event_for_stream(
+                                            s.session_id,
+                                            stream_id,
+                                            {
+                                                "event": "interrupted",
+                                                "created_at": time.time(),
+                                                "reason": "cancelled",
+                                            },
+                                        )
+                                    except Exception:
+                                        logger.debug("Failed to append cancelled turn journal event", exc_info=True)
+                                put('cancel', _worker_cancel_event_payload(stream_id))
+                                return
+                            if not _stream_writeback_is_current(s, stream_id):
+                                logger.info(
+                                    "Skipping stale credential self-heal result for session %s stream %s",
+                                    getattr(s, 'session_id', session_id),
+                                    stream_id,
+                                )
+                                return
                             if _heal_ok and _heal_result is not None:
                                 # Retry succeeded — replace result and skip error
                                 result = _heal_result
@@ -17320,10 +17868,19 @@ def _run_agent_streaming(
                         _compressed = True
                 # Notify the frontend that compression happened
                 if _compressed:
-                    s.context_messages = _prune_context_tool_results_after_compression(
-                        agent,
-                        s.context_messages,
-                    )
+                    # Only the native engine gets hard tool-result pruning;
+                    # external engines (e.g. lcm-x) own their budget/ref markers.
+                    if _should_prune_tool_results_after_compression(agent):
+                        s.context_messages = _prune_context_tool_results_after_compression(
+                            agent,
+                            s.context_messages,
+                        )
+                    else:
+                        logger.debug(
+                            "post-compression tool-result pruning skipped "
+                            "(active engine: %s)",
+                            type(getattr(agent, 'context_compressor', None)).__name__,
+                        )
                     s.post_compression_context_tokens_estimate = _estimate_post_compression_context_tokens(
                         agent,
                         s.context_messages,
@@ -17481,6 +18038,7 @@ def _run_agent_streaming(
                     s, _previous_messages, _reasoning_segments,
                     _tool_call_reasoning_idx, _unbound_reasoning_idx[0], _interim_reasoning_idx,
                     _tool_start_order,
+                    active_turn_identity=_active_turn_identity,
                 )
                 try:
                     _turn_duration_seconds = max(0.0, time.time() - float(_turn_started_at))
@@ -17538,7 +18096,18 @@ def _run_agent_streaming(
                     _history.append(_gateway_routing)
                     s.gateway_routing_history = _history[-50:]
                 if s.messages:
-                    for _dm in reversed(s.messages):
+                    _checkpoint_at = _active_turn_checkpoint_index(
+                        s.messages, _active_turn_identity
+                    )
+                    # With a checkpoint, only this turn's tail is eligible. The
+                    # last assistant of the whole transcript can be an older
+                    # answer that recovery inserted after the pre-run snapshot.
+                    _label_rows = (
+                        s.messages[_checkpoint_at + 1:]
+                        if _checkpoint_at is not None
+                        else s.messages
+                    )
+                    for _dm in reversed(_label_rows):
                         if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
                             _commit_row = _dm
                             _dm['_turnDuration'] = round(_turn_duration_seconds, 3)
@@ -17574,6 +18143,12 @@ def _run_agent_streaming(
                                     'cache_hit_percent': turn_cache_hit_percent,
                                 }
                             break
+                    if _checkpoint_at is not None:
+                        _backfill_turn_gateway_routing(
+                            s.messages,
+                            routing=_gateway_routing,
+                            active_turn_identity=_active_turn_identity,
+                        )
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
                 # s.save() for the same reason as the reasoning trace above.
@@ -17814,7 +18389,13 @@ def _run_agent_streaming(
                     # in-memory bookkeeping, not provider I/O, so keep it inside the
                     # per-session writeback lock to preserve completed-turn ordering.
                     try:
-                        from api.session_lifecycle import mark_turn_completed
+                        from api.session_lifecycle import mark_turn_completed, record_owner_profile_home
+                        try:
+                            _owner_profile_home = _profile_home
+                        except NameError:
+                            _owner_profile_home = ''
+                        # #8517: record the owner so boundary commits run as it.
+                        record_owner_profile_home(s.session_id, _owner_profile_home)
                         mark_turn_completed(s.session_id, agent=agent)
                     except Exception:
                         logger.debug("Memory lifecycle mark failed for session %s", s.session_id, exc_info=True)
@@ -18099,7 +18680,11 @@ def _run_agent_streaming(
             # #1932: only evaluate when the turn was goal-related (set via
             # STREAM_GOAL_RELATED or goal_related parameter).
             try:
-                from api.goals import evaluate_goal_after_turn, has_active_goal
+                from api.goals import (
+                    evaluate_goal_after_turn,
+                    has_active_goal,
+                    register_pending_goal_continuation,
+                )
 
                 if not goal_related or not has_active_goal(session_id, profile_home=_profile_home):
                     _goal_decision = {}
@@ -18145,13 +18730,25 @@ def _run_agent_streaming(
                     })
                 if decision.get('should_continue'):
                     continuation_prompt = str(decision.get('continuation_prompt') or '').strip()
+                    continuation_id = None
                     if continuation_prompt:
                         # #1932: mark this session as pending a goal continuation
                         # so the next /chat/start creates a goal-related stream.
-                        PENDING_GOAL_CONTINUATION.add(session_id)
+                        # #6885 + #7855: register marker + prompt + continuation
+                        # ID as ONE record
+                        # (api/goals.register_pending_goal_continuation) so the
+                        # routes.py consumer can tell a genuine user turn from
+                        # the browser's continuation dispatch. Admission is by
+                        # ID, so the browser may edit or combine the queued
+                        # entry without losing the goal.
+                        continuation_id = register_pending_goal_continuation(session_id, continuation_prompt)
+                        if not continuation_id:
+                            continuation_prompt = ''
+                    if continuation_prompt:
                         put('goal_continue', {
                             'session_id': session_id,
                             'continuation_prompt': continuation_prompt,
+                            'continuation_id': continuation_id,
                             'text': continuation_prompt,
                             'message': _goal_message,
                             'message_key': decision.get('message_key') or 'goal_continuing',
@@ -18459,7 +19056,11 @@ def _run_agent_streaming(
                         _heal_kwargs['acp_args'] = _runtime_bundle['acp_args']
                     if 'credential_pool' in _agent_params:
                         _heal_kwargs['credential_pool'] = _runtime_bundle['credential_pool']
-                    _heal_agent = _AIAgent(**_heal_kwargs)
+                    _heal_agent, _heal_cacheable = construct_profile_scoped_agent(
+                        _AIAgent, _heal_kwargs, profile_home=_profile_home,
+                        agent_params=_agent_params, session_id=session_id,
+                        fail_closed_reason=_turn_memory_reason,
+                    )
                     # Delta callbacks close over `agent`; the replacement, not
                     # the failed original, owns any successful retry output.
                     agent = _heal_agent
@@ -18480,11 +19081,16 @@ def _run_agent_streaming(
                         profile_home=_profile_home,
                         safe_profile_runtime_env=_safe_profile_runtime_env,
                     )
+                    if not _heal_cacheable:
+                        _agent_sig = None  # #8517: memory scope failed; never cache it
                     if not _register_agent_if_current(_heal_agent, _agent_sig):
                         with _agent_lock:
                             _finalize_cancelled_turn(s, ephemeral=ephemeral, message='Task cancelled before start.', stream_id=stream_id)
                         put('cancel', _cancel_event_payload('Cancelled by user'))
                         return
+                    if not ephemeral:
+                        # #8517 notice: the replacement now serves the session.
+                        _put_session_memory_status(put, session_id, stream_id, _profile_home)
                     # Retry the conversation
                     _token_sent = False
                     try:
@@ -18915,6 +19521,7 @@ def _run_agent_streaming(
             # entries are not unconditionally popped here; they remain the
             # bounded owner for failed persistence until a later successful
             # compare-delete or the finite deadline expires.
+            _SERVER_SETTLE_REASONS.pop(stream_id, None)
             unregister_active_run(stream_id)
             # Clean up the stream-owner registry so stale stream_id→session_id
             # mappings do not accumulate over thousands of completed streams (#6351).
@@ -19180,6 +19787,37 @@ def _steer_runtime_text(user_text: str, attachment_paths) -> str:
     return f"{text}\n\n{note}" if text else note
 
 
+def _deliver_gateway_steer(sid: str, result: dict, text: str) -> dict:
+    """Forward a Gateway-owned steer to its run; keep the queue fallback on refusal.
+
+    Called outside registry locks: the Gateway HTTP write must never hold them.
+    """
+    if not isinstance(result, dict) or result.get("fallback") != "gateway_steer_queued":
+        return result
+    stream_id = result.get("stream_id")
+    try:
+        from api.gateway_chat import (
+            GATEWAY_STEER_ACCEPTED, GATEWAY_STEER_UNCERTAIN, gateway_stream_steer_target, steer_gateway_run,
+        )
+
+        # Run id and its owning endpoint are captured together: reading them
+        # separately let a finishing worker drop the endpoint in between and the
+        # steer fall back to the process Gateway, which does not own the run.
+        target = gateway_stream_steer_target(str(stream_id or ""))
+        outcome = None
+        if target:
+            run_id, base_url, api_key = target
+            outcome = steer_gateway_run(run_id, text, base_url, api_key)
+        if outcome == GATEWAY_STEER_ACCEPTED:
+            return {"accepted": True, "fallback": None, "stream_id": stream_id}
+        if outcome == GATEWAY_STEER_UNCERTAIN:
+            # Sent but unanswered: queueing could deliver it twice; the browser keeps the draft.
+            return {"accepted": False, "fallback": "gateway_steer_uncertain", "stream_id": stream_id}
+    except Exception:
+        logger.debug("Gateway steer forwarding failed for session %s", sid, exc_info=True)
+    return result
+
+
 def _handle_chat_steer(handler, body: dict) -> bool:
     """Inject a /steer payload into the active agent for a session.
 
@@ -19242,17 +19880,130 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         discard_snapshot()
         return j(handler, {"accepted": False, "fallback": "session_not_found", "stream_id": None})
     stream_id = getattr(session, "active_stream_id", None) or None
-    if not stream_id:
-        discard_snapshot()
-        return j(handler, {"accepted": False, "fallback": "not_running", "stream_id": None})
-    # HTTP writes occur after the stream lock is released. Rejected guidance
-    # has no future reader; accepted snapshots remain until session deletion.
-    outcome = _steer_bound_stream(sid, stream_id, text,
-        display_text=display_text, files=display_files)
-    if structured_input and attachment_paths and not outcome.get("accepted"):
-        import shutil
-        shutil.rmtree(Path(attachment_paths[0]).parent)
-    return j(handler, outcome)
+    from api.helpers import j, bad
+    from api import config as _cfg
+    # Steer delivery: gateway-owned runs forward server-side (upstream
+    # _deliver_gateway_steer); non-gateway outcomes pass through untouched.
+    def _finish(result):
+        # r12: uploaded steer attachments are staged on disk; on rejection
+        # they have no future reader, so discard the staged snapshot. On
+        # acceptance the agent still needs the files.
+        if structured_input and attachment_paths and isinstance(result, dict) and not result.get("accepted"):
+            import shutil
+            shutil.rmtree(Path(attachment_paths[0]).parent)
+        return j(handler, _deliver_gateway_steer(sid, result, text))
+
+    if stream_id:
+        # HTTP writes occur after the stream lock is released. Rejected guidance
+        # has no future reader; accepted snapshots remain until session deletion.
+        outcome = _steer_bound_stream(sid, stream_id, text,
+            display_text=display_text, files=display_files)
+        return _finish(outcome)
+
+    # Cache-only compatibility (upstream): no registered worker for this stream.
+    with _cfg.SESSION_AGENT_CACHE_LOCK:
+        cached = _cfg.SESSION_AGENT_CACHE.get(sid)
+        if cached and not _cached_agent_matches_session(cached[0], sid):
+            cached = None
+    if not cached:
+        try:
+            s = get_session(sid)
+            active_stream_id = getattr(s, "active_stream_id", None) or None
+        except KeyError:
+            active_stream_id = None
+        if not active_stream_id:
+            # Fork r12 splice: a session with no active stream pointer is
+            # steering a run that is not running (a finalizing run has already
+            # detached session.active_stream_id), not a cache miss.
+            return _finish({"accepted": False, "fallback": "not_running",
+                            "stream_id": None})
+        if active_stream_id:
+            with _cfg.STREAMS_LOCK:
+                stream_alive = active_stream_id in _cfg.STREAMS
+            if stream_alive:
+                try:
+                    with _cfg.ACTIVE_RUNS_LOCK:
+                        active_run = dict((_cfg.ACTIVE_RUNS or {}).get(str(active_stream_id)) or {})
+                    if active_run.get("backend") == "gateway":
+                        return _finish({
+                            "accepted": False, "fallback": "gateway_steer_queued",
+                            "stream_id": active_stream_id})
+                except Exception:
+                    logger.warning(
+                        "Gateway ownership lookup failed before steer fallback for session=%s stream_id=%s",
+                        sid,
+                        active_stream_id,
+                        exc_info=True,
+                    )
+        # No active local agent for this session — caller surfaces a steer failure
+        # without cancelling the active run.
+        return _finish({"accepted": False, "fallback": "no_cached_agent",
+                           "stream_id": None})
+    agent = cached[0]
+    if not hasattr(agent, "steer"):
+        # Older hermes-agent that pre-dates the steer() method
+        return _finish({"accepted": False, "fallback": "agent_lacks_steer",
+                           "stream_id": None})
+
+    # Verify the agent is currently running. Use the session's
+    # active_stream_id rather than calling load_session_locked() which
+    # would block on the streaming thread's lock.
+    try:
+        s = get_session(sid)
+    except KeyError:
+        return _finish({"accepted": False, "fallback": "session_not_found",
+                           "stream_id": None})
+    active_stream_id = getattr(s, "active_stream_id", None) or None
+    if not active_stream_id:
+        return _finish({"accepted": False, "fallback": "not_running",
+                           "stream_id": None})
+
+    # Cache-only compatibility: no registered worker for this stream. The
+    # liveness/ownership revalidation and the enqueue must share the same
+    # stream-ownership edge as Stop (STREAMS_LOCK -> ACTIVE_RUNS_LOCK). A Stop
+    # that claims cancellation between an unlocked check and agent.steer()
+    # would strand guidance this response still reports as accepted. steer()
+    # only stashes input; interrupt, persistence, and HTTP writes stay outside
+    # the lock, and the cached agent is never evicted or closed here.
+    #
+    # Ownership must be proven positively, not merely unrefuted: BOTH the
+    # stream owner AND the active-run session must equal the requesting
+    # session. Missing metadata is ambiguous and fails closed (stream_dead);
+    # an unfenced cache object is never steered on absent ownership.
+    #
+    # The active-run backend is revalidated the same way. With no registered
+    # worker, the backend tag is the only proof that an in-process runtime
+    # owns this run: Gateway resolves to its own outcome, the explicit local
+    # tag may enqueue, and a missing, empty, or foreign backend fails closed.
+    result = {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+    with _cfg.STREAMS_LOCK:
+        if active_stream_id in _cfg.STREAMS:
+            owner = _cfg.stream_owner_session_id(active_stream_id)
+            with _cfg.ACTIVE_RUNS_LOCK:
+                run = dict((_cfg.ACTIVE_RUNS or {}).get(str(active_stream_id)) or {})
+            owned_stream = bool(owner) and owner == sid
+            owned_run = bool(run.get("session_id")) and run["session_id"] == sid
+            if owned_stream and owned_run and run.get("phase") != "cancelling":
+                backend = run.get("backend")
+                if backend == "gateway":
+                    # Gateway owns transport; a local cache object is never steered.
+                    result = {"accepted": False, "fallback": "gateway_steer_queued",
+                              "stream_id": active_stream_id}
+                elif backend == WEBUI_LOCAL_CHAT_BACKEND and run.get("phase") == "finalizing":
+                    result = {"accepted": False, "fallback": "not_running",
+                              "stream_id": active_stream_id}
+                elif (backend == WEBUI_LOCAL_CHAT_BACKEND
+                      and run.get("phase") in _LOCAL_STEERABLE_PHASES):
+                    try:
+                        accepted = bool(agent.steer(text))
+                    except Exception as exc:
+                        logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
+                        result = {"accepted": False, "fallback": "steer_error",
+                                  "stream_id": active_stream_id}
+                    else:
+                        result = {"accepted": accepted, "fallback": None,
+                                  "stream_id": active_stream_id}
+
 
 
 def _steer_response(outcome: dict, sid: str, active_stream_id: str) -> dict:
@@ -19268,8 +20019,120 @@ def _steer_response(outcome: dict, sid: str, active_stream_id: str) -> dict:
             "stream_id": active_stream_id}
 
 
-def cancel_stream(stream_id: str) -> bool:
-    """Signal an in-flight stream to cancel and return structured outcome.
+# Bound on how long a server settle waits for the owning session's lock before
+# it falls back to the user-Stop ordering (interrupt first). Settles run in
+# their own threads under a separate overall timeout (api/run_drain.py
+# SHUTDOWN_SETTLE_SECONDS), which must leave room after this wait for the
+# interrupted worker to persist the turn.
+_SERVER_SETTLE_SESSION_LOCK_TIMEOUT = 1.0
+
+
+def _settle_session_lock_for_stream(stream_id: str):
+    """Acquire the session lock a cancel of ``stream_id`` will write under.
+
+    Resolves the session id the same way ``_cancel_stream_impl`` does (agent,
+    then the ACTIVE_RUNS row, then the stream-owner registry). Returns the
+    acquired lock, or ``None`` when no owning session is known or the lock is
+    not free within the bound.
+    """
+    from api import config as _live_config
+
+    session_id = None
+    agent = AGENT_INSTANCES.get(stream_id) or _live_config.AGENT_INSTANCES.get(stream_id)
+    if agent is not None:
+        session_id = getattr(agent, "session_id", None)
+    if not session_id:
+        try:
+            with _live_config.ACTIVE_RUNS_LOCK:
+                row = (_live_config.ACTIVE_RUNS or {}).get(stream_id) or {}
+            session_id = str(row.get("session_id") or "").strip() or None
+        except Exception:
+            session_id = None
+    if not session_id:
+        session_id = stream_owner_session_id(stream_id)
+    if not session_id:
+        return None
+    lock = _get_session_agent_lock(session_id)
+    if not lock.acquire(timeout=_SERVER_SETTLE_SESSION_LOCK_TIMEOUT):
+        logger.warning(
+            "Server settle of stream %s: session %s lock busy; interrupting first "
+            "(the worker holding it persists the turn)",
+            stream_id, session_id,
+        )
+        return None
+    return lock
+
+
+def cancel_stream(
+    stream_id: str,
+    reason: str | None = None,
+    *,
+    initiator: str = CANCEL_INITIATOR_USER,
+) -> bool:
+    """Signal an in-flight stream to cancel. Returns True if work was found.
+
+    ``reason`` replaces the default "Task cancelled." detail in the durable
+    cancel marker, the agent interrupt and the terminal cancel event.
+    ``initiator="server"`` marks a run the WebUI server stopped on its own
+    (#7293 restart/shutdown drain settle): the marker hint then says the server
+    stopped it instead of claiming the user cancelled it, and the cancel event
+    carries ``cancel_initiator: "server"``. The default user copy is unchanged.
+    Both go through this same path, so partial output is preserved the same way.
+
+    A server settle additionally owns the run's terminal state: it holds the
+    owning session's lock from before the cancellation is published until the
+    captured partials, the server marker and the terminal cancel event are
+    saved/queued, and interrupts the agent only after that, outside every lock.
+    Interrupting first would release the worker, whose own cancel finalizer
+    could take the session lock first, clear ``active_stream_id`` and write a
+    user-cancel marker without the partials, so the settle would then skip its
+    writeback as stale. A user Stop keeps its established order (interrupt
+    first, then the session cleanup), so its interrupt latency is unchanged.
+
+    When the session lock is not free within its bound (the worker holds it,
+    e.g. the returned-error credential retry runs the provider call under it),
+    the settle falls back to the user-Stop order: publish the cancel, interrupt
+    at once, then wait for the lock. The released worker finalizes the turn
+    under that lock with the partials and the server marker (it reads the
+    reason recorded here first); the settle returns only once it has the lock,
+    i.e. once that is saved, or it writes the turn itself if the worker did not.
+    """
+    if not _cancel_initiator_is_server(initiator):
+        return _cancel_stream_impl(stream_id, reason, initiator=initiator)
+    held_lock = _settle_session_lock_for_stream(stream_id)
+    deferred_interrupts: list = []
+    try:
+        return _cancel_stream_impl(
+            stream_id,
+            reason,
+            initiator=initiator,
+            held_session_lock=held_lock,
+            deferred_interrupts=deferred_interrupts if held_lock is not None else None,
+        )
+    finally:
+        if held_lock is not None:
+            held_lock.release()
+        for _agent in deferred_interrupts:
+            try:
+                _agent.interrupt(reason or "Cancelled by user")
+            except Exception:
+                logger.debug("Failed to interrupt agent for stream %s", stream_id, exc_info=True)
+
+
+def _cancel_stream_impl(
+    stream_id: str,
+    reason: str | None = None,
+    *,
+    initiator: str = CANCEL_INITIATOR_USER,
+    held_session_lock=None,
+    deferred_interrupts: list | None = None,
+) -> bool:
+    """Body of ``cancel_stream``.
+
+    ``held_session_lock``: the session agent lock the caller already holds (server
+    settle); the session cleanup then runs under it instead of re-acquiring.
+    ``deferred_interrupts``: when given, the agent is appended instead of being
+    interrupted here; the caller interrupts it after releasing the lock.
 
     Eagerly releases the session lock (pops STREAMS/CANCEL_FLAGS/AGENT_INSTANCES
     and clears session.active_stream_id) so new /api/chat/start requests succeed
@@ -19280,8 +20143,7 @@ def cancel_stream(stream_id: str) -> bool:
     ordering (streaming thread does LOCK → STREAMS_LOCK; inverting would deadlock).
     """
     from api import config as _live_config
-
-    result = {'cancelled': False, 'persistence_failed': False, 'stream_id': stream_id}  # internal accumulator; returns are bool
+    from api.gateway_chat import gateway_run_durably_resumable
 
     # Use module-level aliases (imported from api.config at startup).
     # In production these are always the same objects as api.config.STREAMS etc.
@@ -19316,11 +20178,16 @@ def cancel_stream(stream_id: str) -> bool:
     _snap_flag = None
     _snap_agent = None
     _snap_owner_session_id = None
-    _claimed_fb_notice = None
-    _claimed_fb_generation = None
     _cancel_session_payload = None
 
     with streams_lock:
+        if _cancel_initiator_is_server(initiator) and gateway_run_durably_resumable(stream_id):
+            # #7293: a Gateway run a restart reattaches is never server-settled. Its
+            # durable handoff is published on this same lock only while the stream is
+            # still registered and uncancelled, so either it is visible here (leave
+            # the run, its stream and its session untouched) or the cancellation below
+            # wins and the handoff refuses to admit the run.
+            return False
         stream_present = stream_id in streams
         # Snapshot everything the worker's finally could pop, WHILE the lock is
         # held and before any interrupt lets that finally run — for BOTH the
@@ -19331,8 +20198,13 @@ def cancel_stream(stream_id: str) -> bool:
         _snap_agent = agent_instances.get(stream_id)
         # Capture the stream owner WHILE the stream still exists (#6623). The
         # just-starting worker takes its `q is None -> unregister_stream_owner`
-        # early path the instant STREAMS[stream_id] is popped below, so reading
-        # the owner AFTER the pop can race that teardown and yield None.
+        # early path (api/streaming.py `_run_agent_streaming` and
+        # api/gateway_chat.py `_run_gateway_chat_streaming`) the instant
+        # STREAMS[stream_id] is popped below, so reading the owner AFTER the
+        # pop can race that teardown and yield None — leaving the session's
+        # active_stream_id/pending_* stuck while cancel still returns True.
+        # Reading it here, under streams_lock and before any pop, gives cancel
+        # a stable owner to resolve session cleanup against.
         _snap_owner_session_id = stream_owner_session_id(stream_id)
         _snap_partial_text = partial_texts.get(stream_id, '')
         if not _snap_partial_text:
@@ -19358,8 +20230,9 @@ def cancel_stream(stream_id: str) -> bool:
             except Exception:
                 active_run_entry = None
             if not active_run_entry:
-                return bool(result.get('cancelled'))
+                return False
             active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
+
         if active_run_entry is None:
             try:
                 with _live_config.ACTIVE_RUNS_LOCK:
@@ -19368,6 +20241,10 @@ def cancel_stream(stream_id: str) -> bool:
                 active_run_entry = None
             if active_run_entry and not active_run_session_id:
                 active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
+
+        if _cancel_initiator_is_server(initiator):
+            # Before publication, so a worker released by the cancel reads it.
+            _SERVER_SETTLE_REASONS[str(stream_id)] = str(reason or '').strip() or 'Task cancelled.'
 
         # Mark the worker lifecycle registry immediately. The SSE maps may be popped
         # below while the worker is still unwinding; ACTIVE_RUNS is what recovery /
@@ -19391,510 +20268,540 @@ def cancel_stream(stream_id: str) -> bool:
             cancel_flags.pop(stream_id, None)
             agent_instances.pop(stream_id, None)
 
-    # Outer try/finally: retire the claim on EVERY path after the claim is
-    # acquired — missing session identity, stale-writeback early return, save
-    # failure, and normal completion.  The inner finally (under
-    # `if _cancel_session_id:`) no longer holds the sole retirement; this
-    # outer finally is the authoritative cleanup so neither registry can grow
-    # unbounded (gate-certifier blocker #2).
-    try:
-        # Set WebUI layer cancel flag. Prefer the snapshot captured under the lock;
-        # fall back to a fresh lookup for the ACTIVE_RUNS-only path (stream absent).
-        flag = _snap_flag if _snap_flag is not None else cancel_flags.get(stream_id)
-        if flag:
-            flag.set()
+    # Set WebUI layer cancel flag. Prefer the snapshot captured under the lock;
+    # fall back to a fresh lookup for the ACTIVE_RUNS-only path (stream absent).
+    flag = _snap_flag if _snap_flag is not None else cancel_flags.get(stream_id)
+    if flag:
+        flag.set()
 
-        # Interrupt the AIAgent instance to stop tool execution. Use the
-        # lock-snapshot agent when the stream was present; otherwise fall back to
-        # the session agent cache via the active-run session id.
-        agent = _snap_agent if _snap_agent is not None else agent_instances.get(stream_id)
-        if agent is None and active_run_session_id:
-            try:
-                with _live_config.SESSION_AGENT_CACHE_LOCK:
-                    cached = _live_config.SESSION_AGENT_CACHE.get(active_run_session_id)
-                if cached and _cached_agent_matches_session(cached[0], active_run_session_id):
-                    agent = cached[0]
-            except Exception:
-                pass
-
-
-        if agent:
-            try:
-                agent.interrupt("Cancelled by user")
-            except Exception as e:
-                # Log but don't block the cancel flow
-                import logging
-                logging.getLogger(__name__).debug(
-                    f"Failed to interrupt agent for stream {stream_id}: {e}"
-                )
-        elif stream_present:
-            # Agent not yet stored - cancel_event flag will be checked by agent thread
+    # Interrupt the AIAgent instance to stop tool execution. Use the
+    # lock-snapshot agent when the stream was present; otherwise fall back to
+    # the session agent cache via the active-run session id.
+    agent = _snap_agent if _snap_agent is not None else agent_instances.get(stream_id)
+    if agent is None and active_run_session_id:
+        try:
+            with _live_config.SESSION_AGENT_CACHE_LOCK:
+                cached = _live_config.SESSION_AGENT_CACHE.get(active_run_session_id)
+            if cached and _cached_agent_matches_session(cached[0], active_run_session_id):
+                agent = cached[0]
+        except Exception:
+            pass
+    if agent and deferred_interrupts is not None:
+        # Server settle: interrupt only after the terminal state is durable
+        # and the session lock is released (see cancel_stream).
+        deferred_interrupts.append(agent)
+    elif agent:
+        try:
+            agent.interrupt(reason or "Cancelled by user")
+        except Exception as e:
+            # Log but don't block the cancel flow
             import logging
             logging.getLogger(__name__).debug(
-                f"Cancel requested for stream {stream_id} before agent ready - "
-                f"cancel_event flag set, will be checked on agent startup"
+                f"Failed to interrupt agent for stream {stream_id}: {e}"
             )
+    elif stream_present:
+        # Agent not yet stored - cancel_event flag will be checked by agent thread
+        import logging
+        logging.getLogger(__name__).debug(
+            f"Cancel requested for stream {stream_id} before agent ready - "
+            f"cancel_event flag set, will be checked on agent startup"
+        )
 
-        # Clear any pending clarify prompt so the blocked tool call can unwind.
+    # Clear any pending clarify prompt so the blocked tool call can unwind.
+    try:
+        from api.clarify import clear_pending as _clear_clarify_pending
+
+        _clarify_session_id = getattr(agent, "session_id", None) if agent else active_run_session_id
+        if _clarify_session_id:
+            _clear_clarify_pending(_clarify_session_id)
+    except Exception:
+        logger.debug("Failed to clear clarify prompt during cancel")
+
+    # Capture the queue while the stream still exists, but do not emit the
+    # terminal cancel event until the session cleanup below confirms the turn
+    # is still active. Otherwise a late Stop click can race with a successful
+    # worker save and show cancel in the client while persistence says done.
+    _emit_cancel_event = True
+
+    # Stream ownership was detached under streams_lock before interrupting.
+    # STREAM_PARTIAL_TEXT is intentionally NOT popped here — the agent thread may
+    # still be appending tokens, and the streaming finally block handles cleanup
+    # when the thread exits. We already snapshotted the buffers under streams_lock
+    # at the top of this function (see _snap_*), so they're safe to read below
+    # even if the worker's finally has since popped the live maps.
+
+    # Resolve the cancel session id and reuse the under-lock snapshots.
+    # Session cleanup (get_session + save) must happen OUTSIDE the lock —
+    # get_session() acquires LOCK, and the streaming thread does LOCK first
+    # then STREAMS_LOCK, so inverting the order here would cause deadlock.
+    _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
+    if not _cancel_session_id and active_run_session_id:
+        _cancel_session_id = active_run_session_id
+    # Third fallback: stream owner registry — populated before the worker
+    # thread starts, so it's always available even for early cancels that
+    # race ahead of AGENT_INSTANCES and ACTIVE_RUNS (#6623). The owner is
+    # read UNDER streams_lock above (while STREAMS[stream_id] still exists),
+    # NOT here after the eager pop: the just-starting worker unregisters the
+    # owner the instant the stream map entry disappears, so a post-pop lookup
+    # would race that teardown and return None.
+    if not _cancel_session_id and _snap_owner_session_id:
+        _cancel_session_id = _snap_owner_session_id
+    # Use the snapshots captured under streams_lock above (the worker's finally
+    # may have popped the live buffers by now via agent.interrupt()). For the
+    # ACTIVE_RUNS-only path (stream absent) the snapshots are None → fall back to
+    # a best-effort live read.
+    _cancel_partial_text = _snap_partial_text if _snap_partial_text is not None else partial_texts.get(stream_id, '')
+    if not _cancel_partial_text:
+        live_partials = getattr(_live_config, 'STREAM_PARTIAL_TEXT', partial_texts)
+        if live_partials is not partial_texts:
+            _cancel_partial_text = live_partials.get(stream_id, '')
+    # Capture reasoning trace and live tool calls (#1361 §A + §B)
+    _cancel_reasoning = _snap_reasoning if _snap_reasoning is not None else STREAM_REASONING_TEXT.get(stream_id, '')
+    if not _cancel_reasoning:
+        live_reasoning = getattr(_live_config, 'STREAM_REASONING_TEXT', STREAM_REASONING_TEXT)
+        if live_reasoning is not STREAM_REASONING_TEXT:
+            _cancel_reasoning = live_reasoning.get(stream_id, '')
+    _cancel_tool_calls = _snap_tool_calls if _snap_tool_calls is not None else STREAM_LIVE_TOOL_CALLS.get(stream_id, [])
+    if not _cancel_tool_calls:
+        live_tools = getattr(_live_config, 'STREAM_LIVE_TOOL_CALLS', STREAM_LIVE_TOOL_CALLS)
+        if live_tools is not STREAM_LIVE_TOOL_CALLS:
+            _cancel_tool_calls = live_tools.get(stream_id, [])
+
+    # Gateway runs: retire the run's approval cards BEFORE the interrupted turn is
+    # saved and reported. The stream worker can stay blocked on the Gateway
+    # socket long after this returns, and until its teardown an Allow click was
+    # still relayed and resumed a run WebUI had already recorded as stopped. The
+    # cancel flag is set above (so a card the worker publishes from now on is
+    # retired by the worker itself) and STREAMS_LOCK is released. No approval
+    # lock is taken: Stop never waits on a relay's POST. Any click that starts
+    # after this returns gets 409 without reaching the Gateway; a relay that
+    # had already validated its card still sends its one POST. Best-effort and
+    # never raises into cancel. Local runs skip this.
+    if (
+        _cancel_session_id
+        and isinstance(active_run_entry, dict)
+        and str(active_run_entry.get("backend") or "") == "gateway"
+    ):
         try:
-            from api.clarify import clear_pending as _clear_clarify_pending
+            from api.gateway_chat import settle_gateway_stream_approvals
 
-            _clarify_session_id = getattr(agent, "session_id", None) if agent else active_run_session_id
-            if _clarify_session_id:
-                _clear_clarify_pending(_clarify_session_id)
+            settle_gateway_stream_approvals(
+                _cancel_session_id,
+                stream_id,
+                reason="Gateway run was cancelled before approval resolution",
+            )
         except Exception:
-            logger.debug("Failed to clear clarify prompt during cancel")
+            logger.debug("Failed to retire gateway approvals on cancel for %s", stream_id, exc_info=True)
 
-        # Capture the queue while the stream still exists, but do not emit the
-        # terminal cancel event until the session cleanup below confirms the turn
-        # is still active. Otherwise a late Stop click can race with a successful
-        # worker save and show cancel in the client while persistence says done.
-        _emit_cancel_event = True
-
-        # ── Eager session lock release (fixes #653) ──────────────────────────
-        # Pop stream state now so the 409 guard in routes.py sees the session
-        # as idle and allows new /api/chat/start immediately after cancel,
-        # even if the agent thread is still blocked in a C-level syscall.
-        # The worker thread's finally block uses .pop(key, None) too, so a
-        # double-pop here is safe (no-op).
-        if stream_present:
-            streams.pop(stream_id, None)
-            cancel_flags.pop(stream_id, None)
-            agent_instances.pop(stream_id, None)
-        # STREAM_PARTIAL_TEXT is intentionally NOT popped here — the agent thread may
-        # still be appending tokens, and the streaming finally block handles cleanup
-        # when the thread exits. We already snapshotted the buffers under streams_lock
-        # at the top of this function (see _snap_*), so they're safe to read below
-        # even if the worker's finally has since popped the live maps.
-
-        # Resolve the cancel session id and reuse the under-lock snapshots.
-        # Session cleanup (get_session + save) must happen OUTSIDE the lock —
-        # get_session() acquires LOCK, and the streaming thread does LOCK first
-        # then STREAMS_LOCK, so inverting the order here would cause deadlock.
-        _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
-        if not _cancel_session_id and active_run_session_id:
-            _cancel_session_id = active_run_session_id
-        # Third fallback: stream owner registry — populated before the worker
-        # thread starts, so it's always available even for early cancels that
-        # race ahead of AGENT_INSTANCES and ACTIVE_RUNS (#6623). The owner is
-        # read UNDER streams_lock above (while STREAMS[stream_id] still exists),
-        # NOT here after the eager pop: the just-starting worker unregisters the
-        # owner the instant the stream map entry disappears, so a post-pop lookup
-        # would race that teardown and return None.
-        if not _cancel_session_id and _snap_owner_session_id:
-            _cancel_session_id = _snap_owner_session_id
-        # Use the snapshots captured under streams_lock above (the worker's finally
-        # may have popped the live buffers by now via agent.interrupt()). For the
-        # ACTIVE_RUNS-only path (stream absent) the snapshots are None → fall back to
-        # a best-effort live read.
-        _cancel_partial_text = _snap_partial_text if _snap_partial_text is not None else partial_texts.get(stream_id, '')
-        if not _cancel_partial_text:
-            live_partials = getattr(_live_config, 'STREAM_PARTIAL_TEXT', partial_texts)
-            if live_partials is not partial_texts:
-                _cancel_partial_text = live_partials.get(stream_id, '')
-        # Capture reasoning trace and live tool calls (#1361 §A + §B)
-        _cancel_reasoning = _snap_reasoning if _snap_reasoning is not None else STREAM_REASONING_TEXT.get(stream_id, '')
-        if not _cancel_reasoning:
-            live_reasoning = getattr(_live_config, 'STREAM_REASONING_TEXT', STREAM_REASONING_TEXT)
-            if live_reasoning is not STREAM_REASONING_TEXT:
-                _cancel_reasoning = live_reasoning.get(stream_id, '')
-        _cancel_tool_calls = _snap_tool_calls if _snap_tool_calls is not None else STREAM_LIVE_TOOL_CALLS.get(stream_id, [])
-        if not _cancel_tool_calls:
-            live_tools = getattr(_live_config, 'STREAM_LIVE_TOOL_CALLS', STREAM_LIVE_TOOL_CALLS)
-            if live_tools is not STREAM_LIVE_TOOL_CALLS:
-                _cancel_tool_calls = live_tools.get(stream_id, [])
-
-        # Session cleanup outside STREAMS_LOCK to preserve lock ordering.
-        # Acquire the per-session _agent_lock too, mirroring every other session
-        # writer (streaming success/error paths, periodic checkpoint, POST endpoints)
-        # so the cancel-path mutation races neither the checkpoint thread nor
-        # concurrent undo/retry calls.
-        if _cancel_session_id:
-            _partial_msg = None
-            _cancel_marker_idx = 0
-            with _get_session_agent_lock(_cancel_session_id):
-                try:
-                    _cs = get_session(_cancel_session_id)
-                    _current_cs = _resolve_current_session_for_write(_cs)
-                    if _current_cs is None:
-                        logger.info(
-                            "Skipping cancel writeback for session %s stream %s; current session cannot be resolved",
-                            _cancel_session_id, stream_id,
-                        )
-                        _emit_cancel_event = False
-                        result['cancelled'] = True
-                        return True
-                    _cs = _current_cs
-                    if not isinstance(getattr(_cs, 'messages', None), list):
-                        _cs.messages = []
-                    if not _stream_writeback_is_current(_cs, stream_id):
-                        # The stream has rotated to a different stream id (newer
-                        # turn started, or the worker already finalized this one).
-                        # Skip the cancel-marker append AND suppress the terminal
-                        # cancel event so we don't contradict a possibly-already-
-                        # delivered done payload (#2151 + #2154 / PR #2136).
-                        logger.info(
-                            "Skipping stale cancel writeback for session %s stream %s; active_stream_id=%s",
-                            _cancel_session_id,
-                            stream_id,
-                            getattr(_cs, 'active_stream_id', None),
-                        )
-                        _emit_cancel_event = False
-                        result['cancelled'] = True
-                        return True
-                    # Decide the saved-partial path before creating a provisional
-                    # journal-only owner. Existing partials must remain available
-                    # to the next-send history through the established projection.
-                    _partial_msg = _build_partial_message(
-                        _cancel_partial_text, _cancel_reasoning, _cancel_tool_calls,
+    # Session cleanup outside STREAMS_LOCK to preserve lock ordering.
+    # Acquire the per-session _agent_lock too, mirroring every other session
+    # writer (streaming success/error paths, periodic checkpoint, POST endpoints)
+    # so the cancel-path mutation races neither the checkpoint thread nor
+    # concurrent undo/retry calls.
+    if _cancel_session_id:
+        _cancel_session_lock = _get_session_agent_lock(_cancel_session_id)
+        if held_session_lock is not None and _cancel_session_lock is held_session_lock:
+            # Server settle: the caller already holds it (see cancel_stream).
+            _cancel_session_lock = contextlib.nullcontext()
+        with _cancel_session_lock:
+            try:
+                _cs = get_session(_cancel_session_id)
+                _current_cs = _resolve_current_session_for_write(_cs)
+                if _current_cs is None:
+                    logger.info(
+                        "Skipping cancel writeback for session %s stream %s; current session cannot be resolved",
+                        _cancel_session_id, stream_id,
                     )
-                    # ── Preserve the user's typed message before clearing pending state (#1298) ──
-                    # The agent's internal messages list (where the user message was appended at
-                    # the start of run_conversation()) may not have been merged back into
-                    # _cs.messages yet — cancel_stream() races with the streaming thread's final
-                    # _merge_display_messages_after_agent_result() call. Without this guard, the
-                    # user's message is lost: pending_user_message gets cleared below, and
-                    # _cs.messages still only contains messages from prior turns. The reporter
-                    # of #1298 sees their typed text vanish from chat after clicking Stop.
-                    #
-                    # Recovery rule: if pending_user_message is set AND the latest message in
-                    # _cs.messages isn't already a matching user turn, synthesize one. The
-                    # match check guards against double-append when the streaming thread DID
-                    # reach its merge step before cancel_stream() got the session lock.
-                    #
-                    # Wrapped in its own try/except so an unexpected _cs.messages shape (e.g.
-                    # in unit tests using Mock sessions) cannot escape and skip the rest of
-                    # the cleanup.
-                    _cancel_turn_start = None
-                    _cancel_turn_token = None
-                    try:
-                        _pending_user = getattr(_cs, 'pending_user_message', None)
-                        _pending_source = getattr(_cs, 'pending_user_source', None)
-                        _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
-                        _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
-                        _pending_started = getattr(_cs, 'pending_started_at', None) or 0
-                        _cancel_turn_token = build_active_turn_token(stream_id, _pending_started)
-                        _msgs_for_recovery = _cs.messages if isinstance(_cs.messages, list) else None
-                        if _pending_user and _msgs_for_recovery is not None:
-                            _last_user = None
-                            _last_user_idx = None
-                            for _idx in range(len(_msgs_for_recovery) - 1, -1, -1):
-                                _m = _msgs_for_recovery[_idx]
-                                if isinstance(_m, dict) and _m.get('role') == 'user':
-                                    _last_user = _m
-                                    _last_user_idx = _idx
-                                    break
-                            _already_persisted = False
-                            if _last_user is not None:
-                                _last_content = _last_user.get('content')
-                                _last_ts = _last_user.get('timestamp') or 0
-                                # Only treat as already-persisted if the latest user turn
-                                # was created AT OR AFTER the current turn's pending_started_at.
-                                # An earlier turn whose content happens to be a substring
-                                # (e.g. prior reply was "ok", user now types "ok please continue")
-                                # must NOT short-circuit synthesis — that would re-introduce
-                                # the data-loss bug this guard is supposed to prevent.
-                                if isinstance(_last_content, str) and _last_ts >= _pending_started:
-                                    # Tolerate the workspace prefix the streaming thread prepends.
-                                    if _pending_user == _last_content or _pending_user in _last_content:
-                                        _row_token = _last_user.get('_active_turn_token')
-                                        if (
-                                            _cancel_turn_token
-                                            and _row_token
-                                            and _row_token != _cancel_turn_token
-                                        ):
-                                            # Content + recency is not turn ownership (re-gate
-                                            # 2026-10-06 item 3, upstream): a second interrupt of
-                                            # the same prompt inside one second must synthesize
-                                            # its OWN row (with its own token), not bind this
-                                            # turn's cancel identity to the previous interrupt's
-                                            # row. Token-less rows keep the established check.
-                                            _already_persisted = False
-                                        else:
-                                            _already_persisted = True
-                            if _already_persisted:
-                                _cancel_turn_start = _last_user_idx
-                            else:
-                                _recovered_ts = _recovered_pending_timestamp(_pending_started)
-                                _user_turn: dict = {
-                                    'role': 'user',
-                                    'content': _pending_user,
-                                    'timestamp': _recovered_ts,
-                                }
+                    _emit_cancel_event = False
+                    return True
+                _cs = _current_cs
+                if not isinstance(getattr(_cs, 'messages', None), list):
+                    _cs.messages = []
+                if not _stream_writeback_is_current(_cs, stream_id):
+                    # The stream has rotated to a different stream id (newer
+                    # turn started, or the worker already finalized this one).
+                    # Skip the cancel-marker append AND suppress the terminal
+                    # cancel event so we don't contradict a possibly-already-
+                    # delivered done payload (#2151 + #2154 / PR #2136).
+                    logger.info(
+                        "Skipping stale cancel writeback for session %s stream %s; active_stream_id=%s",
+                        _cancel_session_id,
+                        stream_id,
+                        getattr(_cs, 'active_stream_id', None),
+                    )
+                    _emit_cancel_event = False
+                    return True
+                # Decide the saved-partial path before creating a provisional
+                # journal-only owner. Existing partials must remain available
+                # to the next-send history through the established projection.
+                _partial_msg = _build_partial_message(
+                    _cancel_partial_text, _cancel_reasoning, _cancel_tool_calls,
+                )
+                # ── Preserve the user's typed message before clearing pending state (#1298) ──
+                # The agent's internal messages list (where the user message was appended at
+                # the start of run_conversation()) may not have been merged back into
+                # _cs.messages yet — cancel_stream() races with the streaming thread's final
+                # _merge_display_messages_after_agent_result() call. Without this guard, the
+                # user's message is lost: pending_user_message gets cleared below, and
+                # _cs.messages still only contains messages from prior turns. The reporter
+                # of #1298 sees their typed text vanish from chat after clicking Stop.
+                #
+                # Recovery rule: if pending_user_message is set AND the latest message in
+                # _cs.messages isn't already a matching user turn, synthesize one. The
+                # match check guards against double-append when the streaming thread DID
+                # reach its merge step before cancel_stream() got the session lock.
+                #
+                # Wrapped in its own try/except so an unexpected _cs.messages shape (e.g.
+                # in unit tests using Mock sessions) cannot escape and skip the rest of
+                # the cleanup.
+                _cancel_turn_start = None
+                _cancel_turn_token = None
+                try:
+                    _pending_user = getattr(_cs, 'pending_user_message', None)
+                    _pending_source = getattr(_cs, 'pending_user_source', None)
+                    _pending_atts_raw = getattr(_cs, 'pending_attachments', None)
+                    _pending_atts = list(_pending_atts_raw) if isinstance(_pending_atts_raw, (list, tuple)) else []
+                    _pending_started = getattr(_cs, 'pending_started_at', None) or 0
+                    _cancel_turn_token = build_active_turn_token(stream_id, _pending_started)
+                    _msgs_for_recovery = _cs.messages if isinstance(_cs.messages, list) else None
+                    if _pending_user and _msgs_for_recovery is not None:
+                        _last_user = None
+                        _last_user_idx = None
+                        for _idx in range(len(_msgs_for_recovery) - 1, -1, -1):
+                            _m = _msgs_for_recovery[_idx]
+                            if isinstance(_m, dict) and _m.get('role') == 'user':
+                                _last_user = _m
+                                _last_user_idx = _idx
+                                break
+                        _already_persisted = False
+                        if _last_user is not None:
+                            _last_content = _last_user.get('content')
+                            _last_ts = _last_user.get('timestamp') or 0
+                            # Only treat as already-persisted if the latest user turn
+                            # was created AT OR AFTER the current turn's pending_started_at.
+                            # An earlier turn whose content happens to be a substring
+                            # (e.g. prior reply was "ok", user now types "ok please continue")
+                            # must NOT short-circuit synthesis — that would re-introduce
+                            # the data-loss bug this guard is supposed to prevent.
+                            if isinstance(_last_content, str) and _last_ts >= _pending_started:
+                                # Tolerate the workspace prefix the streaming thread prepends.
+                                if _pending_user == _last_content or _pending_user in _last_content:
+                                    _row_token = _last_user.get('_active_turn_token')
+                                    if (
+                                        _cancel_turn_token
+                                        and _row_token
+                                        and _row_token != _cancel_turn_token
+                                    ):
+                                        # Content + recency is not turn ownership (re-gate
+                                        # 2026-10-06 item 3): a second interrupt of the same
+                                        # prompt inside one second must synthesize its OWN
+                                        # row (with its own token), not bind this turn's
+                                        # cancel identity to the previous interrupt's row.
+                                        # Token-less rows keep the established check.
+                                        _already_persisted = False
+                                    else:
+                                        _already_persisted = True
+                        if _already_persisted:
+                            _cancel_turn_start = _last_user_idx
+                        else:
+                            _recovered_ts = _recovered_pending_timestamp(_pending_started)
+                            _user_turn: dict = {
+                                'role': 'user',
+                                'content': _pending_user,
+                                'timestamp': _recovered_ts,
+                            }
+                            stamp_message_source(
+                                _user_turn,
+                                _pending_source,
+                                active_turn_token=_cancel_turn_token,
+                            )
+                            if _pending_atts:
+                                _user_turn['attachments'] = _pending_atts
+                            _msgs_for_recovery.append(_user_turn)
+                            _cancel_turn_start = len(_msgs_for_recovery) - 1
+
+                        if isinstance(_cancel_turn_start, int):
+                            # Bind the durable cancel hook to the same exact turn
+                            # identity used by normal settlement. A display ordinal
+                            # cannot be translated into provider context after
+                            # compression because the two lists may have different
+                            # user-row counts.
+                            _cancel_owner = _msgs_for_recovery[_cancel_turn_start]
+                            if _cancel_turn_token:
                                 stamp_message_source(
-                                    _user_turn,
+                                    _cancel_owner,
                                     _pending_source,
                                     active_turn_token=_cancel_turn_token,
                                 )
-                                if _pending_atts:
-                                    _user_turn['attachments'] = _pending_atts
-                                _msgs_for_recovery.append(_user_turn)
-                                _cancel_turn_start = len(_msgs_for_recovery) - 1
 
-                            if isinstance(_cancel_turn_start, int):
-                                # Bind the durable cancel hook to the same exact turn
-                                # identity used by normal settlement. A display ordinal
-                                # cannot be translated into provider context after
-                                # compression because the two lists may have different
-                                # user-row counts.
-                                _cancel_owner = _msgs_for_recovery[_cancel_turn_start]
-                                if _cancel_turn_token:
-                                    stamp_message_source(
-                                        _cancel_owner,
-                                        _pending_source,
-                                        active_turn_token=_cancel_turn_token,
-                                    )
+                            if _partial_msg is None:
+                                # Provisional recovery boundary, not a queued
+                                # request. Only journal-only Stop needs an owner
+                                # awaiting durable model-visible output.
+                                _cancel_owner['_recovered'] = True
+                                # Keep the cancelled user boundary in provider context
+                                # so a later exact-stream recovery can be inserted before
+                                # a successor instead of becoming orphaned display state.
+                                from api.models import (
+                                    _append_recovered_turn_to_context,
+                                    _message_matches_pending_checkpoint,
+                                )
 
-                                if _partial_msg is None:
-                                    # Provisional recovery boundary, not a queued
-                                    # request. Only journal-only Stop needs an owner
-                                    # awaiting durable model-visible output.
-                                    _cancel_owner['_recovered'] = True
-                                    # Keep the cancelled user boundary in provider context
-                                    # so a later exact-stream recovery can be inserted before
-                                    # a successor instead of becoming orphaned display state.
-                                    from api.models import (
-                                        _append_recovered_turn_to_context,
-                                        _message_matches_pending_checkpoint,
-                                    )
-
-                                    _context_messages = getattr(_cs, 'context_messages', None)
-                                    if not _cancel_turn_token:
-                                        _append_recovered_turn_to_context(_cs, _cancel_owner)
-                                    elif not isinstance(_context_messages, list):
-                                        # Let the existing helper initialize context from
-                                        # the now-token-bearing display history.
-                                        _append_recovered_turn_to_context(_cs, _cancel_owner)
-                                    else:
-                                        _token_matches = [
+                                _context_messages = getattr(_cs, 'context_messages', None)
+                                if not _cancel_turn_token:
+                                    _append_recovered_turn_to_context(_cs, _cancel_owner)
+                                elif not isinstance(_context_messages, list):
+                                    # Let the existing helper initialize context from
+                                    # the now-token-bearing display history.
+                                    _append_recovered_turn_to_context(_cs, _cancel_owner)
+                                else:
+                                    _token_matches = [
+                                        _row
+                                        for _row in _context_messages
+                                        if (
+                                            isinstance(_row, dict)
+                                            and _row.get('role') == 'user'
+                                            and _row.get('_active_turn_token') == _cancel_turn_token
+                                        )
+                                    ]
+                                    for _context_owner in _token_matches:
+                                        _context_owner['_recovered'] = True
+                                    if not _token_matches:
+                                        _strict_matches = [
                                             _row
                                             for _row in _context_messages
-                                            if (
-                                                isinstance(_row, dict)
-                                                and _row.get('role') == 'user'
-                                                and _row.get('_active_turn_token') == _cancel_turn_token
+                                            if _message_matches_pending_checkpoint(
+                                                _row,
+                                                _pending_user,
+                                                _pending_started,
+                                                _pending_source,
+                                                _pending_atts,
                                             )
                                         ]
-                                        for _context_owner in _token_matches:
-                                            _context_owner['_recovered'] = True
-                                        if not _token_matches:
-                                            _strict_matches = [
-                                                _row
-                                                for _row in _context_messages
-                                                if _message_matches_pending_checkpoint(
-                                                    _row,
-                                                    _pending_user,
-                                                    _pending_started,
-                                                    _pending_source,
-                                                    _pending_atts,
-                                                )
-                                            ]
-                                            _tail = _context_messages[-1] if _context_messages else None
-                                            if (
-                                                len(_strict_matches) == 1
-                                                and _strict_matches[0] is _tail
-                                                and isinstance(_tail, dict)
-                                                and not _tail.get('_active_turn_token')
-                                            ):
-                                                # Only a unique tokenless checkpoint at
-                                                # the exact context tail may be upgraded.
-                                                # Repeated equal prompts or a row already
-                                                # owned by another token are ambiguous and
-                                                # must remain untouched.
-                                                stamp_message_source(
-                                                    _tail,
-                                                    _pending_source,
-                                                    active_turn_token=_cancel_turn_token,
-                                                )
-                                                _tail['_recovered'] = True
-                                            elif not _strict_matches:
-                                                # The current pending user is absent from
-                                                # provider context. Append the exact
-                                                # token-bearing owner rather than binding
-                                                # an older content-equal row.
-                                                _append_recovered_turn_to_context(
-                                                    _cs, _cancel_owner
-                                                )
-                    except Exception:
-                        logger.debug(
-                            "Failed to recover pending user message on cancel for %s",
-                            _cancel_session_id,
-                        )
-                    # Gateway runs: mirror the interrupted turn (recovered user
-                    # row + the streamed partial snapshot taken under streams_lock
-                    # above) into the model-facing context BEFORE the stream id is
-                    # cleared below (upstream #8097-era rework). This runs while
-                    # _stream_writeback_is_current still passes (the guards above
-                    # return early otherwise), so a normal user Stop reconciles the
-                    # same snapshot a gateway-side cancel would, and the next turn's
-                    # client-built conversation_history includes everything the
-                    # gateway persisted at the moment of interruption.
-                    try:
-                        _cancel_partial_ts = int(time.time())
-                        _cancel_backend = ""
-                        if isinstance(active_run_entry, dict):
-                            _cancel_backend = str(active_run_entry.get("backend") or "")
-                        if _cancel_backend == "gateway" or (
-                            (getattr(_cs, "gateway_run", None) or {}).get("stream_id") == stream_id
-                        ):
-                            from api.gateway_chat import _reconcile_gateway_cancelled_context
-
-                            _reconcile_gateway_cancelled_context(
-                                _cs, stream_id, partial_text=_cancel_partial_text,
-                                partial_ts=_cancel_partial_ts,
-                            )
-                    except Exception:
-                        _cancel_partial_ts = int(time.time())
-                        logger.debug(
-                            "Failed gateway cancel-context reconcile for %s",
-                            stream_id,
-                            exc_info=True,
-                        )
-                    _cs.active_stream_id = None
-                    _cs.pending_user_message = None
-                    _cs.pending_attachments = []
-                    _cs.pending_started_at = None
-                    _cs.pending_user_source = None
-                    # Persist any partial assistant text that was streamed before cancel (#893).
-                    # Preserving partial content means the user sees what the agent had
-                    # produced rather than losing it entirely.  The marker is _partial=True
-                    # (for session/UI identification only) — NOT _error=True — so the partial
-                    # content IS kept in the history sent to the agent on the next user
-                    # message, letting the model continue from where it was cut off.
-                    # See the inner comment on the append call below for the rationale.
-                    #
-                    # #1361: Also persist reasoning trace and live tool calls that were
-                    # accumulated in thread-local variables but invisible to the cancel path.
-                    # This prevents paid-token data loss when cancelling mid-reasoning or
-                    # mid-tool-execution.
-                    # NOTE on _partial_tool_calls: the captured entries use the WebUI
-                    # internal shape {name, args, done, duration, is_error} — they do
-                    # NOT carry the OpenAI/Anthropic API id + function: {name, arguments}
-                    # envelope. Storing under 'tool_calls' would cause
-                    # _sanitize_messages_for_api to forward them to the next-turn LLM
-                    # call and strict providers would 400 on the malformed entries.
-                    # The underscore-prefixed key is not in the whitelist, so sanitize
-                    # strips it. The UI reads it via static/messages.js. (v0.50.251.)
-                    if _partial_msg is not None:
-                        # Same whole-second stamp the gateway context reconcile
-                        # used for its mirrored partial row (upstream re-gate
-                        # 2026-10-05 item 5): one stamp so the display merge
-                        # cannot insert a second copy after a second-boundary
-                        # straddle.
-                        _partial_msg["timestamp"] = _cancel_partial_ts
-                    _cancel_marker_exists = _session_has_cancel_marker(_cs)
-                    _cancel_marker_idx = len(_cs.messages)
-                    if _cancel_marker_exists:
-                        for _idx in range(len(_cs.messages) - 1, -1, -1):
-                            _m = _cs.messages[_idx]
-                            if not isinstance(_m, dict) or _m.get('role') != 'assistant':
-                                continue
-                            _content = str(_m.get('content') or '').strip().lower()
-                            if any(pattern in _content for pattern in _CANCEL_MARKER_PATTERNS):
-                                _cancel_marker_idx = _idx
-                                break
-                    if _partial_msg is not None:
-                        # Deduplicate against the full partial payload, not just
-                        # non-empty content. Tool-only/reasoning-only partials have
-                        # empty content, so a content-gated check can append the same
-                        # failed turn repeatedly during cancel/replay recovery (#2592).
-                        if not _partial_marker_already_present(
-                            _cs.messages,
-                            _partial_msg,
-                            before_idx=_cancel_marker_idx,
-                        ):
-                            _cs.messages.insert(_cancel_marker_idx, _partial_msg)
-                    # Cancel marker — flagged _error=True so it is stripped from conversation
-                    # history on the next turn (prevents model from seeing "Task cancelled."
-                    # as a prior assistant reply).
-                    if not _cancel_marker_exists:
-                        _cs.messages.append({
-                            'role': 'assistant',
-                            'content': _cancelled_turn_content(
-                                'Task cancelled.',
-                                _preferred_agent_display_name_for_session(_cs),
-                            ),
-                            '_error': True,
-                            'provider_details': 'Task cancelled.',
-                            'provider_details_label': 'Cancellation details',
-                            'timestamp': int(time.time()),
-                        })
-
-                    if (
-                        _partial_msg is None
-                        and isinstance(_cancel_turn_start, int)
-                        and _cancel_turn_token
-                    ):
-                        _cancel_retry_marker = None
-                        for _candidate in reversed(_cs.messages):
-                            if not isinstance(_candidate, dict) or _candidate.get('role') != 'assistant':
-                                continue
-                            _candidate_content = str(_candidate.get('content') or '').strip().lower()
-                            if (
-                                _candidate.get('_error') is True
-                                and any(pattern in _candidate_content for pattern in _CANCEL_MARKER_PATTERNS)
-                            ):
-                                _cancel_retry_marker = _candidate
-                                break
-                        if _cancel_retry_marker is not None:
-                            _cancel_retry_marker['_pending_journal_recovery'] = True
-                            _cancel_retry_marker['_journal_retry_kind'] = 'cancelled'
-                            _cancel_retry_marker['_journal_retry_stream_id'] = str(stream_id)
-                            _cancel_retry_marker['_journal_retry_attempts'] = 0
-                            _cancel_retry_marker['_journal_retry_first_seen_ts'] = int(time.time())
-                            from api.models import _JOURNAL_RECOVERY_PROCESS_TOKEN
-
-                            _cancel_retry_marker['_journal_retry_process_token'] = (
-                                _JOURNAL_RECOVERY_PROCESS_TOKEN
-                            )
-                            _cancel_retry_marker['_journal_retry_owner_token'] = _cancel_turn_token
-
-                    # Ordinary single save: the retired persistent
-                    # fallback-notice machinery (#6405) no longer requires a
-                    # compare-and-set settlement loop. The cancel marker,
-                    # recovered pending user turn, and partial text above all
-                    # commit in one session.save() (#6623 re-gate).
-                    _cs.save()
-                    _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
+                                        _tail = _context_messages[-1] if _context_messages else None
+                                        if (
+                                            len(_strict_matches) == 1
+                                            and _strict_matches[0] is _tail
+                                            and isinstance(_tail, dict)
+                                            and not _tail.get('_active_turn_token')
+                                        ):
+                                            # Only a unique tokenless checkpoint at
+                                            # the exact context tail may be upgraded.
+                                            # Repeated equal prompts or a row already
+                                            # owned by another token are ambiguous and
+                                            # must remain untouched.
+                                            stamp_message_source(
+                                                _tail,
+                                                _pending_source,
+                                                active_turn_token=_cancel_turn_token,
+                                            )
+                                            _tail['_recovered'] = True
+                                        elif not _strict_matches:
+                                            # The current pending user is absent from
+                                            # provider context. Append the exact
+                                            # token-bearing owner rather than binding
+                                            # an older content-equal row.
+                                            _append_recovered_turn_to_context(
+                                                _cs, _cancel_owner
+                                            )
                 except Exception:
-                    logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
-
-        if _emit_cancel_event and not q and (active_run_session_id or _snap_owner_session_id or _cancel_session_id):
-            # A detached worker still needs a durable terminal for reconnect.
-            _journal_sid = active_run_session_id or _snap_owner_session_id or _cancel_session_id
-            RunJournalWriter(str(_journal_sid), str(stream_id)).publish_terminal(
-                'cancel', _cancel_event_payload('Cancelled by user', session=_cancel_session_payload),
-                lambda _row: None)
-        if _emit_cancel_event and q:
-            _cancel_event_id = STREAM_LAST_EVENT_ID.get(stream_id)
-            if _cancel_event_id and hasattr(q, "note_last_event_id"):
+                    logger.debug(
+                        "Failed to recover pending user message on cancel for %s",
+                        _cancel_session_id,
+                    )
+                # Gateway runs: mirror the interrupted turn (recovered user
+                # row + the streamed partial snapshot taken under streams_lock
+                # above) into the model-facing context BEFORE the stream id is
+                # cleared below. This runs while _stream_writeback_is_current
+                # still passes, so a normal user Stop reconciles the same
+                # snapshot a gateway-side cancel would, and the next turn's
+                # client-built conversation_history includes everything the
+                # gateway persisted at the moment of interruption.
                 try:
-                    q.note_last_event_id(_cancel_event_id)
+                    _cancel_backend = ""
+                    if isinstance(active_run_entry, dict):
+                        _cancel_backend = str(active_run_entry.get("backend") or "")
+                    if _cancel_backend == "gateway" or (
+                        (getattr(_cs, "gateway_run", None) or {}).get("stream_id") == stream_id
+                    ):
+                        from api.gateway_chat import _reconcile_gateway_cancelled_context
+
+                        # ONE whole-second stamp shared by the model-facing
+                        # partial row and the display partial below: two
+                        # independent int(time.time()) calls can straddle a
+                        # second boundary and the display merge key (whole
+                        # seconds) would then insert a second copy of the
+                        # partial on the next successful turn (re-gate
+                        # 2026-10-05 item 5).
+                        _cancel_partial_ts = int(time.time())
+                        _reconcile_gateway_cancelled_context(
+                            _cs, stream_id, partial_text=_cancel_partial_text,
+                            partial_ts=_cancel_partial_ts,
+                        )
+                    else:
+                        _cancel_partial_ts = int(time.time())
                 except Exception:
-                    logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
-            try:
-                _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
-                # Journal identity belongs to the admitted run, not a rotated
-                # Agent session or a reusable cache entry.
-                _journal_sid = (active_run_session_id or _snap_owner_session_id
-                                or _cancel_session_id)
-                def _publish_cancel(row):
-                    event_id = row.get('event_id')
-                    item = ('cancel', _payload, event_id) if event_id and hasattr(q, 'subscribe_with_snapshot') else ('cancel', _payload)
-                    q.put_nowait(item)
-                    if event_id:
-                        STREAM_LAST_EVENT_ID[stream_id] = event_id
-                if _journal_sid:
-                    RunJournalWriter(str(_journal_sid), str(stream_id)).publish_terminal(
-                        'cancel', _payload, _publish_cancel)
-                else:
-                    q.put_nowait(('cancel', _payload))
+                    _cancel_partial_ts = int(time.time())
+                    logger.debug(
+                        "Failed gateway cancel-context reconcile for %s",
+                        stream_id,
+                        exc_info=True,
+                    )
+                _cs.active_stream_id = None
+                _cs.pending_user_message = None
+                _cs.pending_attachments = []
+                _cs.pending_started_at = None
+                _cs.pending_user_source = None
+                # Persist any partial assistant text that was streamed before cancel (#893).
+                # Preserving partial content means the user sees what the agent had
+                # produced rather than losing it entirely.  The marker is _partial=True
+                # (for session/UI identification only) — NOT _error=True — so the partial
+                # content IS kept in the history sent to the agent on the next user
+                # message, letting the model continue from where it was cut off.
+                # See the inner comment on the append call below for the rationale.
+                #
+                # #1361: Also persist reasoning trace and live tool calls that were
+                # accumulated in thread-local variables but invisible to the cancel path.
+                # This prevents paid-token data loss when cancelling mid-reasoning or
+                # mid-tool-execution.
+                # NOTE on _partial_tool_calls: the captured entries use the WebUI
+                # internal shape {name, args, done, duration, is_error} — they do
+                # NOT carry the OpenAI/Anthropic API id + function: {name, arguments}
+                # envelope. Storing under 'tool_calls' would cause
+                # _sanitize_messages_for_api to forward them to the next-turn LLM
+                # call and strict providers would 400 on the malformed entries.
+                # The underscore-prefixed key is not in the whitelist, so sanitize
+                # strips it. The UI reads it via static/messages.js. (v0.50.251.)
+                if _partial_msg is not None:
+                    # Same stamp the context reconcile used for its mirrored
+                    # partial row — one whole-second key so the display merge
+                    # cannot insert a second copy after a boundary straddle
+                    # (re-gate 2026-10-05 item 5).
+                    _partial_msg["timestamp"] = _cancel_partial_ts
+                _cancel_marker_exists = _session_has_cancel_marker(_cs)
+                _cancel_marker_idx = len(_cs.messages)
+                if _cancel_marker_exists:
+                    for _idx in range(len(_cs.messages) - 1, -1, -1):
+                        _m = _cs.messages[_idx]
+                        if not isinstance(_m, dict) or _m.get('role') != 'assistant':
+                            continue
+                        _content = str(_m.get('content') or '').strip().lower()
+                        if any(pattern in _content for pattern in _CANCEL_MARKER_PATTERNS):
+                            _cancel_marker_idx = _idx
+                            break
+                if _partial_msg is not None:
+                    # Deduplicate against the full partial payload, not just
+                    # non-empty content. Tool-only/reasoning-only partials have
+                    # empty content, so a content-gated check can append the same
+                    # failed turn repeatedly during cancel/replay recovery (#2592).
+                    if not _partial_marker_already_present(
+                        _cs.messages,
+                        _partial_msg,
+                        before_idx=_cancel_marker_idx,
+                    ):
+                        _cs.messages.insert(_cancel_marker_idx, _partial_msg)
+                # Cancel marker — flagged _error=True so it is stripped from conversation
+                # history on the next turn (prevents model from seeing "Task cancelled."
+                # as a prior assistant reply).
+                if not _cancel_marker_exists:
+                    _cancel_detail = str(reason or '').strip() or 'Task cancelled.'
+                    _cancel_by_server = _cancel_initiator_is_server(initiator)
+                    _cancel_marker = {
+                        'role': 'assistant',
+                        'content': _cancelled_turn_content(
+                            _cancel_detail,
+                            _preferred_agent_display_name_for_session(_cs),
+                            initiator=CANCEL_INITIATOR_SERVER if _cancel_by_server else CANCEL_INITIATOR_USER,
+                        ),
+                        '_error': True,
+                        'provider_details': _cancel_detail,
+                        'provider_details_label': 'Cancellation details',
+                        'timestamp': int(time.time()),
+                    }
+                    if _cancel_by_server:
+                        _cancel_marker['cancel_initiator'] = CANCEL_INITIATOR_SERVER
+                    _cs.messages.append(_cancel_marker)
+
+                # A journal-only turn has no in-memory partial to carry into the
+                # cancel save. Persist an exact-stream recovery capability on
+                # its marker before returning success. If this process exits
+                # while the old worker is unwinding, a later ordinary session
+                # read can recover already-emitted journal output without
+                # replaying provider execution. Live-buffer partials keep their
+                # existing path and deliberately do not opt into this slice.
+                if (
+                    _partial_msg is None
+                    and isinstance(_cancel_turn_start, int)
+                    and _cancel_turn_token
+                ):
+                    _cancel_retry_marker = None
+                    for _candidate in reversed(_cs.messages):
+                        if not isinstance(_candidate, dict) or _candidate.get('role') != 'assistant':
+                            continue
+                        _candidate_content = str(_candidate.get('content') or '').strip().lower()
+                        if (
+                            _candidate.get('_error') is True
+                            and any(pattern in _candidate_content for pattern in _CANCEL_MARKER_PATTERNS)
+                        ):
+                            _cancel_retry_marker = _candidate
+                            break
+                    if _cancel_retry_marker is not None:
+                        _cancel_retry_marker['_pending_journal_recovery'] = True
+                        _cancel_retry_marker['_journal_retry_kind'] = 'cancelled'
+                        _cancel_retry_marker['_journal_retry_stream_id'] = str(stream_id)
+                        _cancel_retry_marker['_journal_retry_attempts'] = 0
+                        _cancel_retry_marker['_journal_retry_first_seen_ts'] = int(time.time())
+                        from api.models import _JOURNAL_RECOVERY_PROCESS_TOKEN
+
+                        _cancel_retry_marker['_journal_retry_process_token'] = (
+                            _JOURNAL_RECOVERY_PROCESS_TOKEN
+                        )
+                        _cancel_retry_marker['_journal_retry_owner_token'] = _cancel_turn_token
+                _cs.save()
+                _cancel_session_payload = _redacted_session_payload_with_full_messages(_cs)
             except Exception:
-                logger.debug("Failed to put cancel event to queue")
+                logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
 
-        result['cancelled'] = True
-        return True
+    if _emit_cancel_event and not q and (active_run_session_id or _snap_owner_session_id or _cancel_session_id):
+        # A detached worker still needs a durable terminal for reconnect.
+        _journal_sid = active_run_session_id or _snap_owner_session_id or _cancel_session_id
+        _detached_payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
+        if reason:
+            _detached_payload['message'] = str(reason)
+        if _cancel_initiator_is_server(initiator):
+            _detached_payload['cancel_initiator'] = CANCEL_INITIATOR_SERVER
+        RunJournalWriter(str(_journal_sid), str(stream_id)).publish_terminal(
+            'cancel', _detached_payload,
+            lambda _row: None)
+    if _emit_cancel_event and q:
+        _cancel_event_id = STREAM_LAST_EVENT_ID.get(stream_id)
+        if _cancel_event_id and hasattr(q, "note_last_event_id"):
+            try:
+                q.note_last_event_id(_cancel_event_id)
+            except Exception:
+                logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
+        try:
+            _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
+            if reason:
+                _payload['message'] = str(reason)
+            if _cancel_initiator_is_server(initiator):
+                _payload['cancel_initiator'] = CANCEL_INITIATOR_SERVER
+            # Journal identity belongs to the admitted run, not a rotated
+            # Agent session or a reusable cache entry.
+            _journal_sid = (active_run_session_id or _snap_owner_session_id
+                            or _cancel_session_id)
+            def _publish_cancel(row):
+                event_id = row.get('event_id')
+                item = ('cancel', _payload, event_id) if event_id and hasattr(q, 'subscribe_with_snapshot') else ('cancel', _payload)
+                q.put_nowait(item)
+                if event_id:
+                    STREAM_LAST_EVENT_ID[stream_id] = event_id
+            if _journal_sid:
+                RunJournalWriter(str(_journal_sid), str(stream_id)).publish_terminal(
+                    'cancel', _payload, _publish_cancel)
+            else:
+                q.put_nowait(('cancel', _payload))
+        except Exception:
+            logger.debug("Failed to put cancel event to queue")
 
-    finally:
-        _claimed_fb_notice = None
-        _claimed_fb_generation = None
+    return True

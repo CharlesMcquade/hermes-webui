@@ -3,7 +3,11 @@ import os
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import sync_playwright
+
+# playwright is an optional browser-test dependency (not in requirements-dev);
+# guard the module import so clean test venvs skip instead of failing collection
+# (same pattern as tests/test_issue6942_mobile_camera_choice_render.py).
+sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 

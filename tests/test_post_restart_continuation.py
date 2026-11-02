@@ -852,7 +852,7 @@ def test_goal_and_continuation_share_earliest_admission(armed, monkeypatch, goal
 
 
 @pytest.fixture
-def offline_server(armed, monkeypatch):
+def offline_server(armed, monkeypatch, request):
     """Import actual server/main; replace every startup side effect, not main."""
     import builtins
     import sys
@@ -896,6 +896,28 @@ def offline_server(armed, monkeypatch):
     monkeypatch.setattr(builtins, "open", safe_open)
     handlers = {}
     monkeypatch.setattr(server.signal, "signal", lambda sig, handler: handlers.setdefault(sig, handler))
+    # The merged stop path starts a real ShutdownDrain inside main(); it flips
+    # module-global run-admission state (_DRAINING) that outlives the test.
+    # Reset before and after so later continuation tests see an open fence.
+    from api import config, run_drain
+    run_drain._reset_for_tests()
+    # The merged stop path waits (budgeted) for WebUI-owned runs before
+    # httpd.shutdown. These offline tests stub the worker, so claimed streams
+    # never clean up and would hold the drain for its full budget; a zero
+    # budget keeps the ordering assertions while skipping run draining.
+    monkeypatch.setenv("HERMES_WEBUI_SHUTDOWN_DRAIN_SECONDS", "0")
+    # Earlier route tests can leak entries into the process-global run
+    # registries; the merged stop path's ShutdownDrain waits for WebUI-owned
+    # runs to clear, so stale rows would hang the drain for its full budget.
+    def _clear_run_registries():
+        with config.STREAMS_LOCK:
+            config.STREAMS.clear()
+            config.PRE_ADMISSION_CLAIMS.clear()
+        with config.ACTIVE_RUNS_LOCK:
+            config.ACTIVE_RUNS.clear()
+        run_drain._reset_for_tests()
+    _clear_run_registries()
+    request.addfinalizer(_clear_run_registries)
     return server, handlers
 
 
@@ -1012,7 +1034,10 @@ def test_actual_main_shutdown_fences_validated_claim(armed, offline_server, monk
                 assert not shutdown.is_set(), "HTTP shutdown did not join consumer"
             finally:
                 release.set()
-            assert shutdown.wait(3)
+            # Merged stop path: the ShutdownDrain polls until WebUI-owned runs
+            # clear (0.25s cadence) before calling httpd.shutdown, so shutdown can
+            # legitimately lag the consumer join by a few poll intervals.
+            assert shutdown.wait(15)
         def shutdown(self):
             assert not threads[0].is_alive()
             shutdown.set()
