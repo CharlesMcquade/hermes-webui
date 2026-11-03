@@ -123,5 +123,5 @@ def test_steer_admission_and_renderer_contract():
     assert "const receipt=result.steer_event" in commands
     assert "_showSteerIndicator(originalMsg,steerUploadedPaths)" in commands
     assert "else if(!receipt&&_steerOwnerIsCurrent(ownerSid))" in commands
-    assert "node.innerHTML=_steerRowInnerHtml(text,[], ''" in ui
+    assert "node.innerHTML=_steerRowInnerHtml(text,labels,'',S.session&&S.session.session_id||'',true)" in ui
     assert "row.source_event_type==='steer_delivered'" in ui

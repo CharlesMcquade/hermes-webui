@@ -11796,13 +11796,14 @@ function _steerDisplayParts(content){
   return {text:text.trim(),files};
 }
 
-function _steerRowInnerHtml(text, files, footHtml, sid){
+function _steerRowInnerHtml(text, files, footHtml, sid, labelsOnly=false){
   let filesHtml='';
   if(files&&files.length){
     filesHtml=`<div class="msg-files">${files.map(file=>{
       const path=typeof file==='string'?file:String((file&&file.path)||'');
       if(!path)return '';
-      const fname=path.split('/').pop()||path;
+      const fname=path.split(/[\\/]/).pop()||path;
+      if(labelsOnly)return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
       const label=typeof file==='string'?fname:String(file.name||fname);
       const fileUrl='api/file/raw?session_id='+encodeURIComponent(sid||'')+'&path='+encodeURIComponent(fname);
       return _renderAttachmentHtml(label,fileUrl);
@@ -18419,9 +18420,10 @@ function _anchorSceneNodeForRow(row, opts){
       node.dataset.role='steer';
       node.dataset.steerReceiptId=String(row.payload.receipt_id);
       node.dataset.rawText=text;
-      // The journal carries authored text, not trusted attachment metadata.
-      // Never turn a path embedded in text into a file link.
-      node.innerHTML=_steerRowInnerHtml(text,[], '', S.session&&S.session.session_id||'');
+      // The journal carries authored text and bounded attachment labels, not trusted file paths.
+      // Show labels only; never create links or media URLs from receipt data.
+      const labels=Array.isArray(row.payload.files)?row.payload.files.filter(file=>typeof file==='string'&&file.length>0&&file.length<=256).slice(0,20):[];
+      node.innerHTML=_steerRowInnerHtml(text,labels,'',S.session&&S.session.session_id||'',true);
     }else node=_activityStatusNode({
       kind:settled?'done':'waiting',
       label:row.text||row.source_event_type||'Waiting',

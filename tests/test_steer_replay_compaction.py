@@ -76,18 +76,49 @@ const vm=require('vm'),assert=require('assert');
 const context={{S:{{session:{{session_id:'sid'}}}},
   document:{{createElement:()=>({{dataset:{{}},attributes:{{}},
     setAttribute(k,v){{this.attributes[k]=v;}}}})}},
-  _steerRowInnerHtml:(text)=>`Steer: ${{text}}`}};
+  _steerRowInnerHtml:(text,files,_foot,_sid,labelOnly)=>{{
+    assert.strictEqual(labelOnly,true);
+    return `Steer: ${{text}} (${{files.join(',')}})`;
+  }}}};
 vm.runInNewContext({json.dumps(renderer)}+'\\nthis.draw=_anchorSceneNodeForRow;',context);
 for (const role of ['control','user']) {{
  const row={{kind:'control_boundary',role,source_event_type:'steer_delivered',
    event_id:'run:4',run_id:'run',row_id:'run:4',text:'Follow my revision',
-   payload:{{receipt_id:'test-receipt-4'}}}};
+   payload:{{receipt_id:'test-receipt-4',files:['diagram.png','brief.html']}}}};
  const rendered=context.draw(row,{{settled:true}});
  assert.ok(rendered,`no node for ${{role}}`);
  assert.strictEqual(rendered.dataset.steerReceiptId,'test-receipt-4');
  assert.strictEqual(rendered.dataset.rawText,'Follow my revision');
- assert.strictEqual(rendered.innerHTML,'Steer: Follow my revision');
+ assert.strictEqual(rendered.innerHTML,'Steer: Follow my revision (diagram.png,brief.html)');
 }}
+"""
+    result = subprocess.run([node, "-e", js], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_steer_receipt_file_labels_never_construct_a_media_url_or_raw_path():
+    node = shutil.which("node")
+    assert node
+    ui = (ROOT / "static/ui.js").read_text()
+    start = ui.index("function _steerRowInnerHtml(")
+    end = ui.index("\nfunction setStatus(", start)
+    renderer = ui[start:end]
+    js = rf"""
+const vm=require('vm'),assert=require('assert');
+const context={{
+  li:()=>'',t:()=> 'Steer',_getCachedRender:(text)=>text,
+  esc:(s)=>String(s).replaceAll('<','&lt;').replaceAll('>','&gt;'),
+  _renderAttachmentHtml:()=>{{throw new Error('label-only receipt must not render media');}}
+}};
+vm.runInNewContext({json.dumps(renderer)}+'\nthis.html=_steerRowInnerHtml;',context);
+const html=context.html('Guide',[
+  '/private/hidden/diagram.png','brief.html','<img src=x onerror=alert(1)>.jpg'
+],'','sid',true);
+assert.match(html,/diagram.png/);
+assert.match(html,/brief.html/);
+assert.match(html,/&lt;img src=x onerror=alert\(1\)&gt;\.jpg/);
+assert.ok(!html.includes('/private/hidden'));
+assert.doesNotMatch(html,/<img|<a |href=|<source|<audio|<video/);
 """
     result = subprocess.run([node, "-e", js], text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
