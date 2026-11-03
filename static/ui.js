@@ -863,6 +863,9 @@ function _getVisibleMessagesWithIdx(){
 // Suppress only the Agent row proved to correspond to a rendered journal
 // boundary. Identical text is not an identity or admission signal.
 function _nativeSteerCoveredByScene(message, rawIdx){
+  // Final-answer-only mode has no scene renderer; do not hide the sole
+  // user-authored row merely because a journal receipt exists on disk.
+  if(typeof isFinalAnswerOnlyMode==='function'&&isFinalAnswerOnlyMode()) return false;
   if(!message||message.role!=='user'||message.display_kind!=='steer'
      ||!Array.isArray(message._steer_receipt_ids)||!message._steer_receipt_ids.length) return false;
   const receipts=new Set(message._steer_receipt_ids.filter(id=>typeof id==='string'&&id));
@@ -20143,6 +20146,10 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   });
   if(!group) return false;
   group.setAttribute('data-anchor-settled-scene-owner','1');
+  // A collapsed Worklog defers its rows, but a user-authored Steer must remain
+  // visible as a boundary before the final answer. Expanded Worklog shows the
+  // canonical scene row in sequence; CSS hides this collapsed-only projection.
+  _syncSettledSteerBoundaryPreviews(group,rows);
   // #5839: for a COLLAPSED settled worklog, defer building the row DOM until the
   // user first expands it. A reasoning-heavy turn can carry 80+ activity rows;
   // eagerly materializing them for every historical turn balloons the DOM and a
@@ -20163,6 +20170,25 @@ function _renderSettledAnchorSceneForMessage(message, segment, rawIdx){
   group.removeAttribute('data-worklog-rows-deferred');
   return _renderAnchorSceneRowsIntoWorklog(group,rows,{settled:true});
 }
+function _syncSettledSteerBoundaryPreviews(group,rows){
+  if(!group||!group.parentElement) return;
+  let preview=group.nextElementSibling;
+  if(!preview||!preview.classList.contains('steer-settled-preview-group')){
+    preview=document.createElement('div');
+    preview.className='steer-settled-preview-group';
+    group.insertAdjacentElement('afterend',preview);
+  }
+  preview.replaceChildren();
+  for(const row of rows){
+    if(!row||row.source_event_type!=='steer_delivered') continue;
+    const node=_anchorSceneNodeForRow(row,{settled:true});
+    if(!node) continue;
+    node.setAttribute('data-steer-collapsed-preview','1');
+    preview.appendChild(node);
+  }
+  if(!preview.childElementCount) preview.remove();
+}
+
 function _syncLiveWorklogReasonsForAnchor(anchor, displayTextOverride){
   if(S.activeStreamId&&isLiveAnchorActivitySceneOwner(S.activeStreamId)) return;
   // Worklog reason-mirroring (folding intermediate prose into a top Worklog rail

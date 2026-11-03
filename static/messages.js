@@ -7860,7 +7860,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('steer_delivered',e=>{
-      try{_admitSteer(JSON.parse(e.data));}catch(_){}
+      try{
+        // Journal SSE puts the canonical ID in the SSE id: header, not in
+        // data:. Reconstitute the same envelope returned by POST so both
+        // paths share the run/sequence dedupe key.
+        const eventId=String(e.lastEventId||'');
+        const prefix=`${streamId}:`;
+        const seqText=eventId.startsWith(prefix)?eventId.slice(prefix.length):'';
+        if(!/^\d+$/.test(seqText)) return;
+        _admitSteer({
+          event_id:eventId, run_id:streamId, seq:Number(seqText),
+          session_id:activeSid, payload:JSON.parse(e.data),
+        });
+      }catch(_){/* malformed event: replay from the journal on reconnect */}
     });
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','steer_delivered','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','memory_status','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);

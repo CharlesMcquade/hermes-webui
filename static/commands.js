@@ -2284,14 +2284,20 @@ async function _trySteer(msg, explicitSteer){
         if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
       }
     }
-    // Live row uses this request's successful upload destinations, never staged File.name.
+    // The journal receipt owns the inline boundary. Older Agent versions and
+    // an accepted-but-failed journal append cannot supply one; keep their
+    // existing live preview rather than making accepted guidance disappear.
     const receipt=result.steer_event;
     const admissions=typeof window!=='undefined'&&window._steerAnchorAdmissions;
-    if(admissions&&typeof admissions.get==='function'){
+    if(receipt&&admissions&&typeof admissions.get==='function'){
       const admit=admissions.get(ownerStreamId);
       if(typeof admit==='function') admit(receipt);
+    }else if(!receipt&&_steerOwnerIsCurrent(ownerSid)){
+      _showSteerIndicator(originalMsg,steerUploadedPaths);
     }
-    showToast(t('cmd_steer_delivered'),2500);
+    showToast(result.durable===false
+      ? 'Steer accepted, but its timeline position was not saved.'
+      : t('cmd_steer_delivered'),result.durable===false?5000:2500);
     return true;
   }
   if(result&&result.fallback==='gateway_steer_queued'&&typeof queueSessionMessage==='function'){

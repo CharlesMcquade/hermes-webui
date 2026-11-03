@@ -122,6 +122,8 @@ def test_bound_stream_publishes_receipt_for_owned_local_worker(monkeypatch, tmp_
         "session", "stream", "steer the agent", display_text="steer the agent", files=[])
     assert response["accepted"] is True and response["durable"] is True
     assert response["steer_event"]["payload"]["receipt_id"] == agent.calls[0][1]
+    import uuid
+    assert str(uuid.UUID(agent.calls[0][1])) == agent.calls[0][1]
     assert channel.items[0][0] == "steer_delivered"
 
 
@@ -147,7 +149,7 @@ def test_legacy_worker_does_not_publish_unpairable_duplicate(monkeypatch, tmp_pa
 
 
 def test_published_event_cannot_precede_its_journal_row(monkeypatch, tmp_path):
-    writer = _writer(monkeypatch, tmp_path)
+    _writer(monkeypatch, tmp_path)
     agent = ReceiptAgent()
     class InspectingChannel(Channel):
         def put_nowait(self, item):

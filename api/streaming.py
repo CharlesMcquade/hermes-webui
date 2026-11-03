@@ -19655,7 +19655,7 @@ def _accept_and_publish_steer_presentation(agent, sid, stream_id, runtime_text, 
     import uuid
     from api.config import STREAM_LAST_EVENT_ID
 
-    receipt_id = uuid.uuid4().hex
+    receipt_id = str(uuid.uuid4())
     payload = {
         "session_id": str(sid), "stream_id": str(stream_id),
         "receipt_id": receipt_id, "text": str(display_text),

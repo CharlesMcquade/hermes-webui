@@ -30,24 +30,17 @@ class TestJournalReceiptDoesNotReplaceNativeSteer:
         assert "_steer_runtime_text(" in src
         assert 'if "receipt_id" not in steer_params:' in src
 
-    def test_frontend_has_no_custom_projection(self):
+    def test_frontend_uses_journal_event_and_keeps_legacy_preview_as_fallback(self):
         cmds = _read("static/commands.js")
-        assert "_recordSteerEventFromResponse" not in cmds
-        assert "steer_event" not in cmds
-        assert "persistenceDegraded" not in cmds
-        ui = _read("static/ui.js")
-        for symbol in (
-            "_anchorSceneDeliveredSteerRows",
-            "_renderLiveAnchorSteerRowsOnly",
-            "_renderSettledAnchorSteerRowsOnlyForMessage",
-            "data-steer-delivery",
-            "data-steer-only",
-        ):
-            assert symbol not in ui, symbol
         messages = _read("static/messages.js")
-        assert "steer_delivered" not in messages
+        ui = _read("static/ui.js")
         anchors = _read("static/assistant_turn_anchors.js")
-        assert "steer_delivered" not in anchors
+        assert "const receipt=result.steer_event" in cmds
+        assert "source.addEventListener('steer_delivered'" in messages
+        assert "steer_delivered:Object.freeze" in anchors
+        assert "function _nativeSteerCoveredByScene(" in ui
+        # An Agent without receipt support still needs a visible local preview.
+        assert "function _showSteerIndicator(" in cmds
 
     def test_response_exposes_only_actual_durable_receipts(self):
         from api.streaming import _steer_response
