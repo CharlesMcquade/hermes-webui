@@ -19628,15 +19628,17 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str, *, display_text: st
             steer_params = {}
         if "receipt_id" not in steer_params:
             try:
-                accepted = bool(agent.steer(text))
+                # Older Agents historically accepted on enqueue; their boolean
+                # return is advisory and cannot reject an already queued Steer.
+                agent.steer(text)
             except Exception:
                 logger.debug("Stream-bound steer failed for session %s", sid, exc_info=True)
                 return {"accepted": False, "fallback": "steer_error", "stream_id": stream_id}
-            return _steer_response({"accepted": accepted, "fallback": None if accepted else "steer_error"}, sid, stream_id)
+            return _steer_response({"accepted": True}, sid, stream_id)
         try:
             outcome = _accept_and_publish_steer_presentation(
                 agent, sid, stream_id, text, display_text=display_text,
-                files=files, channel=cfg.STREAMS.get(stream_id),
+                files=files, channel=cfg.STREAMS[stream_id],
             )
         except Exception:
             logger.debug("Stream-bound steer failed for session %s", sid, exc_info=True)
