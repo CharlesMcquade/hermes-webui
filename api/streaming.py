@@ -19617,17 +19617,83 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str, *, display_text: st
             return {"accepted": False, "fallback": "no_cached_agent", "stream_id": None}
         if not callable(getattr(agent, "steer", None)):
             return {"accepted": False, "fallback": "agent_lacks_steer", "stream_id": None}
+        # The Agent's native row is the model-history record, but it is appended
+        # only when the current tool batch finishes. A journal receipt records
+        # the *presentation* boundary now, without changing delivery order.
+        # Older agents without receipt identity retain their original behavior:
+        # never create a second visible row that cannot be paired to the native one.
         try:
-            # Upstream contract: Steer admission is the in-memory Agent queue
-            # (agent.steer -> _pending_steer). The fork-only independent
-            # durable steer admission/journal publication (#7188) is retired;
-            # consumption persistence happens natively as a display_kind=steer
-            # user row at the Agent drain boundary.
-            agent.steer(text)
+            steer_params = inspect.signature(agent.steer).parameters
+        except (ValueError, TypeError):
+            steer_params = {}
+        if "receipt_id" not in steer_params:
+            try:
+                accepted = bool(agent.steer(text))
+            except Exception:
+                logger.debug("Stream-bound steer failed for session %s", sid, exc_info=True)
+                return {"accepted": False, "fallback": "steer_error", "stream_id": stream_id}
+            return _steer_response({"accepted": accepted, "fallback": None if accepted else "steer_error"}, sid, stream_id)
+        try:
+            outcome = _accept_and_publish_steer_presentation(
+                agent, sid, stream_id, text, display_text=display_text,
+                files=files, channel=cfg.STREAMS.get(stream_id),
+            )
         except Exception:
             logger.debug("Stream-bound steer failed for session %s", sid, exc_info=True)
             return {"accepted": False, "fallback": "steer_error", "stream_id": stream_id}
-        return _steer_response({"accepted": True}, sid, stream_id)
+        return _steer_response(outcome, sid, stream_id)
+
+
+def _accept_and_publish_steer_presentation(agent, sid, stream_id, runtime_text, *, display_text, files, channel):
+    """One Agent admission plus its ordered, durable WebUI presentation boundary.
+
+    Called under STREAMS_LOCK, the same Stop/worker-ownership edge as ordinary
+    Steer. The journal's per-run lock is nested inside it; the publish callback
+    uses only the captured channel and never reacquires STREAMS_LOCK. A receipt
+    is not proof of *consumption*: the Agent may still requeue it or Stop.
+    """
+    import uuid
+    from api.config import STREAM_LAST_EVENT_ID
+
+    receipt_id = uuid.uuid4().hex
+    payload = {
+        "session_id": str(sid), "stream_id": str(stream_id),
+        "receipt_id": receipt_id, "text": str(display_text),
+        "files": _steer_display_file_names(files),
+        "status": "received", "created_at": time.time(),
+    }
+    writer = RunJournalWriter(str(sid), str(stream_id))
+
+    def publish(event):
+        if not callable(getattr(channel, "put_nowait", None)):
+            raise RuntimeError("Steer stream channel unavailable")
+        event_id = event.get("event_id")
+        item = ("steer_delivered", payload, event_id) if event_id and hasattr(channel, "subscribe_with_snapshot") else ("steer_delivered", payload)
+        channel.put_nowait(item)
+        if event_id:
+            STREAM_LAST_EVENT_ID[str(stream_id)] = event_id
+
+    accepted, event, reason, error = writer.accept_and_append_if_nonterminal(
+        "steer_delivered", payload,
+        lambda: bool(agent.steer(runtime_text, receipt_id=receipt_id)),
+        publish=publish,
+    )
+    outcome = {
+        "accepted": bool(accepted), "fallback": None,
+        "durable": isinstance(event, dict), "published": reason is None and isinstance(event, dict),
+        "event": event, "payload": payload,
+    }
+    if reason in ("terminal", "fence_closed"):
+        outcome["fallback"] = "stream_dead"
+    elif reason == "journal_malformed" or reason == "rejected":
+        outcome["fallback"] = "steer_error"
+    elif reason in ("persistence_error", "publication_error"):
+        logger.warning("Steer presentation %s for session=%s stream=%s: %s",
+                       reason, sid, stream_id, error)
+        # The Agent already accepted; never retry it. The native row remains
+        # visible if the receipt could not be journaled.
+        outcome["fallback"] = reason
+    return outcome
 
 
 def _steer_attachment_paths(value) -> list[str]:
@@ -20007,16 +20073,31 @@ def _handle_chat_steer(handler, body: dict) -> bool:
 
 
 def _steer_response(outcome: dict, sid: str, active_stream_id: str) -> dict:
-    """Legacy accepted/fallback/stream_id response.
+    """Preserve the legacy response and add an ordered presentation receipt when durable.
 
-    The retired independent steer admission (#7188) exposed an extra
-    durable/published receipt and a steer_event journal envelope; consumed
-    guidance now persists exactly once as the native display_kind=steer user
-    row, so no custom receipt successor exists.
+    Acceptance is the Agent queue, not proof the next model request consumed it.
+    A failed append after acceptance must not claim durability or be retried.
     """
-    return {"accepted": bool(outcome.get("accepted")),
-            "fallback": outcome.get("fallback"),
-            "stream_id": active_stream_id}
+    response = {"accepted": bool(outcome.get("accepted")),
+                "fallback": outcome.get("fallback"),
+                "stream_id": active_stream_id}
+    if not response["accepted"] or "durable" not in outcome:
+        return response
+    response["durable"] = bool(outcome.get("durable"))
+    response["published"] = bool(outcome.get("published"))
+    event = outcome.get("event")
+    if isinstance(event, dict) and event.get("event_id"):
+        response["steer_event"] = {
+            "version": event.get("version", 1),
+            "type": "steer_delivered", "event": "steer_delivered",
+            "event_id": event["event_id"], "seq": event.get("seq"),
+            "run_id": event.get("run_id", active_stream_id),
+            "session_id": event.get("session_id", sid),
+            "stream_id": active_stream_id,
+            "created_at": event.get("created_at"),
+            "payload": dict(outcome.get("payload") or {}),
+        }
+    return response
 
 
 # Bound on how long a server settle waits for the owning session's lock before

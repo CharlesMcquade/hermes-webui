@@ -1,10 +1,9 @@
-"""W3-R12 R02 invariant tests — custom Steer presentation + independent admission retired (#7188).
+"""Steer presentation receipt + native model-history contract.
 
-Negative: no custom receipt/`steer_delivered` projection, no independent durable
-admission, no duplicate anchor rendering.
-Positive: upstream POST/queue path, ownership edges, `pending_steer_leftover`
-SSE, native `display_kind=steer` unwrap, and attachment path verification
-(shared security) all survive.
+An ordered WebUI journal receipt renders guidance at acceptance time; Agent
+consumption still produces one native display_kind=steer user row. Explicit
+receipt IDs pair these records for display, never by comparing steer text.
+Ownership, leftover delivery, and attachment path verification remain intact.
 """
 from __future__ import annotations
 
@@ -22,16 +21,14 @@ def _read(rel_path: str) -> str:
     return (ROOT / rel_path).read_text(encoding="utf-8")
 
 
-class TestRetiredSteerMachineryAbsent:
-    def test_backend_has_no_custom_admission_or_delivery_event(self):
+class TestJournalReceiptDoesNotReplaceNativeSteer:
+    def test_backend_keeps_native_agent_admission_and_adds_ordered_receipt(self):
         src = _read("api/streaming.py")
-        for symbol in (
-            "_accept_and_publish_steer_event",
-            "steer_delivered",
-            "accept_and_append_if_nonterminal",
-            "close_acceptance_fence",
-        ):
-            assert symbol not in src, symbol
+        assert "accept_and_append_if_nonterminal" in src
+        assert "agent.steer(runtime_text, receipt_id=receipt_id)" in src
+        assert "steer_delivered" in src
+        assert "_steer_runtime_text(" in src
+        assert 'if "receipt_id" not in steer_params:' in src
 
     def test_frontend_has_no_custom_projection(self):
         cmds = _read("static/commands.js")
@@ -52,12 +49,22 @@ class TestRetiredSteerMachineryAbsent:
         anchors = _read("static/assistant_turn_anchors.js")
         assert "steer_delivered" not in anchors
 
-    def test_no_custom_receipt_in_steer_response(self):
+    def test_response_exposes_only_actual_durable_receipts(self):
         from api.streaming import _steer_response
-
-        body = _steer_response({"accepted": True, "durable": True, "published": True,
-                                "event": {"type": "steer_delivered"}}, "sid", "stream")
-        assert set(body) == {"accepted", "fallback", "stream_id"}
+        bare = _steer_response({"accepted": True}, "sid", "stream")
+        assert set(bare) == {"accepted", "fallback", "stream_id"}
+        failed = _steer_response({"accepted": True, "durable": False,
+                                  "published": False, "event": None}, "sid", "stream")
+        assert failed["accepted"] and not failed["durable"]
+        assert "steer_event" not in failed
+        receipt = _steer_response({
+            "accepted": True, "durable": True, "published": True,
+            "event": {"event_id": "stream:5", "seq": 5, "run_id": "stream",
+                      "session_id": "sid", "created_at": 123},
+            "payload": {"receipt_id": "opaque", "text": "go left"},
+        }, "sid", "stream")
+        assert receipt["steer_event"]["payload"]["receipt_id"] == "opaque"
+        assert receipt["steer_event"]["event_id"] == "stream:5"
 
 
 class TestNativeSteerPathRetained:
