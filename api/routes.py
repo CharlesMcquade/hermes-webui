@@ -5234,12 +5234,20 @@ def _runtime_journal_snapshot_for_session_payload(snapshot: dict | None) -> dict
                 row.pop("thinking", None)
             if str(raw_row.get("source_event_type") or "") == "steer_delivered":
                 raw_payload = raw_row.get("payload") if isinstance(raw_row.get("payload"), dict) else {}
+                # Keep the minimal display identity across reattach: the row's
+                # text is already carried above, but without receipt_id the
+                # native Agent row cannot be paired and appears a second time.
+                compact_payload = {}
+                receipt_id = raw_payload.get("receipt_id")
+                if isinstance(receipt_id, str) and 0 < len(receipt_id) <= 128:
+                    compact_payload["receipt_id"] = receipt_id
                 files = raw_payload.get("files") if isinstance(raw_payload.get("files"), list) else []
                 if files:
-                    # The compact session projection normally drops duplicated
-                    # payloads, but attachment labels exist nowhere else on a
-                    # Steer row and are part of its visible user-authored record.
-                    row["payload"] = {"files": files[:20]}
+                    # Attachment labels exist nowhere else on a Steer row;
+                    # never carry runtime paths or duplicate authored text.
+                    compact_payload["files"] = files[:20]
+                if compact_payload:
+                    row["payload"] = compact_payload
         compact_rows.append(row)
     compact_scene["activity_rows"] = compact_rows
     projected["anchor_activity_scene"] = compact_scene

@@ -18410,9 +18410,9 @@ function _anchorSceneNodeForRow(row, opts){
         id:row.row_id||row.local_id||'',
       });
     }
-  }else if(row.role==='control'){
+  }else if(row.role==='control'||(row.role==='user'&&row.source_event_type==='steer_delivered')){
     if(row.source_event_type==='steer_delivered'){
-      const text=row.payload&&typeof row.payload.text==='string'?row.payload.text:'';
+      const text=row.payload&&typeof row.payload.text==='string'?row.payload.text:(typeof row.text==='string'?row.text:'');
       if(!row.event_id||!row.run_id||!row.payload||!row.payload.receipt_id||!text.trim()) return null;
       node=document.createElement('div');
       node.className='msg-row steer-row';

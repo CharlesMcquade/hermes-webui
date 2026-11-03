@@ -792,7 +792,7 @@ def test_settled_scene_keeps_user_visible_lifecycle_and_control_rows():
     assert "source==='compressing'||source==='compressed'" in rows
     assert "(weight(a)-weight(b))" not in rows
     assert "_anchorSceneIsSettledSuccessfulCompression(row,settled)" in rows
-    assert "}else if(row.role==='control'){" in node
+    assert "}else if(row.role==='control'||(row.role==='user'&&row.source_event_type==='steer_delivered')){" in node
     assert "}else if(!settled&&row.role==='control'){" not in node
     assert "phase:settled||row.source_event_type==='compressed'?'done':'running'" in node
     assert "kind:settled?'done':'waiting'" in node
