@@ -1163,7 +1163,8 @@ def _apply_intentional_leaves(data: dict, source: dict, paths) -> None:
 # referenced field is not a leak). The leaves travel via thread-local state
 # instead of a keyword argument so ``_save_yaml_config_file`` keeps the exact
 # two-positional-argument signature both upstream and the fork's own test hooks
-# bind against.
+# bind against. The save CONSUMES the mark at entry — a failed save leaves
+# nothing behind for a later unrelated save on this thread to apply.
 _pending_intentional = threading.local()
 
 
@@ -1177,6 +1178,10 @@ def _pending_intentional_leaves():
 
 
 def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
+    # Consume the side-channel at entry: even a failing save must leave no
+    # stale marks for the next save on this thread to apply past the leak net.
+    intentional_leaves = _pending_intentional_leaves()
+    _pending_intentional.paths = ()
     try:
         from api import yaml_compat as _yaml
     except ImportError as exc:
@@ -1207,11 +1212,9 @@ def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
             saved_input, _break_yaml_cycles(raw), expanded_raw,
             string_policy=_protect_credential_reference,
         )
-        # Intentional leaves arrive via the thread-local side-channel
-        # (set_intentional_leaves) rather than a keyword argument: the save
-        # signature is the parents' 2-arg contract, and the WebUI writers'
-        # monkeypatched hooks in tests bind against exactly that signature.
-        _apply_intentional_leaves(data, saved_input, _pending_intentional_leaves())
+        # Intentional leaves were consumed at entry (see top of function);
+        # applying them here honors exactly the save that was marked.
+        _apply_intentional_leaves(data, saved_input, intentional_leaves)
     except (ImportError, TypeError):
         # This security boundary requires the paired reference-policy helper.
         # Do not silently persist expansions with an older companion agent.
@@ -1227,7 +1230,6 @@ def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
     # serve a stale dict (#4650 review) — evicting on our own write closes that gap.
     with _yaml_file_cache_lock:
         _yaml_file_cache.pop(str(config_path), None)
-    _pending_intentional.paths = ()
 
 
 # Initial load
