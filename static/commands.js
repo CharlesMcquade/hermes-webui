@@ -2285,7 +2285,12 @@ async function _trySteer(msg, explicitSteer){
       }
     }
     // Live row uses this request's successful upload destinations, never staged File.name.
-    if(_steerOwnerIsCurrent(ownerSid)) _showSteerIndicator(originalMsg,steerUploadedPaths);
+    const receipt=result.steer_event;
+    const admissions=typeof window!=='undefined'&&window._steerAnchorAdmissions;
+    if(admissions&&typeof admissions.get==='function'){
+      const admit=admissions.get(ownerStreamId);
+      if(typeof admit==='function') admit(receipt);
+    }
     showToast(t('cmd_steer_delivered'),2500);
     return true;
   }

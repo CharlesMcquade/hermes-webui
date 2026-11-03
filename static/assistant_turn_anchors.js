@@ -88,6 +88,7 @@
     compressed:Object.freeze({classification:'activity',kind:'lifecycle_status',source:'sse'}),
     approval:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     clarify:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
+    steer_delivered:Object.freeze({classification:'activity',kind:'control_boundary',source:'sse'}),
     // Accepted mid-run Steer is durable run-journal activity.  Live SSE and
     // journal replay carry the same event_id, so both paths must classify it as
     // the same user-authored control boundary rather than dropping it as unknown.
@@ -605,7 +606,15 @@
     const event=_own(normalized,'anchor_event');
     const classification=_cleanString(_own(normalized,'classification'));
     if(classification==='activity'){
-      anchor.activity_events.push(event);
+      // A POST receipt can arrive after later SSE frames. Journal sequence,
+      // not arrival order, determines the visible Worklog boundary.
+      const seq=event.seq;
+      const index=typeof seq==='number'&&event.run_id
+        ?anchor.activity_events.findIndex(other=>other.run_id===event.run_id
+          &&typeof other.seq==='number'&&other.seq>seq)
+        :-1;
+      if(index<0) anchor.activity_events.push(event);
+      else anchor.activity_events.splice(index,0,event);
       _updateLifecycleFromEvent(anchor,event);
     }else if(classification==='artifact'){
       anchor.artifacts.push(event);

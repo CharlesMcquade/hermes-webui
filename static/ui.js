@@ -846,11 +846,12 @@ function _messageIsRenderable(m){
   return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasReasoningAnchor||hasAssistantVisibleAnchor)));
 }
 function _getVisibleMessagesWithIdx(){
-  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
+  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages
+     || S.messages.some(m=>m&&m.display_kind==='steer'&&Array.isArray(m._steer_receipt_ids))){
     const rebuilt=[];
     let rawIdx=0;
     for(const m of (S.messages||[])){
-      if(_messageIsRenderable(m)) rebuilt.push({m,rawIdx});
+      if(_messageIsRenderable(m)&&!_nativeSteerCoveredByScene(m,rawIdx)) rebuilt.push({m,rawIdx});
       rawIdx++;
     }
     _visWithIdxCache=rebuilt;
@@ -858,6 +859,26 @@ function _getVisibleMessagesWithIdx(){
     _visWithIdxCacheSrc=S.messages;
   }
   return _visWithIdxCache;
+}
+// Suppress only the Agent row proved to correspond to a rendered journal
+// boundary. Identical text is not an identity or admission signal.
+function _nativeSteerCoveredByScene(message, rawIdx){
+  if(!message||message.role!=='user'||message.display_kind!=='steer'
+     ||!Array.isArray(message._steer_receipt_ids)||!message._steer_receipt_ids.length) return false;
+  const receipts=new Set(message._steer_receipt_ids.filter(id=>typeof id==='string'&&id));
+  if(!receipts.size) return false;
+  for(let i=rawIdx+1;i<(S.messages||[]).length;i++){
+    const candidate=S.messages[i];
+    if(candidate&&candidate.role==='user'&&candidate.display_kind!=='steer') break;
+    const scene=candidate&&candidate._anchor_activity_scene;
+    if(!scene||!Array.isArray(scene.activity_rows)) continue;
+    const run=scene.identity&&scene.identity.run_id;
+    if(!run) continue;
+    if(scene.activity_rows.some(row=>row&&row.source_event_type==='steer_delivered'
+      &&row.run_id===run&&row.event_id&&row.payload
+      &&receipts.has(row.payload.receipt_id))) return true;
+  }
+  return false;
 }
 function _messageVirtualWindow(opts){
   const total=Math.max(0, Number(opts&&opts.total)||0);
@@ -18387,7 +18408,18 @@ function _anchorSceneNodeForRow(row, opts){
       });
     }
   }else if(row.role==='control'){
-    node=_activityStatusNode({
+    if(row.source_event_type==='steer_delivered'){
+      const text=row.payload&&typeof row.payload.text==='string'?row.payload.text:'';
+      if(!row.event_id||!row.run_id||!row.payload||!row.payload.receipt_id||!text.trim()) return null;
+      node=document.createElement('div');
+      node.className='msg-row steer-row';
+      node.dataset.role='steer';
+      node.dataset.steerReceiptId=String(row.payload.receipt_id);
+      node.dataset.rawText=text;
+      // The journal carries authored text, not trusted attachment metadata.
+      // Never turn a path embedded in text into a file link.
+      node.innerHTML=_steerRowInnerHtml(text,[], '', S.session&&S.session.session_id||'');
+    }else node=_activityStatusNode({
       kind:settled?'done':'waiting',
       label:row.text||row.source_event_type||'Waiting',
       status:settled?'done':'running',
@@ -19472,7 +19504,7 @@ function _anchorSceneSceneHasWorklogWorthyRows(scene){
     const role=String(row.role||'');
     if(isTurnWorklogMode()&&role==='prose'
       && (row.source_event_type==='interim_assistant'||row.source_event_type==='settled_message')) return true;
-    if(role==='tool'||role==='thinking') return true;
+    if(role==='tool'||role==='thinking'||row.source_event_type==='steer_delivered') return true;
     if(role==='lifecycle'){
       const source=String(row.source_event_type||'');
       if(source==='compressing'||source==='compressed') return true;

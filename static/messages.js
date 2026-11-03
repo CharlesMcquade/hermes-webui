@@ -3227,10 +3227,36 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _anchorReasoningFlushed=false;
   let _anchorLocalSeq=0;
   if(_anchorRegistryMap&&_anchorRegistry) _anchorRegistryMap.set(streamId,_anchorRegistry);
+  // The POST acknowledgement and SSE are two views of one journal event.
+  // Register a stream-scoped admission hook so the earlier acknowledgement
+  // can enter the same ordered scene without creating a second DOM-only row.
+  const _steerAdmissions=window._steerAnchorAdmissions=window._steerAnchorAdmissions||new Map();
+  const _admitSteer=(envelope)=>{
+    const event=envelope&&typeof envelope==='object'?envelope:null;
+    const payload=event&&event.payload&&typeof event.payload==='object'?event.payload:event;
+    const run=String((event&&event.run_id)||(payload&&payload.run_id)||'');
+    const sid=String((event&&event.session_id)||(payload&&payload.session_id)||'');
+    const eventId=String(event&&event.event_id||'');
+    const receipt=payload&&payload.receipt_id;
+    const seq=event&&event.seq;
+    if(!eventId||!run||eventId!==`${run}:${seq}`||sid!==String(activeSid)
+       ||!Number.isSafeInteger(seq)||seq<0
+       ||typeof receipt!=='string'||!receipt||typeof payload.text!=='string') return false;
+    const identity=_anchorRegistry&&_anchorRegistry.anchor&&_anchorRegistry.anchor.identity;
+    if(!identity||identity.run_id&&identity.run_id!==run) return false;
+    const result=_applyToAnchor('steer_delivered',{
+      ...event,run_id:run,session_id:sid,seq:event.seq,payload:{...payload,receipt_id:receipt},
+    },{lastEventId:eventId});
+    return !!(result&&(result.applied||result.reason==='duplicate'));
+  };
+  _steerAdmissions.set(streamId,_admitSteer);
   function _scheduleAnchorRegistryCleanup(delayMs=600000){
     if(!_anchorRegistryMap||!_anchorRegistry) return;
     setTimeout(()=>{
-      if(_anchorRegistryMap.get(streamId)===_anchorRegistry) _anchorRegistryMap.delete(streamId);
+      if(_anchorRegistryMap.get(streamId)===_anchorRegistry){
+        _anchorRegistryMap.delete(streamId);
+        if(_steerAdmissions.get(streamId)===_admitSteer) _steerAdmissions.delete(streamId);
+      }
     },delayMs);
   }
   // Backstop: schedule an identity-guarded cleanup at creation so this shadow
@@ -7833,7 +7859,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       })();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','memory_status','error','cancel']){
+    source.addEventListener('steer_delivered',e=>{
+      try{_admitSteer(JSON.parse(e.data));}catch(_){}
+    });
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','todo_state','approval','clarify','steer_delivered','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','memory_status','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }
