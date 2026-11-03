@@ -76,6 +76,9 @@ if(src.indexOf('function _isProcessWakeupMessage') !== -1) eval(extractFunc('_is
 eval(extractFunc('_stripWorkspaceDisplayPrefix'));
 eval(extractFunc('_stripAttachedFilesMarkerForDisplay'));
 eval(extractFunc('_messageIsRenderable'));
+// Keep the extracted projection's Steer receipt filter in the same Node harness.
+// Wakeup rows must remain visible even when that unrelated helper is present.
+eval(extractFunc('_nativeSteerCoveredByScene'));
 eval(extractFunc('_getVisibleMessagesWithIdx'));
 eval(extractFunc('_topbarLoadedMessageCount'));
 eval(extractFunc('_messageVirtualRoleForEntry'));
