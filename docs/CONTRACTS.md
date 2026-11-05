@@ -127,6 +127,11 @@ contributor guidance; it does not change runtime behavior or CI gates.
   marker. Start here before changing provider precedence for outgoing turns,
   the picker's pick evidence, or restored-session provider resolution
   (#7860, #7865).
+- [`docs/architecture/model-catalog-provider-preferences.md`](architecture/model-catalog-provider-preferences.md):
+  current contract for shared provider exclusions and preferred display order across
+  both `/api/models` builders, including the minimal-fallback behavior and cache identity.
+  Start here before changing provider visibility or picker ordering.
+
 - [`docs/architecture/live-models-allowlist.md`](architecture/live-models-allowlist.md):
   current contract for how `/api/models/live` filters a custom provider's
   upstream catalog: the four signals in evaluation order (discovered catalog

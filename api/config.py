@@ -2199,6 +2199,47 @@ def _canonicalise_provider_id(name: object) -> str:
     return raw
 
 
+def _model_catalog_provider_ids(key: str) -> list[str]:
+    """Return unique canonical provider ids from a model_catalog list setting."""
+    catalog_cfg = cfg.get("model_catalog", {}) if isinstance(cfg, dict) else {}
+    values = catalog_cfg.get(key) if isinstance(catalog_cfg, dict) else None
+    if not isinstance(values, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        provider_id = _canonicalise_provider_id(value)
+        if provider_id and provider_id not in seen:
+            seen.add(provider_id)
+            normalized.append(provider_id)
+    return normalized
+
+
+def _model_catalog_provider_excluded(provider_id: object) -> bool:
+    """Whether an id or any of its aliases is excluded from every picker path."""
+    return _canonicalise_provider_id(provider_id) in set(
+        _model_catalog_provider_ids("excluded_providers")
+    )
+
+
+def _apply_model_catalog_provider_preferences(groups: list[dict]) -> None:
+    """Apply shared exclusions and stable preferred ordering after the legacy sort."""
+    excluded = set(_model_catalog_provider_ids("excluded_providers"))
+    if excluded:
+        groups[:] = [
+            group for group in groups
+            if _canonicalise_provider_id(group.get("provider_id")) not in excluded
+        ]
+    preferred = _model_catalog_provider_ids("preferred_providers")
+    if preferred:
+        ranks = {provider_id: index for index, provider_id in enumerate(preferred)}
+        # Python's sort is stable, so unranked providers keep the legacy active/
+        # custom/keyed/alphabetic order established by the caller.
+        groups.sort(key=lambda group: ranks.get(
+            _canonicalise_provider_id(group.get("provider_id")), len(ranks)
+        ))
+
+
 def _normalize_base_url_for_match(value: object) -> str:
     url = str(value or "").strip().rstrip("/")
     if not url:
@@ -8384,7 +8425,7 @@ def _minimal_static_models_catalog() -> dict:
             except Exception:
                 pass
         groups: list[dict] = []
-        if default_model:
+        if default_model and not _model_catalog_provider_excluded(active_provider):
             try:
                 label = _get_label_for_model(default_model, [])
             except Exception:
@@ -8758,6 +8799,7 @@ def _static_models_catalog_without_live_probes() -> dict:
             return (3, provider_id)
 
         groups.sort(key=_group_sort_key)
+        _apply_model_catalog_provider_preferences(groups)
 
         # Natural, case-insensitive model order (#7528) — applied ONLY where
         # the owner's option B allows it: custom/aggregator groups are sorted
@@ -12453,6 +12495,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 return (2, pid)
             return (3, pid)
         groups.sort(key=_group_sort_key)
+        _apply_model_catalog_provider_preferences(groups)
 
         # Natural model order (#7528 owner option B): custom/aggregator groups
         # sorted whole, built-in providers keep their curated catalog order,
