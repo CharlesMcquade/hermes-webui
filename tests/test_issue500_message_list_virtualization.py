@@ -678,6 +678,58 @@ console.log(JSON.stringify({ordinary,preserving,healthy,schedules}));
     assert "renderMessages({preserveScroll:true,_virtualFallback:true});" in js
 
 
+def test_blank_recovery_flag_selects_full_window_only_for_recovery():
+    """Evaluate the actual narrow window decision, not just its source text.
+
+    Normal renders still delegate to virtualization. An explicit recovery must
+    use the full real list, with no virtual spacer padding, and must not call
+    that ordinary window-selection path.
+    """
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    start = js.index("function renderMessages(options)")
+    flag_start = js.index("const virtualFallback=", start)
+    branch_end = js.index("const renderHeadVisWithIdx=", flag_start)
+    segment = js[flag_start:branch_end]
+    flag = re.search(r"const virtualFallback=.*?;", segment, re.DOTALL)
+    window = re.search(
+        r"const virtualWindow=virtualFallback.*?;", segment, re.DOTALL
+    )
+    assert flag, "recovery option must be read by renderMessages"
+    assert window, "recovery must select a nonvirtualized full window"
+    source = f"""
+let virtualWindowCalls = 0;
+function _currentMessageVirtualWindow(entries, keepTail) {{
+  virtualWindowCalls++;
+  return {{virtualized:true, start:1, end:entries.length, total:entries.length,
+    topPad:0, bottomPad:0, tailStart:entries.length}};
+}}
+function _messageVirtualKeepTailCount() {{ return 1; }}
+function selectWindow(options, visWithIdx) {{
+  {flag.group(0)}
+  {window.group(0)}
+  return {{virtualWindow, rendered:visWithIdx.slice(virtualWindow.start, virtualWindow.end)}};
+}}
+const rows = [0,1,2,3];
+const recovery = selectWindow({{_virtualFallback:true}}, rows);
+const ordinary = selectWindow({{}}, rows);
+const recoveryCalls = virtualWindowCalls;
+const noFlag = selectWindow({{_windowOnly:true}}, rows);
+console.log(JSON.stringify({{recovery, ordinary, noFlag, recoveryCalls, virtualWindowCalls}}));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["recovery"]["virtualWindow"] == {
+        "virtualized": False, "start": 0, "end": 4,
+        "topPad": 0, "bottomPad": 0, "total": 4, "tailStart": 4,
+    }
+    assert metrics["recovery"]["rendered"] == [0, 1, 2, 3]
+    assert metrics["ordinary"]["virtualWindow"]["virtualized"] is True
+    assert metrics["ordinary"]["virtualWindow"]["start"] == 1
+    assert metrics["ordinary"]["rendered"] == [1, 2, 3]
+    assert metrics["noFlag"]["virtualWindow"]["virtualized"] is True
+    assert metrics["recoveryCalls"] == 1
+    assert metrics["virtualWindowCalls"] == 2
+
+
 def test_virtual_blank_viewport_recovery_evicts_stale_cache_before_fallback():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """

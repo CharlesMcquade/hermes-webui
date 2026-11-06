@@ -22902,6 +22902,9 @@ function renderMessages(options){
   // typeof guard: node harnesses extract renderMessages() without its helpers (#6717).
   if(!(options&&options._internalMeasurement) && typeof _resetMessageVirtualMeasurementBurst==='function'){ _resetMessageVirtualMeasurementBurst(); }
   const preserveScroll=!!(options&&options.preserveScroll);
+  // Only an explicit recovery may use a full render. Ordinary message
+  // rendering stays virtualized below.
+  const virtualFallback=!!(options&&options._virtualFallback);
 
   // Capture the pre-wipe scroll position when preserving OR when the reader has
   // manually unpinned; both need to restore the reader's position after the DOM
@@ -22932,7 +22935,10 @@ function renderMessages(options){
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const visWithIdx=_getVisibleMessagesWithIdx();
   $('emptyState').style.display=(visWithIdx.length||preservedCompressionTaskMessages.length)?'none':'';
-  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
+  const virtualWindow=virtualFallback
+    ? {virtualized:false, start:0, end:visWithIdx.length, topPad:0, bottomPad:0,
+       total:visWithIdx.length, tailStart:visWithIdx.length}
+    : _currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
   const renderWindowKey=_messageVirtualWindowKeyFor(virtualWindow);
   const windowStart=virtualWindow.start;
   const windowEnd=virtualWindow.end;
