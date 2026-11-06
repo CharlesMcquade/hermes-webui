@@ -707,6 +707,17 @@ write_agent_venv_journal() {
   printf '%s\n' "$1" > "$_agent_venv_journal.tmp" && mv -f "$_agent_venv_journal.tmp" "$_agent_venv_journal"
 }
 
+move_agent_dir() {
+  # Rebuilds restore exact directories; they must not merge into an existing
+  # destination. GNU mv -T is unavailable on BSD/macOS. The transaction checks
+  # absence before rename, and creates only the destination's parents.
+  [ "$#" -eq 2 ] || return 1
+  [ -d "$1" ] || return 1
+  [ ! -e "$2" ] || return 1
+  mkdir -p "$(dirname "$2")" || return 1
+  mv "$1" "$2"
+}
+
 # Put the moved-aside venv and staged source back. Non-zero only when the
 # previous venv could not be restored; the current venv is never swapped for a
 # copy that is not a usable venv.
@@ -714,7 +725,7 @@ restore_previous_agent_venv() {
   if [ -e "$_agent_venv_prev" ]; then
     [ -e "$_agent_venv_prev/bin/python3" ] || return 1
     rm -rf "$_agent_venv" || return 1
-    mv -T "$_agent_venv_prev" "$_agent_venv" || return 1
+    move_agent_dir "$_agent_venv_prev" "$_agent_venv" || return 1
   fi
   if [ -e "$_agent_stage_prev" ]; then
     # A half-copied replacement can still carry the :ro source's mode 555.
@@ -722,7 +733,7 @@ restore_previous_agent_venv() {
       chmod -R u+w "$_agent_stage" 2>/dev/null
       rm -rf "$_agent_stage"
     fi
-    if [ -e "$_agent_stage" ] || ! mv -T "$_agent_stage_prev" "$_agent_stage"; then
+    if [ -e "$_agent_stage" ] || ! move_agent_dir "$_agent_stage_prev" "$_agent_stage"; then
       # The restored venv's editable install points here: keep the journal so
       # the next start retries, and boot on the venv meanwhile.
       echo "!! WARNING: could not restore the previous staged hermes-agent source at $_agent_stage;"
@@ -793,12 +804,12 @@ rebuild_agent_venv() {
     echo "!! Could not record the rebuild in $_agent_venv_journal; keeping $_agent_venv unchanged."
     return 1
   fi
-  if ! mv -T "$_agent_venv" "$_agent_venv_prev" 2>/dev/null; then
+  if ! move_agent_dir "$_agent_venv" "$_agent_venv_prev" 2>/dev/null; then
     rm -f "$_agent_venv_journal"
     echo "!! Could not move $_agent_venv aside (a mount point?); keeping it unchanged."
     return 1
   fi
-  if [ -e "$_agent_stage" ] && ! mv -T "$_agent_stage" "$_agent_stage_prev" 2>/dev/null; then
+  if [ -e "$_agent_stage" ] && ! move_agent_dir "$_agent_stage" "$_agent_stage_prev" 2>/dev/null; then
     echo "!! Could not move the staged hermes-agent source aside; keeping the existing virtual environment."
     restore_previous_agent_venv || return 2
     return 1

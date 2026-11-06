@@ -79,6 +79,7 @@ error_exit() { echo "ERROR_EXIT: $*"; exit 1; }
 """
 
 FUNCTIONS = (
+    "move_agent_dir",
     "write_agent_venv_journal",
     "restore_previous_agent_venv",
     "commit_agent_venv_rebuild",
@@ -222,6 +223,24 @@ def test_a_venv_that_cannot_be_moved_aside_is_left_untouched(tmp_path):
     assert log == "", "uv must not run when the venv could not be moved aside"
 
 
+def test_portable_rename_preserves_an_existing_destination(tmp_path):
+    """A BSD mv without -T must never merge a rebuild into a leftover."""
+    paths = _layout(tmp_path)
+    paths["venv_prev"].mkdir()
+    keep = paths["venv_prev"] / "keep"
+    keep.write_text("leftover\n", encoding="utf-8")
+    _run(
+        tmp_path,
+        paths,
+        'if move_agent_dir "$_agent_venv" "$_agent_venv_prev"; then exit 5; fi',
+    )
+    assert (paths["venv"] / "marker").read_text(encoding="utf-8") == "old\n"
+    assert keep.read_text(encoding="utf-8") == "leftover\n"
+    assert not (paths["venv_prev"] / "venv").exists(), (
+        "the source must not fall through to BSD mv's move-into-directory form"
+    )
+
+
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores directory permissions")
 def test_a_failed_rename_never_deletes_the_venv(tmp_path):
     paths = _layout(tmp_path)
@@ -334,6 +353,6 @@ def test_docker_init_wires_the_transaction():
     rebuild = _bash_function(INIT_SH, "rebuild_agent_venv")
     assert "ensure_hindsight_client_docker_dependency soft" in rebuild
     assert "--admits" in rebuild
-    assert rebuild.index("write_agent_venv_journal pending") < rebuild.index('mv -T "$_agent_venv" "$_agent_venv_prev"'), (
+    assert rebuild.index("write_agent_venv_journal pending") < rebuild.index('move_agent_dir "$_agent_venv" "$_agent_venv_prev"'), (
         "the journal must exist before anything is moved"
     )
