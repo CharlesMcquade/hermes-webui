@@ -182,7 +182,7 @@ def test_boot_embed_skips_session_restore():
 
 def test_boot_embed_skips_check_inflight_on_boot():
     """checkInflightOnBoot must be skipped under the embed flag (both call sites)."""
-    gated = BOOT_JS.count("if(!_isEmbedBoot())await checkInflightOnBoot(saved)")
+    gated = BOOT_JS.count("if(typeof _isEmbedBoot!=='function'||!_isEmbedBoot())await checkInflightOnBoot(saved)")
     assert gated == 1, "boot IIFE restore path must gate checkInflightOnBoot"
     assert "if (!_isEmbedBoot() && S.session" in BOOT_JS, (
         "bfcache pageshow path must gate checkInflightOnBoot"

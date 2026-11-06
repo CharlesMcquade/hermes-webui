@@ -6,13 +6,18 @@ from api import run_journal
 def test_duplicate_done_does_not_publish_second_live_outcome(tmp_path):
     writer = run_journal.RunJournalWriter("terminal_session", "run", session_dir=tmp_path)
     live = []
+    writer.append_and_publish_sse_event("delta", {"text": "seed"}, lambda _row: None)
+    seeded = run_journal.read_run_events(
+        "terminal_session", "run", session_dir=tmp_path)["events"]
+    assert [row["event"] for row in seeded] == ["delta"]
     writer.publish_terminal("done", {"answer": "first"}, live.append)
     writer.publish_terminal("done", {"answer": "second"}, live.append)
     writer.publish_terminal("stream_end", {}, live.append)
     writer.publish_terminal("stream_end", {}, live.append)
     assert [row["event"] for row in live] == ["done", "stream_end"]
     assert [row["event"] for row in run_journal.read_run_events(
-        "terminal_session", "run", session_dir=tmp_path)["events"]] == ["done", "stream_end"]
+        "terminal_session", "run", session_dir=tmp_path)["events"]] == [
+            "delta", "done", "stream_end"]
 
 
 def test_malformed_journal_denies_steer_but_publishes_live_closure(tmp_path):

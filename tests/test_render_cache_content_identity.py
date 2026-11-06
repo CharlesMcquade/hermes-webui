@@ -18,6 +18,7 @@ const renderMd=text=>{calls++;return 'markdown:'+text;};
 const _renderUserFencedBlocks=text=>{calls++;return 'plain:'+text;};
 const _stripXmlToolCallsDisplay=text=>text;
 const window={_renderUserMarkdown:MODE==='user-markdown'};
+eval(extractFunc('_renderCacheTextHash'));
 eval(extractFunc('_renderCacheKey'));
 eval(extractFunc('_getCachedRender'));
 const first='shared prefix '.repeat(10)+'ANSWER ZERO'+' shared suffix'.repeat(40);

@@ -36,6 +36,7 @@ def test_cancel_rotated_agent_keeps_terminal_in_admission_journal(isolated_run):
     config.register_stream_owner(run, original)
     config.register_session_writeback_owner(original, run)
     channel = config.create_stream_channel()
+    live_subscriber = channel.subscribe()
     config.STREAMS[run] = channel
     config.CANCEL_FLAGS[run] = threading.Event()
     agent = MagicMock()
@@ -48,8 +49,12 @@ def test_cancel_rotated_agent_keeps_terminal_in_admission_journal(isolated_run):
 
     outcome = streaming.cancel_stream(run)
     assert (outcome if isinstance(outcome, bool) else outcome["cancelled"]) is True
+    live_events = []
+    while not live_subscriber.empty():
+        live_events.append(live_subscriber.get_nowait())
+    assert [item[0] for item in live_events] == ["cancel"]
     events = run_journal.read_run_events(original, run, session_dir=isolated_run)["events"]
-    assert [event["event"] for event in events] == ["steer_delivered", "cancel"]
+    assert [event["event"] for event in events] == ["steer_delivered"]
     assert not run_journal.read_run_events(continuation, run, session_dir=isolated_run)["events"]
     assert session.active_stream_id is None
 
