@@ -17,12 +17,45 @@ from pathlib import Path
 import pytest
 
 from api import updates
-from api.subprocess_utils import is_safe_diagnostic_remote
+from api.subprocess_utils import (
+    GIT_ENV_SCRUB_KEYS, GIT_ENV_SCRUB_PREFIXES, is_safe_diagnostic_remote,
+)
 from api.workspace_git import GitWorkspaceError, git_fetch
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DIAGNOSTIC = ROOT / "scripts" / "diagnose_update_git.py"
+
+
+def _configure_isolated_git_home(tmp_path: Path, monkeypatch) -> Path:
+    """Create a disposable HOME whose primary config survives env scrubbing."""
+    # Ambient Git selectors, prompts, proxies and helper commands are not
+    # fixture-owned authority. Raw-Git oracles and scrubbed application calls
+    # therefore start from the same boundary and per-case primary file.
+    for name in GIT_ENV_SCRUB_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    for name in tuple(os.environ):
+        if name.startswith(GIT_ENV_SCRUB_PREFIXES):
+            monkeypatch.delenv(name, raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    home.chmod(0o700)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "xdg"))
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")
+    monkeypatch.setenv("GCM_INTERACTIVE", "never")
+    if os.name == "nt":
+        # Only actual native Windows requires this. Merely mocking
+        # subprocess_utils.sys.platform for parser cases is not native coverage.
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("HOMEDRIVE", home.drive)
+        monkeypatch.setenv("HOMEPATH", '\\' + str(home.relative_to(home.anchor)))
+    return home
+
+
+@pytest.fixture
+def isolated_home(tmp_path, monkeypatch):
+    return _configure_isolated_git_home(tmp_path, monkeypatch)
 
 
 def _git(cwd: Path, *args: str, env: dict[str, str] | None = None) -> str:
@@ -78,6 +111,7 @@ class _AuthenticatedGitHandler(SimpleHTTPRequestHandler):
 def test_authenticated_fetch_uses_trusted_global_helper_not_repo_helper(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    isolated_home: Path,
     caller: str,
     helper_scope: str,
     old_git: bool,
@@ -99,8 +133,7 @@ def test_authenticated_fetch_uses_trusted_global_helper_not_repo_helper(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
-    home = tmp_path / "home"
-    home.mkdir()
+    home = isolated_home
     trusted_marker = tmp_path / f"{caller}-trusted-helper-ran"
     repo_marker = tmp_path / f"{caller}-repo-helper-ran"
     helper = tmp_path / "credential_helper.py"
@@ -120,6 +153,9 @@ def test_authenticated_fetch_uses_trusted_global_helper_not_repo_helper(
     helper.chmod(0o755)
     env = os.environ.copy()
     env["HOME"] = str(home)
+    # The empty entry resets inherited helpers; the fixture helper is added next.
+    _git(home, "config", "--file", str(home / ".gitconfig"),
+         "credential.helper", "", env=env)
     repo = tmp_path / f"{caller}-repo"
     repo.mkdir()
     _git(repo, "init", "-q")
@@ -132,7 +168,7 @@ def test_authenticated_fetch_uses_trusted_global_helper_not_repo_helper(
     )
     subprocess.run(
         [
-            "git", "config", "--global", helper_key,
+            "git", "config", "--file", str(home / ".gitconfig"), helper_key,
             f"!{sys.executable} {helper} {trusted_marker} {username} {password}",
         ],
         env=env,
@@ -187,6 +223,7 @@ def test_authenticated_fetch_uses_trusted_global_helper_not_repo_helper(
 def test_ssh_fetch_uses_trusted_global_command_with_batch_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    isolated_home: Path,
     caller: str,
     ssh_variant: str,
     batch_option: str,
@@ -196,8 +233,7 @@ def test_ssh_fetch_uses_trusted_global_command_with_batch_mode(
         pytest.skip("executable SSH wrapper setup is POSIX-only")
 
     _, origin = _make_bare_origin(tmp_path)
-    home = tmp_path / "home"
-    home.mkdir()
+    home = isolated_home
     marker = tmp_path / f"{caller}-trusted-ssh-ran"
     repo_marker = tmp_path / f"{caller}-repo-ssh-ran"
     wrapper = tmp_path / "ssh_wrapper.py"
@@ -222,14 +258,14 @@ def test_ssh_fetch_uses_trusted_global_command_with_batch_mode(
         )
     )
     subprocess.run(
-        ["git", "config", "--global", "core.sshCommand", trusted_command],
+        ["git", "config", "--file", str(home / ".gitconfig"), "core.sshCommand", trusted_command],
         env=env,
         cwd=str(home),
         check=True,
         timeout=20,
     )
     subprocess.run(
-        ["git", "config", "--global", "ssh.variant", ssh_variant],
+        ["git", "config", "--file", str(home / ".gitconfig"), "ssh.variant", ssh_variant],
         env=env,
         cwd=str(home),
         check=True,
@@ -711,7 +747,7 @@ def test_update_git_diagnostic_does_not_relay_credential_helper_stderr(
 @pytest.mark.parametrize("caller", ["updates", "workspace"])
 @pytest.mark.parametrize("cached_credentials", [False, True])
 def test_credential_manager_contract_is_noninteractive_with_trusted_helpers(
-    tmp_path, monkeypatch, caller, cached_credentials,
+    tmp_path, monkeypatch, isolated_home, caller, cached_credentials,
 ):
     """Exercise real Git/HTTP with a helper honoring GCM's documented controls.
 
@@ -733,8 +769,7 @@ def test_credential_manager_contract_is_noninteractive_with_trusted_helpers(
     thread.start()
 
     try:
-        home = tmp_path / "isolated-home"
-        home.mkdir()
+        home = isolated_home
         monkeypatch.setenv("HOME", str(home))
         monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "xdg"))
         monkeypatch.setenv("GCM_INTERACTIVE", "always")
@@ -761,8 +796,12 @@ def test_credential_manager_contract_is_noninteractive_with_trusted_helpers(
         repo.mkdir()
         _git(repo, "init", "-q")
         _git(repo, "remote", "add", "origin", f"http://127.0.0.1:{server.server_port}/origin.git")
-        _git(repo, "config", "--global", "credential.interactive", "true")
-        _git(repo, "config", "--global", "credential.helper",
+        _git(repo, "config", "--file", str(home / ".gitconfig"),
+             "credential.helper", "")
+        _git(repo, "config", "--file", str(home / ".gitconfig"),
+             "credential.interactive", "true")
+        _git(repo, "config", "--file", str(home / ".gitconfig"),
+             "--add", "credential.helper",
              f"!{shlex.quote(sys.executable)} {shlex.quote(str(helper))}")
         if caller == "updates":
             output, ok = updates._run_git(["fetch", "origin"], repo, timeout=30)

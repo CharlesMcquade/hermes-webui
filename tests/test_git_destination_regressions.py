@@ -6,19 +6,17 @@ import subprocess
 import sys
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
 from api import subprocess_utils as utils, updates, workspace_git
-from tests.test_update_git_security import DIAGNOSTIC, _git, _make_bare_origin
+from tests.test_update_git_security import DIAGNOSTIC, _configure_isolated_git_home, _git, _make_bare_origin
 
 
 @pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "xdg"))
+    return _configure_isolated_git_home(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("selection", ["branch", "default", "fetch", "origin", "explicit", "pushurl"])
@@ -69,7 +67,7 @@ def test_custom_ssh_wrapper_without_shell_on_path(tmp_path, isolated_home, monke
         "raise SystemExit(subprocess.call(shlex.split(sys.argv[-1])))\n"
     )
     wrapper.chmod(0o755)
-    _git(repo, "config", "--global", "core.sshCommand", str(wrapper))
+    _git(repo, "config", "--file", str(Path.home() / ".gitconfig"), "core.sshCommand", str(wrapper))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     for name in ["git", "git-upload-pack"]:
@@ -96,7 +94,7 @@ def test_non_ssh_destination_never_probes_ssh_wrapper(tmp_path, isolated_home, c
     wrapper = tmp_path / "custom-ssh"
     wrapper.write_text(f"#!/bin/sh\nprintf invoked > {shlex.quote(str(marker))}\nexit 0\n")
     wrapper.chmod(0o755)
-    _git(tmp_path, "config", "--global", "core.sshCommand", str(wrapper))
+    _git(tmp_path, "config", "--file", str(Path.home() / ".gitconfig"), "core.sshCommand", str(wrapper))
     server = ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(SimpleHTTPRequestHandler, directory=str(origin.parent)))
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
@@ -204,7 +202,7 @@ def test_mixed_push_destinations_preserve_ssh_only_when_used(tmp_path, url_key):
         "raise SystemExit(subprocess.call(shlex.split(sys.argv[-1])))\n"
     )
     wrapper.chmod(0o755)
-    _git(repo, "config", "--global", "core.sshCommand", str(wrapper))
+    _git(repo, "config", "--file", str(Path.home() / ".gitconfig"), "core.sshCommand", str(wrapper))
     args = ["push", "origin", "master"]
     _git(repo, *args)
     assert "transport" in marker.read_text()

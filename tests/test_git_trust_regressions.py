@@ -2,12 +2,13 @@
 import shlex
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from api import subprocess_utils as utils, updates
 from api.workspace_git import GitWorkspaceError, git_fetch
-from tests.test_update_git_security import _git, _make_bare_origin
+from tests.test_update_git_security import _configure_isolated_git_home, _git, _make_bare_origin
 
 
 @pytest.mark.parametrize("caller", ["updates", "workspace"])
@@ -46,11 +47,7 @@ def test_diagnostic_accepts_builtin_git_transport():
 
 @pytest.fixture
 def isolated_home(tmp_path, monkeypatch):
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "xdg"))
-    return home
+    return _configure_isolated_git_home(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("caller", ["updates", "workspace"])
@@ -71,7 +68,7 @@ def test_custom_named_openssh_wrapper(tmp_path, isolated_home, caller):
         "raise SystemExit(subprocess.call(shlex.split(sys.argv[-1])))\n"
     )
     wrapper.chmod(0o755)
-    _git(repo, "config", "--global", "core.sshCommand", f"env WRAPPER=yes {shlex.quote(str(wrapper))}")
+    _git(repo, "config", "--file", str(Path.home() / ".gitconfig"), "core.sshCommand", f"env WRAPPER=yes {shlex.quote(str(wrapper))}")
     if caller == "updates":
         output, ok = updates._run_git(["fetch", "origin"], repo)
         assert ok, output
@@ -92,7 +89,7 @@ def test_wrapper_probe_timeout_reaps_child(tmp_path, isolated_home):
         f"touch {shlex.quote(str(marker))}\n"
     )
     wrapper.chmod(0o755)
-    _git(tmp_path, "config", "--global", "core.sshCommand", str(wrapper))
+    _git(tmp_path, "config", "--file", str(Path.home() / ".gitconfig"), "core.sshCommand", str(wrapper))
     started = time.monotonic()
     env = utils.noninteractive_git_env(tmp_path, utils.clean_git_env())
     assert time.monotonic() - started < 6
@@ -109,14 +106,14 @@ def test_batchmode_whitespace_fails_closed(tmp_path, isolated_home, option):
     if "false" not in option:
         raw = subprocess.run(["ssh", "-G", *shlex.split(option), "-oBatchMode=yes", "example.invalid"], capture_output=True, text=True)
         assert "batchmode no" in raw.stdout
-    _git(tmp_path, "config", "--global", "core.sshCommand", f"ssh {option}")
+    _git(tmp_path, "config", "--file", str(Path.home() / ".gitconfig"), "core.sshCommand", f"ssh {option}")
     env = utils.noninteractive_git_env(tmp_path, utils.clean_git_env())
     assert env["GIT_SSH_COMMAND"] == "git-ssh-command-disables-batch-mode"
 
 
 @pytest.mark.parametrize("command", [r"C:\Tools\PuTTY\plink.exe -P 22", r'"C:\Program Files\PuTTY\plink.exe" -P 22'])
 def test_windows_unquoted_plink_path(tmp_path, isolated_home, monkeypatch, command):
-    _git(tmp_path, "config", "--global", "core.sshCommand", command)
+    _git(tmp_path, "config", "--file", str(Path.home() / ".gitconfig"), "core.sshCommand", command)
     # Only parsing is platform-specific; leave pathlib and subprocess on the host.
     monkeypatch.setattr(utils.sys, "platform", "win32")
     env = utils.noninteractive_git_env(tmp_path, utils.clean_git_env())
@@ -136,11 +133,11 @@ def test_checkout_include_does_not_execute(tmp_path, isolated_home, caller, key)
     helper.chmod(0o755)
     included = repo / "included.config"
     _git(repo, "config", "--file", str(included), key, str(helper))
-    _git(repo, "config", "--global", f"includeIf.gitdir:{repo}/.path", str(included))
+    _git(repo, "config", "--file", str(Path.home() / ".gitconfig"), f"includeIf.gitdir:{repo}/.path", str(included))
     assert str(helper) in _git(repo, "config", "--get", key)
     if key == "core.sshCommand":
         # The vulnerable head needs an explicit variant to execute this helper.
-        _git(repo, "config", "--global", "ssh.variant", "ssh")
+        _git(repo, "config", "--file", str(Path.home() / ".gitconfig"), "ssh.variant", "ssh")
         remote = "ssh://127.0.0.1:1/missing"
     else:
         # Local HTTP 401 reliably triggers credential selection.
