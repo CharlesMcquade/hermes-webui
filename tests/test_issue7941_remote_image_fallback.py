@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from http.client import HTTPMessage
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -160,8 +161,12 @@ def test_report_only_and_enforced_img_src_match_and_warn_once(monkeypatch, caplo
     from server import Handler
 
     monkeypatch.setenv("HERMES_WEBUI_CSP_IMG_EXTRA", "https://images.example.com; script-src *")
+    monkeypatch.setattr("api.helpers._csp_img_src_warning_emitted", False, raising=False)
     sent = []
     handler = Handler.__new__(Handler)
+    # __new__ intentionally bypasses request parsing; still provide the header
+    # mapping a real BaseHTTPRequestHandler instance has before end_headers().
+    handler.headers = HTTPMessage()
     handler.send_header = lambda key, value: sent.append((key, value))
     monkeypatch.setattr(BaseHTTPRequestHandler, "end_headers", lambda self: None)
     _security_headers(handler)
@@ -183,6 +188,9 @@ def test_valid_allowlist_reaches_report_only_via_handler(monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_CSP_IMG_EXTRA", "https://images.example.com")
     sent = []
     handler = Handler.__new__(Handler)
+    # __new__ intentionally bypasses request parsing; still provide the header
+    # mapping a real BaseHTTPRequestHandler instance has before end_headers().
+    handler.headers = HTTPMessage()
     handler.send_header = lambda key, value: sent.append((key, value))
     monkeypatch.setattr(BaseHTTPRequestHandler, "end_headers", lambda self: None)
     _security_headers(handler)

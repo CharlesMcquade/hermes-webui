@@ -310,13 +310,24 @@ def _valid_csp_extra_img_source(source: str) -> bool:
     return True
 
 
+# Validation is performed for both enforced and report-only response policies.
+# Warn once per process about an invalid setting instead of twice per response,
+# while continuing to reject it on every evaluation (including after config changes).
+_csp_img_src_warning_emitted = False
+_csp_img_src_warning_lock = threading.Lock()
+
+
 def _csp_extra_img_src() -> str:
     raw = os.getenv("HERMES_WEBUI_CSP_IMG_EXTRA", "").strip()
     if not raw:
         return ""
     sources = raw.split()
     if not sources or any(not _valid_csp_extra_img_source(src) for src in sources):
-        logger.warning("Ignoring invalid HERMES_WEBUI_CSP_IMG_EXTRA value")
+        global _csp_img_src_warning_emitted
+        with _csp_img_src_warning_lock:
+            if not _csp_img_src_warning_emitted:
+                logger.warning("Ignoring invalid HERMES_WEBUI_CSP_IMG_EXTRA value")
+                _csp_img_src_warning_emitted = True
         return ""
     return " " + " ".join(sources)
 
