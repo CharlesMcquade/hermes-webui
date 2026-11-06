@@ -83,7 +83,10 @@ def test_cached_session_restore_runs_highlight_synchronously(ui_js_content):
     """The fast-path cached session restore must also synchronously ensure highlighting before scrolling."""
     cache_branch_idx = ui_js_content.find("_sessionHtmlCache.get(sid);")
     assert cache_branch_idx != -1, "Session HTML cache branch not found"
-    cache_slice = ui_js_content[cache_branch_idx : cache_branch_idx + 1200]
+    cache_branch_marker = "requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));"
+    cache_branch_end = ui_js_content.find(cache_branch_marker, cache_branch_idx)
+    assert cache_branch_end != -1, "Cached branch completion marker not found"
+    cache_slice = ui_js_content[cache_branch_idx:cache_branch_end + len(cache_branch_marker)]
 
     highlight_call = "if(typeof highlightCode==='function') highlightCode(inner);"
     tree_init_call = "if(typeof initTreeViews==='function') initTreeViews(inner);"

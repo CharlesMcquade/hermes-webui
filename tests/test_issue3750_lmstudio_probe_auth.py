@@ -683,5 +683,9 @@ agent:
     saved = config._load_yaml_config_file(config._get_config_path())
 
     assert saved["agent"]["reasoning_effort"] == "low"
-    assert saved["agent"]["reasoning_overrides"]["qwen/qwen3.8-27b"] == "medium"
+    overrides = saved["agent"]["reasoning_overrides"]
+    # Provider-aware writes use provider:model. A separate legacy bare entry
+    # remains untouched instead of being migrated or silently overwritten.
+    assert overrides["lmstudio:qwen/qwen3.8-27b"] == "medium"
+    assert overrides["qwen/qwen3.8-27b"] == "xhigh"
     assert status["reasoning_effort"] == "medium"

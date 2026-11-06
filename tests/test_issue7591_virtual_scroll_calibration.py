@@ -914,6 +914,8 @@ function _messageVirtualKeepTailCount(){ return 0; }
 function _messageVirtualWindowKeyFor(){ return 'window-key'; }
 function _compensateScrollForMeasurementDelta(fn){ fn(); }
 function _deferClearProgrammaticScroll(){}
+// Reader settlement has separate state; this case isolates frame ownership.
+function _settleMessageWindowReader(){}
 function renderMessages(options){ renders.push(options); }
 eval(extractFunc('_messageVirtualMeasurementCycleKeyFor'));
 eval(extractFunc('_messageJumpScrollOwnsViewport'));
@@ -957,7 +959,8 @@ console.log(JSON.stringify({
     assert metrics["deferredHeld"] is True
     assert metrics["framesAfterSecondFrame"] == 0
     assert metrics["rendersAfterSettlement"] == [
-        {"preserveScroll": True, "_internalMeasurement": True}
+        # The measured render uses a detached window, not the live viewport.
+        {"preserveScroll": True, "_windowOnly": True, "_internalMeasurement": True}
     ]
 
 
@@ -998,6 +1001,9 @@ let cacheDeletes = [];
 // ── direct dependencies of the cached render branch ──────────────────────
 function _resetMessageVirtualMeasurementBurst(){}
 function _resetMessageRenderWindow(){}
+// Ownership initialization is orthogonal here. Keep the actual capture,
+// scroll restore, clamp, and fallback paths below intact.
+function _initializeMessageWindowOwnership(inner){}
 function _latestPreservedCompressionTaskListMessages(){ return []; }
 function _getVisibleMessagesWithIdx(){ return [{ rawIdx: 0, m: {} }, { rawIdx: 1, m: {} }]; }
 function _currentMessageVirtualWindow(){

@@ -14,10 +14,10 @@ def _install_fake_hermes_cli(monkeypatch):
     fake_pkg = types.ModuleType("hermes_cli")
     fake_pkg.__path__ = []
     fake_models = types.ModuleType("hermes_cli.models")
-    fake_models.list_available_providers = lambda: []
-    fake_models.provider_model_ids = lambda _pid: []
+    setattr(fake_models, "list_available_providers", lambda: [])
+    setattr(fake_models, "provider_model_ids", lambda _pid: [])
     fake_auth = types.ModuleType("hermes_cli.auth")
-    fake_auth.get_auth_status = lambda _pid: {}
+    setattr(fake_auth, "get_auth_status", lambda _pid: {})
     monkeypatch.setitem(sys.modules, "hermes_cli", fake_pkg)
     monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
     monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
@@ -46,10 +46,15 @@ def isolated_catalog(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "_cfg_has_in_memory_overrides", lambda: True)
     old_cfg = dict(config.cfg)
     old_mtime = config._cfg_mtime
+    old_cfg_path = config._cfg_path
 
     def _install(model_catalog):
         config.cfg.clear()
         config.cfg.update(_catalog_config(model_catalog))
+        # get_available_models reloads on a config-path delta even when cfg has
+        # in-memory overrides. Bind that gate to the mocked profile's path, or
+        # it discards these settings before building the catalog.
+        config._cfg_path = config._get_config_path()
         config._cfg_mtime = 0.0
         config.invalidate_models_cache()
 
@@ -58,6 +63,7 @@ def isolated_catalog(monkeypatch, tmp_path):
     config.cfg.clear()
     config.cfg.update(old_cfg)
     config._cfg_mtime = old_mtime
+    config._cfg_path = old_cfg_path
 
 
 def _provider_ids(payload):

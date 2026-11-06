@@ -18,9 +18,12 @@ Every case asserts BOTH directions:
 - the punctuation never enters href
 - the punctuation remains visible after the closing </a>
 """
+import os
 import shutil
+import signal
 import subprocess
 from pathlib import Path
+import time
 
 import pytest
 
@@ -74,6 +77,9 @@ eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
 eval(extractFunc('renderMd'));
 
+// Decode incrementally: independently coercing a Buffer that ends inside
+// a multibyte UTF-8 character corrupts the input before renderMd sees it.
+process.stdin.setEncoding('utf8');
 let buf = '';
 process.stdin.on('data', c => { buf += c; });
 process.stdin.on('end', () => {
@@ -394,6 +400,47 @@ class TestAutolinkCjkProseContinuation:
         assert large_ms <= small_ms * 3 + 25, (
             f"doubling input grew render time from {small_ms:.2f} to {large_ms:.2f} ms"
         )
+
+    def test_driver_preserves_utf8_across_pipe_chunks(self, driver_path):
+        """Input split inside a multibyte separator must reach renderMd intact."""
+        first = b'href="https://example.com/0"'
+        second = b'href="https://example.com/1"'
+        marker = '，'.encode('utf-8')
+        payload = b'https://example.com/0' + marker + b'https://example.com/1'
+        split_at = payload.index(marker) + 1
+        assert payload[:split_at].endswith(marker[:1])
+        assert payload[split_at:].startswith(marker[1:])
+        assert "process.stdin.setEncoding('utf8');" in Path(driver_path).read_text(encoding='utf-8')
+        child = subprocess.Popen(
+            [NODE, driver_path, str(UI_JS_PATH)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            child.stdin.write(payload[:split_at])
+            child.stdin.flush()
+            # Encourage delivery as separate chunks, without changing a single byte.
+            time.sleep(0.1)
+            child.stdin.write(payload[split_at:])
+            child.stdin.close()
+            rendered, stderr = child.communicate(timeout=30)
+            assert child.returncode == 0, stderr.decode(errors='replace')
+        except subprocess.TimeoutExpired:
+            if os.name == 'posix':
+                os.killpg(child.pid, signal.SIGKILL)
+            else:
+                child.kill()
+            child.communicate(timeout=5)
+            raise
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+        assert rendered.count(b'<a ') == 2, rendered.decode(errors='replace')
+        assert first in rendered
+        assert second in rendered
+        assert marker in rendered
+        assert "�".encode("utf-8") not in rendered
 
     def test_thousands_of_urls_do_not_recurse(self, driver_path):
         small_urls = [f"https://example.com/{i}" for i in range(2500)]

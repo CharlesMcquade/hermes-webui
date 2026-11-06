@@ -2744,13 +2744,19 @@ def test_rotated_session_stream_end_uses_original_stream_owner_id(tmp_path, monk
         captured_kwargs.update(kwargs)
         return real_update(*args, **kwargs)
 
+
     monkeypatch.setattr(streaming, "_run_background_title_update", _recording_update)
+
     monkeypatch.setattr(streaming, "_generate_llm_session_title_via_aux",
                         lambda *a, **k: ("Rotated Title Owner", "llm_aux", "Rotated Title Owner"))
 
-    with mock.patch.object(streaming, "_get_ai_agent", return_value=_RotatingAgent), \
-         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
-         mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
+    with (
+        mock.patch.object(streaming, "_get_ai_agent", return_value=_RotatingAgent),
+        mock.patch.object(streaming, "_aux_title_configured", return_value=True),
+        mock.patch.object(streaming, "_generate_shared_session_title", return_value=None),
+        mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)),
+        mock.patch("api.config._resolve_cli_toolsets", return_value=[]),
+    ):
         streaming._run_agent_streaming(
             session_id=session_id,
             msg_text="hello",
@@ -2760,18 +2766,20 @@ def test_rotated_session_stream_end_uses_original_stream_owner_id(tmp_path, monk
             stream_id=stream_id,
         )
 
-    # Wait (bounded) for the background title thread terminal events.
-    deadline = time.monotonic() + 15.0
-    end_payloads = []
-    while time.monotonic() < deadline:
-        end_payloads = [
-            item[1].get("session_id")
-            for item in list(stream_queue.queue)
-            if item[0] == "stream_end"
-        ]
-        if end_payloads:
-            break
-        threading.Event().wait(0.05)
+        # Title generation is asynchronous. Keep these mocks installed until
+        # the terminal event rather than letting the context close while the
+        # background worker is still selecting and publishing its title.
+        deadline = time.monotonic() + 15.0
+        end_payloads = []
+        while time.monotonic() < deadline:
+            end_payloads = [
+                item[1].get("session_id")
+                for item in list(stream_queue.queue)
+                if item[0] == "stream_end"
+            ]
+            if end_payloads:
+                break
+            threading.Event().wait(0.05)
 
     assert captured_kwargs.get("stream_owner_id") == session_id, (
         "spawn site must pass the ORIGINAL _run_agent_streaming session id as "
@@ -2790,6 +2798,7 @@ def test_rotated_session_stream_end_uses_original_stream_owner_id(tmp_path, monk
     assert events[title_index][1]['stream_owner_session_id'] == session_id
     assert events[title_index][1]['target_session_id'] == continuation_id
     assert events[title_index][1]['title'] == 'Rotated Title Owner'
+
     assert end_payloads[-1] == session_id, (
         f"stream_end carried {end_payloads[-1]!r} instead of the original stream "
         f"owner {session_id!r}; the client SSE fence would reject it and the "

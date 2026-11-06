@@ -15,8 +15,8 @@ def _install_fake_hermes_models(monkeypatch, provider_model_ids):
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_cli.__path__ = []
     models = types.ModuleType("hermes_cli.models")
-    models._PROVIDER_ALIASES = {}
-    models.provider_model_ids = provider_model_ids
+    setattr(models, "_PROVIDER_ALIASES", {})
+    setattr(models, "provider_model_ids", provider_model_ids)
     monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.models", models)
 
@@ -48,7 +48,10 @@ def test_openai_codex_group_uses_provider_model_ids(monkeypatch, tmp_path):
     def provider_model_ids(provider):
         calls.append(provider)
         assert provider == "openai-codex"
-        return ["gpt-6-astra"]
+        # Spark belongs to opencode-zen's fallback list, not the static
+        # openai-codex fallback. Exercise it through the live discovery route
+        # under test while preserving the newer companion first in the list.
+        return ["gpt-6-astra", "gpt-5.3-codex-spark"]
 
     _install_fake_hermes_models(monkeypatch, provider_model_ids)
     _configure_codex(monkeypatch, tmp_path)

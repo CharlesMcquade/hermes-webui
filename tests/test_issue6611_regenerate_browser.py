@@ -150,6 +150,9 @@ def test_metadata_without_revision_loads_messages_before_regenerating():
     sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
     ui = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     functions = "\n".join([
+        extract_function(sessions, "_captureLoadedMessageWindow"),
+        extract_function(sessions, "_loadedMessageBoundarySignature"),
+        extract_function(sessions, "_preserveLoadedMessageWindow"),
         extract_function(sessions, "_adoptRegenerationRevision"),
         extract_function(sessions, "_ensureMessagesLoaded", "async function"),
         extract_function(sessions, "_ensureAllMessagesLoaded", "async function"),
@@ -160,6 +163,7 @@ const assert=require('node:assert/strict');
 const window={{}}, INFLIGHT={{}};
 let S, _messagesTruncated, _oldestIdx, _loadingOlder=false;
 let _loadingSessionId='s1', _loadSessionGeneration=1, _msgLimitMax=500;
+let _sameSessionForceReloadHint=null;
 const _MSG_LIMIT_MAX=500;
 function _clearSameSessionForceReloadHint(){{}}
 function _messageReloadLimitForSession(){{return 30;}}

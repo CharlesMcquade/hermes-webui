@@ -378,7 +378,8 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
             ]
         )
 
-        with _patch_tg_config({'provider': '', 'model': 'title-model', 'base_url': ''}):
+        with _patch_tg_config({'provider': '', 'model': 'title-model', 'base_url': ''}), \
+                patch('api.streaming._generate_shared_session_title', return_value=None):
             with patch('agent.auxiliary_client.call_llm', return_value=mock_resp, create=True):
                 title, status, raw_preview = _generate_llm_session_title_via_aux(
                     'Warum werden hier die Bilder der alten Session nicht mehr angezeigt?',
@@ -1093,6 +1094,17 @@ class TestAuxTitleConversationContext(unittest.TestCase):
     """#7470: aux title-generation calls republish the session id as the Agent's
     ambient conversation context so OpenCode relay targets get the same
     x-opencode-session sticky key as the session's main turns."""
+
+    def setUp(self):
+        super().setUp()
+        # These tests exercise the documented legacy/unavailable shared-title
+        # fallback, not the shared Agent generator's primary route. The real
+        # Agent can otherwise win before the mocked auxiliary call is reached.
+        self._legacy_shared_title = patch(
+            'api.streaming._generate_shared_session_title', return_value=None
+        )
+        self._legacy_shared_title.start()
+        self.addCleanup(self._legacy_shared_title.stop)
 
     MOCK_RESP = types.SimpleNamespace(
         choices=[

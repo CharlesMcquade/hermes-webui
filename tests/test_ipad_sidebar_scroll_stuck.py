@@ -153,15 +153,19 @@ def test_virtual_scroll_render_uses_force():
     listener calls renderSessionListFromCache() to recompute the virtual window.
     """
     fn = _extract_fn(SESSIONS_JS, "_scheduleSessionVirtualizedRender")
-    assert "renderSessionListFromCache()" in fn, \
-        "Virtual scroll render must call renderSessionListFromCache()"
+    assert "_repaintSidebarKeepingProjectPicker()" in fn
+    assert "_repaintSidebarForBackgroundChurn()" in fn
+    for name in ("_repaintSidebarKeepingProjectPicker", "_repaintSidebarForBackgroundChurn"):
+        wrapper = _extract_fn(SESSIONS_JS, name)
+        assert "renderSessionListFromCache()" in wrapper, f"{name} lost its terminal renderer"
 
 
 def test_virtual_resync_render_uses_force():
     """The post-render virtual window resync must exist for scroll correction."""
     fn = _extract_fn(SESSIONS_JS, "_resyncSessionVirtualWindowAfterRender")
-    assert "renderSessionListFromCache()" in fn, \
-        "Virtual resync render must call renderSessionListFromCache()"
+    assert "_repaintSidebarForBackgroundChurn()" in fn
+    wrapper = _extract_fn(SESSIONS_JS, "_repaintSidebarForBackgroundChurn")
+    assert "renderSessionListFromCache()" in wrapper, "Resync wrapper lost its terminal renderer"
 
 
 def test_virtualization_disabled_on_touch():
