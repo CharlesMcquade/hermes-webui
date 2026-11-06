@@ -111,6 +111,10 @@ async function cancelSessionStream(session){
     try{respBody=await r.json();}catch(_){}
   }catch(e){/* close local stream; keep UI state honest below */}
   if(!respOk) return {cancelled: false, persistence_failed: false};
+  const persistenceFailed = respBody?.persistence_failed === true;
+  if(persistenceFailed && typeof showToast==='function'){
+    showToast(t('cancel_persistence_warning'),6000);
+  }
   if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
   session.active_stream_id=null;
   delete INFLIGHT[sid];
@@ -4801,7 +4805,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       _syncProviderQuotaForActiveContext();
     }
   };
-  if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+  // Wait for an authoritative session context before refreshing quota. An
+  // ambient/default refresh here can race restoration and expose stale account
+  // information; terminal boot paths use _syncQuotaForBootContext below.
   // Embed policy: force the New-session path — never restore from the URL
   // deep link or localStorage (contract §7), so `saved` is null and boot
   // falls through to the no-saved-session empty state below.

@@ -4205,7 +4205,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     const rows=[];
-    const seen=new Set();
+    // Index each identity to the ACTUAL emitted row, not to a differently
+    // computed lookup key (local_id or _anchorSceneExistingRowKey fallbacks
+    // are not necessarily the key selected for this projection).
+    const seen=new Map();
     const seenTextKeys=[];
     const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];
     // ── provenance-aware projection mirror tracking ────────────
@@ -4249,7 +4252,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!row||row.role==='terminal'||(row.role!=='prose'&&row.role!=='thinking')) continue;
       // Running rows discarded by settlement (e.g. projected running thinking
       // with a settled-thinking replacement) allocate no slot.
-      const settledRow=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
+      // A completed/settled replacement wins over the live projection, even
+      // when the normalized text matches. Reserve slots only if no settled
+      // thinking row exists for this turn.
+      const keepMirroredThinking=!hasSettledThinking
+        && row.role==='thinking'&&mirroredThinkingKeys.has(_anchorSceneTextKey(row.text));
+      const settledRow=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking&&!keepMirroredThinking);
       if(!settledRow||typeof settledRow!=='object') continue;
       const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
       const textKey=_anchorSceneTextKey(settledRow.text);
@@ -4309,7 +4317,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const pushRow=(row,origin)=>{
       if(!row||typeof row!=='object') return;
       const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
-      const keepMirroredThinking=row.role==='thinking'&&projectedRows.includes(row)
+      const keepMirroredThinking=!hasSettledThinking
+        && row.role==='thinking'&&projectedRows.includes(row)
         && mirroredThinkingKeys.has(_anchorSceneTextKey(row.text));
       row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking&&!keepMirroredThinking);
       if(!row||typeof row!=='object') return;
@@ -4332,13 +4341,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const key=distinctProgress?`prose-event:${row.event_id||row.local_id}`:_anchorSceneExistingRowKey(row);
       // ── same-identity enrichment: keep latest/richest value ──
       if(key&&seen.has(key)){
-        const existingIdx=rows.findIndex(r=>_anchorSceneExistingRowKey(r)===key||r.local_id===key);
-        if(isTextual&&existingIdx>=0&&!distinctProgress){
+        const existingIdx=seen.get(key);
+        if(isTextual){
+          // Later enrichment of the same identity retains the latest/richer
+          // snapshot. This applies to distinct live progress IDs as well as
+          // ordinary durable IDs; distinct identities still get distinct rows.
           rows[existingIdx]={...rows[existingIdx],...row,display_hint:_anchorSceneRowDisplayHintForMode(row,sceneMode)};
         }
         return;
       }
-      if(key) seen.add(key);
+      if(key) seen.set(key,rows.length);
       // ── provenance-aware mirror consumption (settled rows) ───
       if(origin==='settled'&&isTextual&&textKey){
         if(_consumeMirror(row.role,textKey)) return;

@@ -394,6 +394,7 @@ def test_restored_empty_session_keeps_provider_through_boot_demotion():
     assert direct_load_refresh not in sessions
     quota_provider = _between(ui_js, "function _currentQuotaProvider", "window.addEventListener('visibilitychange'")
     refresh_helper = _between(boot, "const _syncQuotaForBootContext=()=>", "const urlSession")
+    embed_guard = _between(boot, "function _isEmbedBoot()", "// R3 degraded-mode disclosure")
     demotion = _between(
         boot,
         "if(S.session && (S.session.message_count||0) === 0 && !_restoredInFlight && !_restoredHasDraft){",
@@ -440,6 +441,7 @@ async function _finalizeComposerPrefillOnBoot() {{}}
 async function _applyPendingPanelIntent() {{}}
 function startGatewaySSE() {{}}
 {refresh_helper}
+{embed_guard}
 async function run(session) {{
   window._emptyComposerModelOverride = {{model: 'stale-model', model_provider: 'stale-provider'}};
   const data = {{session}};
