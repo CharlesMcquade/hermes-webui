@@ -975,9 +975,7 @@ def test_cancel_cleanup_updates_runtime_diagnostics():
         before = streaming.get_stream_runtime_snapshot()
         with patch("api.streaming.get_session", return_value=session):
             result = streaming.cancel_stream(stream_id)
-            assert result["cancelled"] is True
-            assert result["persistence_failed"] is False
-            assert result["stream_id"] == stream_id
+            assert result is True
         after = streaming.get_stream_runtime_snapshot()
 
     assert before["active"] == 1

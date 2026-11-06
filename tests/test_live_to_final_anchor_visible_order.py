@@ -1123,7 +1123,17 @@ def test_settled_anchor_scene_does_not_persist_running_live_activity_rows():
     settle_live = _function_body(MESSAGES_JS, "_anchorSceneSettleLiveRunningRow")
 
     assert "const hasSettledThinking=_anchorSceneMessageRowsHaveThinking(messageRows);" in complete
-    assert "const keepMirroredThinking=row.role==='thinking'&&projectedRows.includes(row)" in complete
+    # Both the slot reservation and the insertion decision must suppress a
+    # projected live thinking row when its settled counterpart exists.
+    assert (
+        "const keepMirroredThinking=!hasSettledThinking\n"
+        "        && row.role==='thinking'&&mirroredThinkingKeys.has(_anchorSceneTextKey(row.text));"
+    ) in complete
+    assert (
+        "const keepMirroredThinking=!hasSettledThinking\n"
+        "        && row.role==='thinking'&&projectedRows.includes(row)\n"
+        "        && mirroredThinkingKeys.has(_anchorSceneTextKey(row.text));"
+    ) in complete
     assert "row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking&&!keepMirroredThinking);" in complete
     assert "String(value||'').startsWith('live-')" in live_identity
     assert "const group=row.group&&typeof row.group==='object'?row.group:{};" in live_identity

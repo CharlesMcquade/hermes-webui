@@ -448,6 +448,9 @@ def test_only_preloaded_replay_prefix_runs_before_live_turn_recovery(monkeypatch
 
 def test_session_list_stream_lease_unsubscribes_proxy_acked_client(monkeypatch):
     _short_lease(monkeypatch)
+    # This case asserts both heartbeat and retirement; a 40 ms lease can
+    # legitimately expire before the 10 ms queue timeout can emit a heartbeat.
+    monkeypatch.setattr(routes, "_SSE_SUBSCRIBER_LEASE_SECONDS", 0.2, raising=False)
     q: queue.Queue = queue.Queue()
     unsubscribed: list[queue.Queue] = []
     monkeypatch.setattr(routes, "subscribe_session_events", lambda: q)
@@ -485,6 +488,9 @@ def test_session_list_stream_lease_expires_under_continuous_events(monkeypatch):
 
 def test_gateway_stream_lease_unsubscribes_proxy_acked_client(monkeypatch):
     _short_lease(monkeypatch)
+    # The lease may legitimately expire before a queue timeout yields a
+    # heartbeat. Keep enough room to exercise both heartbeat and unsubscribe.
+    monkeypatch.setattr(routes, "_SSE_SUBSCRIBER_LEASE_SECONDS", 0.2, raising=False)
     q: queue.Queue = queue.Queue()
 
     class Watcher:
