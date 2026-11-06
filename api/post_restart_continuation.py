@@ -45,6 +45,10 @@ def serialized_start(kind):
                 sid = args[0] if args else kwargs["session_id"]
             else:
                 sid = (args[0] if args else kwargs["s"]).session_id
+            # Upstream session-ID validation runs inside the wrapped handler.
+            # Keep malformed IDs on that path instead of failing a dict lookup here.
+            if not isinstance(sid, str):
+                return fn(*args, **kwargs)
             with admission(sid):
                 if kind in ("http", "session", "goal"):
                     # Ordinary starts must also reject a winning continuation
