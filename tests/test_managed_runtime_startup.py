@@ -145,8 +145,12 @@ def test_server_defers_application_import_until_profile_selection(tmp_path, with
         "raise AssertionError('premature application import')\n", encoding="utf-8",
     )
     if with_bootstrap:
+        # Network isolation and its namespace are bootstrap-safe shims, not
+        # the application surface that must remain deferred until Agent bootstrap.
         (agent_dir / "hermes_bootstrap.py").write_text(
-            "import sys\nassert not any(n.startswith('api.') for n in sys.modules)\n",
+            "import sys\n"
+            "_BOOTSTRAP_API = {'api', 'api.test_network_guard'}\n"
+            "assert not any(n.startswith('api.') and n not in _BOOTSTRAP_API for n in sys.modules)\n",
             encoding="utf-8",
         )
     env = os.environ.copy()
