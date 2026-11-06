@@ -660,7 +660,7 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
     def test_fallback_title_status_keeps_underlying_llm_reason(
         self, mock_get_session, mock_aux_title, mock_configured,
     ):
-        """Local fallback should not hide that the LLM failed because it hit length."""
+        """Local fallback preserves the failure reason without certifying an LLM title."""
         from api.streaming import _run_background_title_update
 
         mock_session = MagicMock()
@@ -687,6 +687,7 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
         self.assertTrue(title_status)
         self.assertEqual(title_status[0]['status'], 'fallback')
         self.assertEqual(title_status[0]['reason'], 'local_summary:llm_length_aux')
+        self.assertFalse(mock_session.llm_title_generated)
 
     @patch('api.streaming._aux_title_configured', return_value=True)
     @patch('api.streaming._generate_llm_session_title_via_aux')

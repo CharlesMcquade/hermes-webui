@@ -369,8 +369,15 @@ def get_session_title_state(session_id: str, profile: Optional[str] = None):
         db.close()
 
 
+def generated_title_source(status: str) -> str:
+    """Keep non-model summaries provisional; all other generated statuses are LLM."""
+    normalized = str(status or "").strip().lower()
+    return "derived" if normalized == "fallback" or normalized.startswith("local_summary") else "llm"
+
+
 def sync_session_title(session_id: str, title: str, profile: Optional[str] = None,
-                       *, expected=None, replace: bool = False, explicit: bool = False):
+                       *, expected=None, replace: bool = False, explicit: bool = False,
+                       source: str = 'llm'):
     """Resolve a generated title BEFORE publishing it to the WebUI sidecar.
 
     Return the persisted (title, source), including collision suffixes or a
@@ -379,9 +386,11 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
     automatic refresh never replaces user/unknown provenance. Errors propagate
     so callers cannot advertise a title that the canonical DB rejected.
     """
+    if source not in ('derived', 'llm'):
+        raise ValueError(f"Unsupported generated title source: {source}")
     db = _get_state_db(profile=profile, strict=True)
     if db is None:
-        return title, 'llm'
+        return title, source
     try:
         db.ensure_session(session_id=session_id, source='webui')
         modern = hasattr(db, 'get_session_title_source') and hasattr(db, 'set_auto_title')
@@ -410,11 +419,11 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
                             raise ValueError('Title collision')
                         conn.execute(
                             "UPDATE sessions SET title = ?, title_source = ? WHERE id = ? AND title IS ? AND title_source IS ?",
-                            (candidate, 'llm', session_id, *expected),
+                            (candidate, source, session_id, *expected),
                         )
                     db._execute_write(update)
                 elif modern:
-                    db.set_auto_title(session_id, candidate, source='llm')
+                    db.set_auto_title(session_id, candidate, source=source)
                 else:
                     # Old Agents can fill a blank title but cannot safely refresh
                     # one without provenance/CAS. Read back their winning value.

@@ -93,3 +93,30 @@ def test_sync_session_title_preserves_existing_source_on_ensure(tmp_path, monkey
         assert row["source"] == "cli"
     finally:
         db.close()
+
+
+@pytest.mark.requires_agent_modules
+def test_sync_session_title_preserves_derived_local_fallback(tmp_path, monkeypatch):
+    """A non-model local summary remains derived rather than becoming LLM authority."""
+    from api import state_sync
+
+    db = _make_db(tmp_path)
+    try:
+        monkeypatch.setattr(
+            state_sync,
+            "_get_state_db",
+            lambda profile=None, **kwargs: _make_db(tmp_path),
+        )
+
+        persisted = state_sync.sync_session_title(
+            "sess-fallback",
+            "Add game artwork",
+            profile="default",
+            source="derived",
+        )
+
+        assert persisted == ("Add game artwork", "derived")
+        assert db.get_session_title("sess-fallback") == "Add game artwork"
+        assert db.get_session_title_source("sess-fallback") == "derived"
+    finally:
+        db.close()

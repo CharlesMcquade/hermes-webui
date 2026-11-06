@@ -5903,7 +5903,14 @@ def _background_title_generation_eligible(session):
     )
     if not eligible_title:
         return False
-    return not (getattr(session, 'llm_title_generated', False) and not invalid_existing_title)
+    if not getattr(session, 'llm_title_generated', False):
+        # Retry unresolved titles only up to the recovery cap. Derived fallback
+        # titles remain upgradeable on an explicit regeneration, but must not
+        # create another model call on every subsequent exchange.
+        if _count_exchanges(messages) >= _TITLE_RECOVERY_MAX_EXCHANGES:
+            return False
+        return True
+    return invalid_existing_title
 
 
 def _background_title_generation_inputs(session):
@@ -6674,13 +6681,14 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
     return english_hits >= 2
 
 
-def _apply_generated_title(session, next_title, *, expected=None, replace=False, explicit=False):
+def _apply_generated_title(session, next_title, *, expected=None, replace=False, explicit=False,
+                           source='llm'):
     """Caller holds the session lock; DB decides the exact sidebar title."""
     from api.state_sync import sync_session_title
 
     title, source = sync_session_title(
         session.session_id, next_title, profile=getattr(session, 'profile', None) or 'default',
-        expected=expected, replace=replace, explicit=explicit,
+        expected=expected, replace=replace, explicit=explicit, source=source,
     )
     session.title = title
     if source in ('llm', 'derived'):
@@ -7496,7 +7504,7 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
             return
         from api import profiles as profiles_api
-        from api.state_sync import get_session_title_state
+        from api.state_sync import generated_title_source, get_session_title_state
 
         canonical = get_session_title_state(session_id, profile=getattr(s, 'profile', None) or 'default')
         with profiles_api.profile_env_for_background_worker(s, "background title", logger_override=logger):
@@ -7558,6 +7566,7 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                     source = 'fallback'
                 elif fallback_title:
                     logger.debug("Skipping generic local fallback for session title generation: %r", fallback_title)
+            generation_source = generated_title_source(source)
         fallback_reason = (
             f'local_summary:{llm_status}'
             if source == 'fallback' and llm_status
@@ -7600,9 +7609,11 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                         and str(canonical[0] or '').strip().lower() in _RESET_TITLE_LABELS
                     )
                     if _reset_canonical:
-                        _apply_generated_title(s, next_title, expected=canonical, replace=True)
+                        _apply_generated_title(
+                            s, next_title, expected=canonical, replace=True, source=generation_source
+                        )
                     else:
-                        _apply_generated_title(s, next_title)
+                        _apply_generated_title(s, next_title, source=generation_source)
                     # Keep chronological ordering stable in the sidebar.
                     s.save(touch_updated_at=False)
                     effective_title = s.title
@@ -7632,7 +7643,12 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             # Sync the generated title to state.db so `hermes sessions list` shows it.
             try:
                 from api.state_sync import sync_session_title
-                sync_session_title(session_id, effective_title, profile=getattr(s, 'profile', None) or 'default')
+                sync_session_title(
+                    session_id,
+                    effective_title,
+                    profile=getattr(s, 'profile', None) or 'default',
+                    source=generation_source,
+                )
             except Exception:
                 logger.debug("Failed to sync title to state.db after generation for %s", session_id)
         else:

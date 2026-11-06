@@ -136,11 +136,12 @@ def _persist_generated_session_title(
     require_default_title: bool = False,
     expected_title=None,
     expected_db=None,
+    generation_status: str = '',
 ) -> str:
     normalized_title = str(next_title or "").strip()[:80] or "Untitled"
     sid = str(getattr(session, "session_id", "") or "")
     original_session = session
-    from api.state_sync import get_session_title_state
+    from api.state_sync import generated_title_source, get_session_title_state
     if expected_title is None:
         expected_title = (session.title, getattr(session, 'manual_title', False))
         expected_db = get_session_title_state(sid, profile=getattr(session, 'profile', None) or 'default')
@@ -174,7 +175,8 @@ def _persist_generated_session_title(
         from api.streaming import _apply_generated_title
 
         _apply_generated_title(session, normalized_title, expected=expected_db,
-                               replace=True, explicit=not require_default_title)
+                               replace=True, explicit=not require_default_title,
+                               source=generated_title_source(generation_status))
         session.save(touch_updated_at=False)
         with LOCK:
             SESSIONS[sid] = session
@@ -233,6 +235,7 @@ def _queue_generated_title_for_imported_session(session, cli_meta: dict | None) 
                     require_default_title=True,
                     expected_title=expected_title,
                     expected_db=expected_db,
+                    generation_status=_reason,
                 )
             except Exception:
                 logger.debug("Failed to generate imported session title for %s", sid, exc_info=True)
@@ -20171,7 +20174,8 @@ def handle_post(handler, parsed) -> bool:
                     422,
                 )
             _persist_generated_session_title(s, next_title, event_reason="session_title_regenerate",
-                                             expected_title=expected_title, expected_db=expected_db)
+                                             expected_title=expected_title, expected_db=expected_db,
+                                             generation_status=reason)
         except (ValueError, TitleChangedError) as exc:
             return bad(handler, str(exc), 409)
         except Exception:

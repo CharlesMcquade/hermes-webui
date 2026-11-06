@@ -214,9 +214,9 @@ def test_recovery_cap_below_limit_still_retries():
 def test_recovery_cap_eligibility_turns_off_after_fallback():
     """Once the fallback title is persisted by the real update path, the
     session is no longer eligible for background title generation — the call
-    loop is actually broken, not merely slowed. Proven through the real
-    `_run_background_title_update` side effects (save + llm_title_generated),
-    not hand-set state."""
+    loop is broken by the recovery cap, while the derived local summary remains
+    upgradeable on an explicit regeneration. Proven through the real
+    `_run_background_title_update` side effects, not hand-set state."""
     from api.streaming import (
         _background_title_generation_eligible,
         _TITLE_RECOVERY_MAX_EXCHANGES,
@@ -231,10 +231,10 @@ def test_recovery_cap_eligibility_turns_off_after_fallback():
                return_value=(None, 'llm_language_mismatch_aux', '糟糕的标题')):
         _run_capped_update(s, provisional, events, 'llm_language_mismatch_aux')
 
-    # The update path itself persisted the fallback and marked the session
-    # generated — eligibility flips off as a consequence of real behavior.
+    # The update persisted a derived local summary, not a certified LLM title.
+    # The recovery cap still prevents later automatic calls.
     s.save.assert_called()
-    assert s.llm_title_generated is True
+    assert s.llm_title_generated is False
     assert _background_title_generation_eligible(s) is False
 
 
