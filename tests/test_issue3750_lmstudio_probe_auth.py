@@ -682,10 +682,11 @@ agent:
     )
     saved = config._load_yaml_config_file(config._get_config_path())
 
-    # #7170 deliberately updates the global default as well as both the
-    # provider-scoped and legacy bare-model override for this model-aware write.
+    # #7170 deliberately updates the global default and the legacy bare-model
+    # override. Provider-qualified overrides are accepted by its reader, not
+    # serialized by this writer; the reader-only scope has dedicated coverage.
     assert saved["agent"]["reasoning_effort"] == "medium"
     overrides = saved["agent"]["reasoning_overrides"]
-    assert overrides["lmstudio:qwen/qwen3.8-27b"] == "medium"
     assert overrides["qwen/qwen3.8-27b"] == "medium"
+    assert "lmstudio:qwen/qwen3.8-27b" not in overrides
     assert status["reasoning_effort"] == "medium"
