@@ -260,6 +260,8 @@ def test_done_defers_live_dom_removal_but_other_terminal_paths_still_clear():
     """
     clear_live = _extract("clearLiveToolCards")
     done_start = MESSAGES_JS.index("source.addEventListener('done',e=>{")
+    # Cover the whole handler, including downstream settle work beyond the
+    # formerly fixed 18000-byte window.
     done_end = MESSAGES_JS.index("source.addEventListener('error'", done_start)
     done = MESSAGES_JS[done_start:done_end]
     harness = textwrap.dedent(f"""
