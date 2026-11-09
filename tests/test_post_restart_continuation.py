@@ -2,6 +2,7 @@
 import json
 import os
 import sqlite3
+import tempfile
 import threading
 from types import SimpleNamespace
 from pathlib import Path
@@ -121,11 +122,21 @@ def test_owning_routes_have_browser_independent_consumer():
 
 
 @pytest.fixture
-def armed(monkeypatch, tmp_path):
+def private_store_tmp():
+    # Store deliberately rejects EVERY group/world-writable ancestor, including
+    # sticky shared temp roots. Keep the private store in an isolated directory
+    # under the test user's home, never beneath a runner's shared TMPDIR and
+    # never inside a live Hermes profile.
+    with tempfile.TemporaryDirectory(prefix=".webui-continuation-test-", dir=Path.home()) as root:
+        yield Path(root)
+
+
+@pytest.fixture
+def armed(monkeypatch, tmp_path, private_store_tmp):
     from api import config, models, profiles, routes
     from api import post_restart_continuation as resume
 
-    private = tmp_path / "private"
+    private = private_store_tmp / "private"
     private.mkdir(mode=0o700)
     workspace = tmp_path / "workspace"
     workspace.mkdir()

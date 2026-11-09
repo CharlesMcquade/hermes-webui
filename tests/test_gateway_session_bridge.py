@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 import json
 import os
 import socket
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -53,10 +55,21 @@ def test_bad_handshake_never_bootstraps(monkeypatch, tmp_path, handshake):
     assert peer.closed == {"code": 1011, "reason": "Gateway session bridge unavailable"}
 
 
+@pytest.fixture
+def short_private_socket_root():
+    # Linux AF_UNIX paths are limited to 108 bytes; runner-nested tmp_path can
+    # exceed that before the socket filename is appended. Use an explicit short
+    # base rather than tempfile honoring a long runner-controlled TMPDIR.
+    with tempfile.TemporaryDirectory(prefix=".webui-bridge-", dir=Path.home()) as root:
+        path = Path(root)
+        path.chmod(0o700)
+        yield path
+
+
 @pytest.mark.skipif(not hasattr(socket, "SO_PEERCRED"), reason="Linux peer credential integration")
-def test_private_unix_roundtrip_and_cleanup(tmp_path, monkeypatch, allow_outbound_network):
+def test_private_unix_roundtrip_and_cleanup(short_private_socket_root, monkeypatch, allow_outbound_network):
     from websockets.asyncio.client import unix_connect
-    tmp_path.chmod(0o700)
+    tmp_path = short_private_socket_root
     path = tmp_path / "session.sock"
     # The suite's IP-only guard rejects Unix paths. Permit only this disposable
     # socket for the roundtrip; keep every TCP and other Unix connection blocked.
@@ -82,6 +95,8 @@ def test_private_unix_roundtrip_and_cleanup(tmp_path, monkeypatch, allow_outboun
         try:
             for _ in range(100):
                 if path.exists(): break
+                if server.done():
+                    await server  # surface bind/startup errors, never disguise them as a missing socket
                 await asyncio.sleep(.01)
             bridge.private_path(path)
             async with unix_connect(str(path), subprotocols=[bridge.PROTOCOL]) as ws:

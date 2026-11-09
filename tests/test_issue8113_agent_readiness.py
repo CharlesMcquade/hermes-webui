@@ -25,6 +25,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -213,6 +214,16 @@ STAGE_MANIFEST = ".hermes-webui-stage-source"
 STAGE_ENV = "HERMES_WEBUI_AGENT_STAGE_DIR"
 
 
+@pytest.fixture
+def trusted_stage_tmp():
+    # _trusted_ancestry permits sticky shared temp roots, unlike Store's stricter
+    # continuation ancestry. Isolate positive staged-source fixtures from a
+    # runner TMPDIR whose non-sticky writable mode must fail closed. An explicit
+    # home location avoids tempfile honoring that same untrusted TMPDIR.
+    with tempfile.TemporaryDirectory(prefix=".webui-stage-test-", dir=Path.home()) as root:
+        yield Path(root)
+
+
 @pytest.fixture(params=[0o022, 0o002], ids=["umask022", "umask002"])
 def ambient_umask(request):
     """Run a positive fixture under both common umasks.
@@ -284,8 +295,9 @@ def test_auto_install_same_stage_as_agent_has_no_warning(tmp_path, ambient_umask
     assert "Ignoring staged agent copy" not in capsys.readouterr().out
 
 
-def test_auto_install_targets_the_writable_staged_copy(tmp_path, ambient_umask):
+def test_auto_install_targets_the_writable_staged_copy(trusted_stage_tmp, ambient_umask):
     """The `:ro` mount can never satisfy the install that would fix #8113."""
+    tmp_path = trusted_stage_tmp
     from api.startup import _agent_install_dir
 
     mount = _agent(tmp_path, "hermes-agent")
@@ -356,13 +368,14 @@ def test_auto_install_falls_back_to_the_mount_without_a_stage_dir(tmp_path):
         assert _agent_install_dir(mount) == mount
 
 
-def test_auto_install_never_returns_a_path_swapped_in_after_validation(tmp_path, ambient_umask):
+def test_auto_install_never_returns_a_path_swapped_in_after_validation(trusted_stage_tmp, ambient_umask):
     """The path that was checked is the path that is returned.
 
     Resolving the env value only after the trust and manifest checks let a
     symlink swapped in between redirect the install to an unchecked,
     world-writable directory.
     """
+    tmp_path = trusted_stage_tmp
     import api.startup as startup
 
     mount = _agent(tmp_path, "hermes-agent")
@@ -415,8 +428,9 @@ def test_auto_install_rejects_a_stage_under_a_replaceable_parent(tmp_path, ambie
 
 
 @pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership and modes")
-def test_auto_install_accepts_a_stage_under_a_sticky_parent(tmp_path, ambient_umask):
+def test_auto_install_accepts_a_stage_under_a_sticky_parent(trusted_stage_tmp, ambient_umask):
     """The image's /app is 1777: sticky, so only the stage's owner can replace it."""
+    tmp_path = trusted_stage_tmp
     from api.startup import _agent_install_dir
 
     mount = _agent(tmp_path, "hermes-agent")
@@ -453,8 +467,9 @@ def test_auto_install_ignores_a_staged_path_that_fails_the_trust_check(tmp_path)
             assert _agent_install_dir(mount) == mount
 
 
-def test_auto_install_runs_pip_against_the_staged_copy(tmp_path):
+def test_auto_install_runs_pip_against_the_staged_copy(trusted_stage_tmp):
     """End-to-end through auto_install_agent_deps, not just the helper."""
+    tmp_path = trusted_stage_tmp
     from api.startup import auto_install_agent_deps
 
     mount = _agent(tmp_path, "hermes-agent")
@@ -508,13 +523,14 @@ def _bash_function(src: str, name: str) -> str:
     shutil.which("bash") is None or shutil.which("sha256sum") is None,
     reason="bash and sha256sum are needed to run the docker_init.bash publisher",
 )
-def test_docker_init_stage_manifest_is_accepted_by_the_recovery_path(tmp_path):
+def test_docker_init_stage_manifest_is_accepted_by_the_recovery_path(trusted_stage_tmp):
     """The real bash publisher and the Python reader must agree on the binding.
 
     Runs `write_agent_stage_manifest` from docker_init.bash on a staged copy,
     then checks that `_agent_install_dir()` accepts it — and stops accepting it
     once the Agent's install inputs change underneath the stage.
     """
+    tmp_path = trusted_stage_tmp
     from api.startup import _agent_install_dir
 
     publisher = _bash_function(INIT_SH, "write_agent_stage_manifest")

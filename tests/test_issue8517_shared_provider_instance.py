@@ -185,9 +185,17 @@ def test_refused_profile_runs_without_the_provider_and_is_warned_once(
     assert "sbxmem" in msg and str(homes["beta"]) in msg and _key(homes["alpha"]) in msg
 
 
-def test_real_memory_manager_refuses_a_shared_instance_for_a_second_profile(hc, homes, guard_state):
+def test_real_memory_manager_refuses_a_shared_instance_for_a_second_profile(
+    hc, homes, guard_state, monkeypatch
+):
     from agent.memory_provider import MemoryProvider  # noqa: PLC0415
     from api.agent_runtime import require_ai_agent_class  # noqa: PLC0415
+    import types
+
+    # The WebUI test venv need not duplicate every transitive Agent runtime
+    # dependency. Import the real AIAgent, but isolate this memory-contract test
+    # from psutil, which file_sync only dereferences when file-sync APIs run.
+    monkeypatch.setitem(sys.modules, "psutil", types.ModuleType("psutil"))
 
     class SharedSbx(SharedInstanceMemoryProvider, MemoryProvider):
         name = "sbxmem"

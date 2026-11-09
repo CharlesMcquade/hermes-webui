@@ -49,13 +49,14 @@ def test_delivery_options_structure():
 
 
 def test_delivery_options_includes_common_platforms():
-    """Well-known platforms from _KNOWN_DELIVERY_PLATFORMS appear."""
+    """Core delivery platforms remain available without optional plugins."""
     result, status = get("/api/crons/delivery-options")
     assert status == 200
     values = [p["value"] for p in result["platforms"]]
-    # These are from the hardcoded _KNOWN_DELIVERY_PLATFORMS in hermes-agent
-    for expected in ("local", "telegram", "discord", "slack", "feishu"):
-        assert expected in values, f"Expected platform '{expected}' not found in: {values}"
+    # Telegram/Discord/etc. are plugins in current Agents and cannot be promised
+    # when those plugins are disabled or unavailable. Core still owns these two.
+    for expected in ("local", "webhook", "wecom_callback"):
+        assert expected in values, f"Expected core platform '{expected}' not found in: {values}"
 
 
 def test_delivery_options_local_label():
@@ -67,7 +68,7 @@ def test_delivery_options_local_label():
     assert local_entry["label"], "Local platform label is empty"
 
 
-def test_delivery_options_survives_the_authority_module_move():
+def test_delivery_options_survives_the_authority_module_move(monkeypatch):
     """The platform list must not silently empty when the Agent relocates it.
 
     ``_KNOWN_DELIVERY_PLATFORMS`` used to live in ``cron.scheduler`` and now
@@ -105,3 +106,39 @@ def test_delivery_options_survives_the_authority_module_move():
     values = {p["value"] for p in result["platforms"]}
     missing = resolved - values
     assert not missing, f"platforms resolved but absent from the endpoint: {sorted(missing)}"
+
+    # A deterministic installed-plugin fixture proves the current discovery seam
+    # without reading a live user profile or promising Telegram/Discord by name.
+    import sys
+    from types import SimpleNamespace
+    from gateway.platform_registry import PlatformEntry, PlatformRegistry
+    from api import routes
+
+    registry = PlatformRegistry()
+    discoveries = []
+
+    def entry(name, cron_env):
+        return PlatformEntry(
+            name=name, label=name.title(), adapter_factory=lambda _cfg: None,
+            check_fn=lambda: True, source="plugin", cron_deliver_env_var=cron_env,
+        )
+
+    def discover_plugins():
+        discoveries.append(True)
+        scope = registry.current_scope_key()
+        registry.register(entry("fixture_chat", "FIXTURE_CHAT_HOME_CHANNEL"), scope=scope)
+        registry.register(entry("not_cron_capable", ""), scope=scope)
+
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", SimpleNamespace(discover_plugins=discover_plugins))
+    monkeypatch.setitem(sys.modules, "gateway.platform_registry", SimpleNamespace(platform_registry=registry))
+
+    def capture_payload(_handler, payload):
+        return payload
+
+    monkeypatch.setattr(routes, "j", capture_payload)
+    payload = routes._handle_cron_delivery_options(object())
+    names = {p["value"] for p in payload["platforms"]}
+    assert discoveries == [True]
+    assert "fixture_chat" in names
+    assert "not_cron_capable" not in names
+    assert resolved <= names

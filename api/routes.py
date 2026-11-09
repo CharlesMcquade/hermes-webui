@@ -34730,25 +34730,33 @@ def _handle_cron_delivery_options(handler):
     # The Agent moved this authority from ``cron.scheduler`` to
     # ``cron.scheduler_delivery``. Try the current location first and fall back
     # to the legacy one so the picker keeps working across Agent versions.
-    # Without the fallback chain a bare ImportError silently degraded this
-    # endpoint to local/origin only, dropping every messaging platform from the
-    # cron delivery picker (telegram, discord, slack, feishu, ...).
-    _KNOWN_DELIVERY_PLATFORMS = frozenset()
+    # Messaging platforms now come from installed plugins, not a core constant:
+    # follow the same discovery seam as cron's home-target resolver and retain
+    # the core-only allowlist for webhook/wecom_callback and older Agents.
+    _known_delivery_platforms = frozenset()
     import importlib
     for _module_name in ("cron.scheduler_delivery", "cron.scheduler"):
         try:
             _mod = importlib.import_module(_module_name)
         except Exception:
             continue
-        _known = getattr(_mod, "_KNOWN_DELIVERY_PLATFORMS", None)
-        if _known:
-            _KNOWN_DELIVERY_PLATFORMS = frozenset(_known)
+        _known = frozenset(getattr(_mod, "_KNOWN_DELIVERY_PLATFORMS", ()) or ())
+        _plugin_platforms = getattr(_mod, "_iter_home_target_platforms", None)
+        if callable(_plugin_platforms):
+            try:
+                _known |= frozenset(_plugin_platforms())
+            except Exception:
+                # An incompatible optional plugin must not remove the core
+                # choices (or prevent the legacy-module fallback below).
+                pass
+        if _known or callable(_plugin_platforms):
+            _known_delivery_platforms = _known
             break
     platforms = [
         {"value": "local", "label": "Local (save output only)"},
         {"value": "origin", "label": "Origin (reply to creator)"}
     ]
-    for name in sorted(_KNOWN_DELIVERY_PLATFORMS):
+    for name in sorted(_known_delivery_platforms):
         platforms.append({"value": name, "label": name.capitalize()})
     return j(handler, {"platforms": platforms})
 
