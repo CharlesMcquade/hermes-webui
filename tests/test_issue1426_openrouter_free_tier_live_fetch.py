@@ -23,6 +23,7 @@ import urllib.request
 import pytest
 
 import api.config as config
+import api.profiles as profiles
 
 
 class _FakeResponse:
@@ -55,10 +56,24 @@ def _get_grouped_models() -> list[dict]:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_openrouter_cache(monkeypatch):
+def _isolate_openrouter_cache(monkeypatch, tmp_path):
     """Reset the curated cache before each test so the live-fetch path runs.
     Also force `openrouter` as the active provider so the openrouter branch
     in get_available_models() actually runs."""
+    from contextlib import nullcontext
+
+    # The config override belongs to this test profile. Without matching the
+    # path marker, get_available_models() treats an inherited path delta as a
+    # profile switch and reloads disk over the override. Keep ambient request
+    # profiles out too, and make this synchronous fetch test deterministic.
+    config_path = tmp_path / "missing-config.yaml"
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(config, "_cfg_path", config_path, raising=False)
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0)
+    monkeypatch.setattr(
+        profiles, "profile_env_for_active_request",
+        lambda *args, **kwargs: nullcontext(),
+    )
     try:
         from hermes_cli import models as _hm
 
@@ -290,6 +305,10 @@ def test_free_tier_cap_prevents_picker_drowning(monkeypatch):
     try:
         from hermes_cli import models as _hm
         monkeypatch.setattr(_hm, "_openrouter_catalog_cache", None, raising=False)
+        # Only the direct free-tier augmentation is under test here. As in the
+        # sibling fail-closed test, do not let the curated fetch hit real network.
+        monkeypatch.setattr(_hm, "fetch_openrouter_models", lambda **_kwargs: [])
+        monkeypatch.setattr(_hm, "provider_model_ids", lambda *_args, **_kwargs: [])
     except Exception:
         pass
 

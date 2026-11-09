@@ -504,6 +504,9 @@ def test_provider_card_uses_backend_projection_authority_matrix(isolated_self_ho
 def test_saved_provider_payload_has_no_singular_model_authority(monkeypatch, tmp_path):
     _install_fake_hermes_cli(monkeypatch)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    # This test owns an in-memory config. Align the disk-loaded path marker too:
+    # get_config() reloads on a path delta even when in-memory overrides exist.
+    monkeypatch.setattr(config, "_cfg_path", config._get_config_path(), raising=False)
     old_cfg = dict(config.cfg)
     old_mtime = config._cfg_mtime
     config.cfg.clear()

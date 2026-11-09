@@ -20,7 +20,20 @@ def test_compensation_guard_does_not_block_required_mount(page):
     }""")
     assert result['fresh'] and result['scheduled'], result
     assert result['afterPinned'] == result['pinned'], result
-    page.wait_for_timeout(600)
+    # Wait for the required rAF mount AND the ResizeObserver delivery it can
+    # trigger, rather than sampling at two arbitrary wall-clock instants.
+    page.wait_for_function("""() => {
+      const idle=window._mountGuardIdleProbe||(window._mountGuardIdleProbe={revision:-1,frames:0});
+      const revision=_messageWindowRevision, observed=_messageWindowObserved;
+      if(_messageVirtualScrollRaf!==0||!observed||observed.revision!==revision||
+         observed.top!==$('messages').scrollTop){
+        idle.revision=-1;idle.frames=0;return false;
+      }
+      idle.frames=idle.revision===revision?idle.frames+1:1;
+      idle.revision=revision;
+      return idle.frames>=3;
+    }""", polling='raf')
     before = page.evaluate('_messageWindowRevision')
-    page.wait_for_timeout(600)
+    page.evaluate("""() => new Promise(resolve =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve)))""")
     assert page.evaluate('_messageWindowRevision') == before, 'idle render loop'

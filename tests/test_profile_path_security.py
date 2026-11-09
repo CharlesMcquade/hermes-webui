@@ -38,7 +38,7 @@ def _reload_profiles_module(base_home: Path):
     return profiles
 
 
-def test_switch_profile_rejects_path_traversal():
+def test_switch_profile_rejects_path_traversal(monkeypatch):
     with tempfile.TemporaryDirectory() as td:
         temp_root = Path(td)
         base = temp_root / ".hermes"
@@ -46,6 +46,11 @@ def test_switch_profile_rejects_path_traversal():
         (temp_root / "escape-target").mkdir()
 
         profiles = _reload_profiles_module(base)
+        # A stream registered by an unrelated test must not turn this idle
+        # process-wide security probe into the production busy-switch probe.
+        # Rebind instead of clearing so any ambient registry is restored intact.
+        import api.config as config
+        monkeypatch.setattr(config, "STREAMS", {})
 
         with pytest.raises(ValueError):
             profiles.switch_profile("../../escape-target")
