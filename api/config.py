@@ -13585,7 +13585,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # A profile switch still reloads, but an mtime change alone must not
         # discard deliberate live overrides before building this catalog.
         if (
-            str(_current_config_path) != str(_cfg_path)
+            _current_config_path != _cfg_path
             or (_cfg_changed and not _cfg_has_in_memory_overrides())
         ):
             reload_config()

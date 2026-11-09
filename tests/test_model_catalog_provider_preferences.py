@@ -127,8 +127,8 @@ def test_live_catalog_preserves_in_memory_config_on_mtime_change(
     isolated_catalog({"preferred_providers": ["github"]})
     config_path = tmp_path / "catalog-config.yaml"
     config_path.write_text("model: {}\n", encoding="utf-8")
-    monkeypatch.setattr(config, "_get_config_path", lambda: str(config_path))
-    monkeypatch.setattr(config, "_cfg_path", str(config_path))
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(config, "_cfg_path", config_path)
     monkeypatch.setattr(config, "_cfg_mtime", config_path.stat().st_mtime - 1.0)
 
     provider_ids = _provider_ids(config.get_available_models())
