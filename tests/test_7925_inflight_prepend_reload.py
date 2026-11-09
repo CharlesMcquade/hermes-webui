@@ -68,6 +68,11 @@ function syncTopbar() {}
 function renderMessages() {}
 function requestAnimationFrame(fn) { fn(); }
 function msgContent(m) { return m && m.content || ''; }
+function _messageWindowSnapshot() {
+  // ui.js returns null when the message panel is not installed. This harness
+  // has the same absent-DOM condition, not a missing reader/window contract.
+  return null;
+}
 eval(realFunctions.map(extractFunction).join('\n\n'));
 function rows(start, end) {
   return Array.from({length:end-start+1}, (_, k) => {

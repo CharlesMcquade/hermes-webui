@@ -44,6 +44,11 @@ def auxiliary_client_modules():
 
     agent_stub = types.ModuleType("agent")
     auxiliary_client_stub = types.ModuleType("agent.auxiliary_client")
+    # The real Agent exposes this helper and title_generator resolves it via
+    # ``from agent.auxiliary_client import _current_custom_base_url`` when a
+    # custom route is exercised. Keep the pseudo-module import-compatible;
+    # tests still replace the actual LLM call with deterministic fixtures.
+    auxiliary_client_stub.__dict__["_current_custom_base_url"] = lambda: ""
     portal_tags_stub = types.ModuleType("agent.portal_tags")
     agent_stub.auxiliary_client = auxiliary_client_stub
     portal_state = {"set_calls": [], "reset_calls": []}
