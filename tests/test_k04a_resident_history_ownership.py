@@ -59,6 +59,7 @@ def _harness(case: str) -> dict:
     assert NODE, "node is required for behavioural K04a tests"
     pieces = [
         _extract_function(MESSAGES_JS, "_messageIdentityKey"),
+        _extract_function(MESSAGES_JS, "_residentMergeIdentityKey"),
         _extract_function(MESSAGES_JS, "_ownerIdentityConflict"),
         _extract_function(MESSAGES_JS, "_mergeResidentPrefix"),
         _extract_function(MESSAGES_JS, "_adoptDoneSnapshotMessages"),
@@ -126,7 +127,10 @@ const settled=[
   {role:'user',_ts:'5',content:'new question'},
   {role:'assistant',_ts:'6',content:'The streamed final answer.'}
 ];
-const r=_adoptDoneSnapshotMessages(pre,settled,'The streamed final answer.');
+const r=_adoptDoneSnapshotMessages(pre,settled,'The streamed final answer.',{
+  allowResidentPrefixMerge:true,
+  residentMergeWindow:{residentOrigin:0,settledOffset:2,messageCount:6}
+});
 const texts=r.messages.map(m=>m.content);
 console.log(JSON.stringify({
   keepsOldQ1:texts.includes('old question 1'),

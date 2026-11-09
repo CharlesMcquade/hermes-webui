@@ -655,7 +655,7 @@ agent:
     assert status["supported_efforts"] == ["low", "medium", "xhigh"]
 
 
-def test_model_aware_reasoning_write_does_not_mutate_global_default(tmp_path, monkeypatch):
+def test_model_aware_reasoning_write_updates_global_and_legacy_bare_override(tmp_path, monkeypatch):
     _write_config(
         tmp_path,
         monkeypatch,
@@ -682,10 +682,10 @@ agent:
     )
     saved = config._load_yaml_config_file(config._get_config_path())
 
-    assert saved["agent"]["reasoning_effort"] == "low"
+    # #7170 deliberately updates the global default as well as both the
+    # provider-scoped and legacy bare-model override for this model-aware write.
+    assert saved["agent"]["reasoning_effort"] == "medium"
     overrides = saved["agent"]["reasoning_overrides"]
-    # Provider-aware writes use provider:model. A separate legacy bare entry
-    # remains untouched instead of being migrated or silently overwritten.
     assert overrides["lmstudio:qwen/qwen3.8-27b"] == "medium"
-    assert overrides["qwen/qwen3.8-27b"] == "xhigh"
+    assert overrides["qwen/qwen3.8-27b"] == "medium"
     assert status["reasoning_effort"] == "medium"

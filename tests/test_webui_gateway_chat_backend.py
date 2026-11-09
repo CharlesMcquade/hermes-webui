@@ -277,8 +277,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     monkeypatch.setattr(config_api, 'get_config', lambda: {'agent': {'system_prompt': 'WRONG_GLOBAL_OVERLAY'}})
     monkeypatch.setattr(profiles_api, 'get_hermes_home_for_profile', lambda profile: tmp_path / str(profile or 'default'))
     homes = []
-    def profile_config(home):
+    def profile_config(home, isolate_config_override=False):
         homes.append(Path(home))
+        assert isolate_config_override is True
         return {'agent': {'system_prompt': 'SESSION_PROFILE_OVERLAY'}}
     monkeypatch.setattr(config_api, 'get_config_for_profile_home', profile_config)
     session_dir = tmp_path / "sessions"

@@ -138,7 +138,7 @@ def armed(monkeypatch, tmp_path, private_store_tmp):
 
     private = private_store_tmp / "private"
     private.mkdir(mode=0o700)
-    workspace = tmp_path / "workspace"
+    workspace = private_store_tmp / "workspace"
     workspace.mkdir()
     sidecars = tmp_path / "sessions"
     sidecars.mkdir()

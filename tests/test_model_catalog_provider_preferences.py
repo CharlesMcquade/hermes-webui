@@ -44,6 +44,7 @@ def isolated_catalog(monkeypatch, tmp_path):
     _install_fake_hermes_cli(monkeypatch)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(config, "_cfg_has_in_memory_overrides", lambda: True)
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0)
     old_cfg = dict(config.cfg)
     old_mtime = config._cfg_mtime
     old_cfg_path = config._cfg_path

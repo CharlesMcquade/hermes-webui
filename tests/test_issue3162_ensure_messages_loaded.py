@@ -38,11 +38,11 @@ def _ensure_messages_loaded_body() -> str:
 
 def test_ensure_messages_loaded_declares_msgs_with_let():
     body = _ensure_messages_loaded_body()
-    assert "let msgs = (data.session.messages" in body, (
-        "_ensureMessagesLoaded must declare `let msgs` — it is reassigned by the #3018 "
-        "carry-forward, and `const` throws a runtime TypeError on every mobile message (#3162)"
+    assert "let msgs = retainedPrefix.concat((data.session.messages || []).filter(m => m && m.role));" in body, (
+        "_ensureMessagesLoaded must declare `let msgs` for the #7925 retained prefix plus "
+        "#3018 carry-forward; `const` throws when that list is reassigned (#3162)"
     )
-    assert "const msgs = (data.session.messages" not in body, (
+    assert "const msgs = retainedPrefix.concat((data.session.messages" not in body, (
         "found `const msgs` in _ensureMessagesLoaded — this is the #3162 brick-class bug; "
         "must be `let` because msgs is reassigned"
     )
