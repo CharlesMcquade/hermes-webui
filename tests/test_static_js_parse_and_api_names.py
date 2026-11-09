@@ -2,7 +2,7 @@
 
 332d7f4fc shipped (1) static/panels.js with a duplicated block -> SyntaxError,
 which half-bricks boot for every fresh client, and (2) api/streaming.py calling
-resolve_reasoning_effort_for_request without importing it (NameError swallowed
+configured_reasoning_effort_for_model without importing it (NameError swallowed
 by a broad except -> reasoning effort silently dropped). The ESLint guard skips
 when eslint is absent, so these need only node / pyflakes.
 """
@@ -43,4 +43,4 @@ def test_api_has_no_undefined_names():
 
 def test_streaming_imports_scoped_effort_resolver():
     import api.streaming as streaming
-    assert callable(streaming.resolve_reasoning_effort_for_request)
+    assert callable(streaming.configured_reasoning_effort_for_model)

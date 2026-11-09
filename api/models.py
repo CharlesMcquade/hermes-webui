@@ -7819,29 +7819,21 @@ def _profile_default_model_state(profile=None):
     return default_model or get_effective_default_model(), default_provider
 
 
-def _profile_default_reasoning_effort(profile=None, model=None, model_provider=None):
-    """Return the profile reasoning preference for a newly-created session.
-
-    Fork S02 union fix: when the request carries model context, resolve the
-    profile's ``agent.reasoning_overrides['provider:model']`` scoped pick first
-    (the same precedence the composer chip and the streaming lane apply), then
-    fall back to the profile's global ``agent.reasoning_effort``. Without model
-    context the legacy global read is the only available answer.
-    """
+def _profile_default_reasoning_effort(
+    profile=None,
+    *,
+    model_id=None,
+    provider_id=None,
+):
+    """Return the profile reasoning preference for a newly-created session."""
     try:
         from api.profiles import get_hermes_home_for_profile
-        home = get_hermes_home_for_profile(profile)
-        if model:
-            from api import config as _config
-            resolved = _config.resolve_reasoning_effort_for_request(
-                model, model_provider,
-                cfg=_config.get_config_for_profile_home(
-                    home, isolate_config_override=True,
-                ),
-            )
-            if resolved:
-                return resolved
-        return _cfg.effective_session_reasoning_effort(None, home)
+        return _cfg.effective_session_reasoning_effort(
+            None,
+            get_hermes_home_for_profile(profile),
+            model_id=model_id,
+            provider_id=provider_id,
+        )
     except Exception:
         # Stay legacy (None) so the turn-time fallback still reads the profile
         # instead of pinning this chat to the provider default.
@@ -7896,7 +7888,9 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         model=effective_model,
         model_provider=effective_model_provider,
         reasoning_effort=_profile_default_reasoning_effort(
-            profile, model=effective_model, model_provider=effective_model_provider,
+            profile,
+            model_id=effective_model,
+            provider_id=effective_model_provider,
         ),
         profile=profile,
         project_id=project_id,

@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 import api.config as config
 import api.gateway_chat as gateway_chat
@@ -389,12 +390,9 @@ def test_runtime_paths_prefer_session_reasoning_effort():
     # The live session is the source, matching the Gateway worker.
     assert "_session_effort = getattr(s, 'reasoning_effort', None)" in streaming
     assert "getattr(_session_meta, 'reasoning_effort'" not in streaming
-    # Union note: the merged runtime path wraps the coerce call in the
-    # precedence else-branch's try, so it sits one indent deeper than r12's
-    # flat shape. Assert the call and its arguments, not the indentation.
-    assert re.search(
-        r"effective_session_reasoning_effort\(\s*_session_effort, _profile_home,", streaming
-    )
+    assert "effective_session_reasoning_effort(" in streaming
+    assert "model_id=resolved_model" in streaming
+    assert "provider_id=resolved_provider" in streaming
     assert "resolve_session_reasoning_effort(" in gateway
     # The Gateway worker starts from the live session too, and resolves a legacy
     # session through the same isolated session-profile read as the chip.
@@ -779,39 +777,12 @@ def test_reasoning_pick_writes_the_profile_its_readers_use(
     assert handler.payload()["reasoning_effort"] == "xhigh"
 
     # The pick lands in its own profile's file and no other.
-    # Fork union adaptation, two pick shapes:
-    #   - session picks: fork and upstream agree — the owner profile's GLOBAL
-    #     agent.reasoning_effort key becomes the pick.
-    #   - no-session model-aware picks: fork S02 persists a scoped
-    #     agent.reasoning_overrides['provider:model'] entry in the active
-    #     profile's file (a composer choice must not leak onto unrelated
-    #     models), leaving every file's global key at its ``before`` value.
     owner = session_profile or active
-    pick_key = config.reasoning_override_key("gpt-5", "openai")
     for name, path in files.items():
-        if name != owner:
-            assert _yaml_effort(path) == before[name], name
-            continue
-        if session_profile is not None:
-            assert _yaml_effort(path) == "xhigh", name
-        else:
-            agent_cfg = (config._load_yaml_config_file(path) or {}).get("agent") or {}
-            overrides = agent_cfg.get("reasoning_overrides") or {}
-            assert overrides.get(pick_key) == "xhigh", name
-            assert _yaml_effort(path) == before[name], name
+        assert _yaml_effort(path) == ("xhigh" if name == owner else before[name]), name
     # The owner's next chat and every reader of its default now agree.
     owner_home = profiles.get_hermes_home_for_profile(owner)
-    if session_profile is None:
-        # Fork: the scoped override resolves for the picked model; the bare
-        # global helper is model-blind by contract.
-        owner_cfg = config.get_config_for_profile_home(
-            owner_home, isolate_config_override=True,
-        )
-        assert config.resolve_reasoning_effort_for_request(
-            "gpt-5", "openai", cfg=owner_cfg,
-        ) == "xhigh"
-    else:
-        assert config.effective_session_reasoning_effort(None, owner_home) == "xhigh"
+    assert config.effective_session_reasoning_effort(None, owner_home) == "xhigh"
     assert models.new_session(
         workspace=str(tmp_path), model="gpt-5", profile=owner,
         model_provider="openai",
@@ -821,21 +792,9 @@ def test_reasoning_pick_writes_the_profile_its_readers_use(
     handle_get(handler, urlparse("/api/reasoning?model=gpt-5&provider=openai"))
     expected_active = "xhigh" if owner == active else before[active]
     assert handler.payload()["reasoning_effort"] == expected_active
-    if session_profile is None:
-        # Fork: the chip resolves the model-scoped override; the legacy global
-        # helper is model-blind by contract, so chip/reader consistency is
-        # asserted through the model-aware resolver here.
-        assert expected_active == config.resolve_reasoning_effort_for_request(
-            "gpt-5", "openai",
-            cfg=config.get_config_for_profile_home(
-                profiles.get_hermes_home_for_profile(active),
-                isolate_config_override=True,
-            ),
-        )
-    else:
-        assert expected_active == config.effective_session_reasoning_effort(
-            None, profiles.get_hermes_home_for_profile(active)
-        )
+    assert expected_active == config.effective_session_reasoning_effort(
+        None, profiles.get_hermes_home_for_profile(active)
+    )
 
 
 @pytest.mark.parametrize("config_location", ["root", "unset"])
@@ -951,6 +910,49 @@ def test_effective_session_effort_shares_one_legacy_source(
     assert config.effective_session_reasoning_effort(session_effort, work) == expected
     if session_effort is None:
         assert models._profile_default_reasoning_effort("work") == "high"
+
+
+@pytest.mark.parametrize(
+    "session_effort, expected",
+    [(None, "low"), ("high", "high"), ("", "")],
+    ids=["inherited-uses-model-override", "saved-pick-wins", "saved-default-wins"],
+)
+def test_session_effort_only_inherits_through_model_override(
+    isolated_reasoning_profiles, session_effort, expected
+):
+    _root, work = isolated_reasoning_profiles
+    config_path = work / "config.yaml"
+    config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_data["agent"]["reasoning_overrides"] = {"gpt-5": "low"}
+    config_path.write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
+
+    assert config.effective_session_reasoning_effort(
+        session_effort,
+        work,
+        model_id="gpt-5",
+        provider_id="openai",
+    ) == expected
+
+
+def test_new_session_snapshots_inherited_model_override(
+    isolated_reasoning_profiles, tmp_path
+):
+    _root, work = isolated_reasoning_profiles
+    config_path = work / "config.yaml"
+    config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_data["agent"]["reasoning_overrides"] = {"gpt-5": "low"}
+    config_path.write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
+
+    session = models.new_session(
+        workspace=str(tmp_path),
+        model="gpt-5",
+        model_provider="openai",
+        profile="work",
+    )
+    try:
+        assert session.reasoning_effort == "low"
+    finally:
+        models.SESSIONS.pop(session.session_id, None)
 
 
 @pytest.mark.parametrize("parent_effort", ["high", "none", "", None])
@@ -1250,3 +1252,27 @@ def test_gateway_legacy_named_profile_chat_sends_the_chips_effort(
     payload = captured[0][3]
     assert payload["reasoning_effort"] == "high"
     assert payload["model_options"] == {"reasoning": {"enabled": True, "effort": "high"}}
+
+
+@pytest.mark.parametrize("runs_api", [False, True], ids=["legacy-api", "runs-api"])
+def test_gateway_legacy_chat_inherits_the_session_model_override(
+    isolated_reasoning_profiles, tmp_path, monkeypatch, runs_api
+):
+    _root, work = isolated_reasoning_profiles
+    config_path = work / "config.yaml"
+    config_data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config_data["agent"]["reasoning_overrides"] = {"gpt-5": "low"}
+    config_path.write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
+    session = Session(
+        session_id="gateway-legacy-model-override", profile="work", model="gpt-5",
+        model_provider="openai", workspace=str(tmp_path), reasoning_effort=None,
+    )
+
+    captured, _ = _run_gateway_turn(
+        session, "gateway-legacy-model-override-stream", tmp_path, monkeypatch,
+        runs_api=runs_api,
+    )
+
+    payload = captured[0][3]
+    assert payload["reasoning_effort"] == "low"
+    assert payload["model_options"] == {"reasoning": {"enabled": True, "effort": "low"}}
