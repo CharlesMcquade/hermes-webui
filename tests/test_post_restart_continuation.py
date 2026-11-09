@@ -236,11 +236,21 @@ def test_uncached_session_uses_real_lookup_before_real_route_launch(armed, monke
             a.routes._cleanup_chat_start_launch_failure(models.get_session(a.session.session_id), stream_id, a.snapshot)
 
 
-def test_startup_consumer_waits_for_terminal_proof_without_browser(armed):
+def test_startup_consumer_waits_for_terminal_proof_without_browser(armed, monkeypatch):
     a = armed
     (a.private / "terminal.json").unlink()
     assert a.consume()["status"] == "waiting"
     stop = threading.Event()
+    startup_waiting = threading.Event()
+    consume = a.routes.consume_post_restart_continuation
+
+    def observed_consume(*args, **kwargs):
+        result = consume(*args, **kwargs)
+        if result["status"] == "waiting":
+            startup_waiting.set()
+        return result
+
+    monkeypatch.setattr(a.routes, "consume_post_restart_continuation", observed_consume)
     # Execute the exact startup helper without importing server.py (whose
     # module-level initialization would discover live/native dependencies).
     import ast
@@ -251,6 +261,9 @@ def test_startup_consumer_waits_for_terminal_proof_without_browser(armed):
     exec(compile(ast.Module(body=[function], type_ignores=[]), "server.py", "exec"), namespace)
     thread = namespace["_start_post_restart_continuation_consumer"](stop)
     try:
+        # The helper returns the live poll Thread, not a readiness receipt.
+        # Wait for its bound route poll to observe missing proof before publishing.
+        assert startup_waiting.wait(3), "startup poll did not observe missing terminal proof"
         a.publish()
         assert a.entered.wait(3), a.consume()
         thread.join(3)
