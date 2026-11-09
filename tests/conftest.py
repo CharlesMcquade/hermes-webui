@@ -841,12 +841,24 @@ def allow_outbound_network(monkeypatch):
 # resolve to that package instead (breaking every continuation setup probe).
 import importlib.util as _guard_importlib_util  # noqa: E402
 
-_guard_spec = _guard_importlib_util.spec_from_file_location(
-    "_webui_real_repo_git_guard", TESTS_DIR / "_real_repo_git_guard.py"
-)
-assert _guard_spec is not None and _guard_spec.loader is not None
-_repo_git_guard = _guard_importlib_util.module_from_spec(_guard_spec)
-_guard_spec.loader.exec_module(_repo_git_guard)
+_guard_name = "tests._real_repo_git_guard"
+_repo_git_guard = sys.modules.get(_guard_name)
+if _repo_git_guard is None:
+    _guard_spec = _guard_importlib_util.spec_from_file_location(
+        _guard_name, TESTS_DIR / "_real_repo_git_guard.py"
+    )
+    assert _guard_spec is not None and _guard_spec.loader is not None
+    _repo_git_guard = _guard_importlib_util.module_from_spec(_guard_spec)
+    # The guard and the test that matches its exception must share one module
+    # identity. Register before exec_module, as the normal import protocol does.
+    sys.modules[_guard_name] = _repo_git_guard
+    try:
+        _guard_spec.loader.exec_module(_repo_git_guard)
+    except BaseException:
+        sys.modules.pop(_guard_name, None)
+        raise
+sys.modules["_webui_real_repo_git_guard"] = _repo_git_guard
+assert _repo_git_guard is not None
 
 from api.config import _AGENT_DIR as _PRODUCTION_AGENT_DIR  # noqa: E402  (the runtime's own discovery)
 
