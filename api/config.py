@@ -13503,8 +13503,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
     # Check config mtime OUTSIDE the lock so this cheap check doesn't serialize
     # concurrent requests.  Must come before any config reads in the cold path.
+    _current_config_path = _get_config_path()
     try:
-        _current_mtime = Path(_get_config_path()).stat().st_mtime
+        _current_mtime = Path(_current_config_path).stat().st_mtime
     except OSError:
         _current_mtime = 0.0
     _cfg_changed = _current_mtime != _cfg_mtime
@@ -13581,8 +13582,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     return copy.deepcopy(stale_disk_groups)
                 return copy.deepcopy(_static_models_catalog_without_live_probes())
 
-        # Reload config if changed
-        if _cfg_changed:
+        # A profile switch still reloads, but an mtime change alone must not
+        # discard deliberate live overrides before building this catalog.
+        if (
+            str(_current_config_path) != str(_cfg_path)
+            or (_cfg_changed and not _cfg_has_in_memory_overrides())
+        ):
             reload_config()
             _available_models_cache = None
             _available_models_cache_ts = 0.0

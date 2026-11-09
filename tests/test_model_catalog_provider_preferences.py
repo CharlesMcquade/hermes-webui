@@ -118,3 +118,20 @@ def test_excluding_only_provider_does_not_leak_through_minimal_fallback(builder,
 
     assert "anthropic" not in provider_ids, provider_ids
     assert not provider_ids, provider_ids
+
+
+def test_live_catalog_preserves_in_memory_config_on_mtime_change(
+    monkeypatch, tmp_path, isolated_catalog,
+):
+    """An mtime tick must not discard the active profile's live overrides."""
+    isolated_catalog({"preferred_providers": ["github"]})
+    config_path = tmp_path / "catalog-config.yaml"
+    config_path.write_text("model: {}\n", encoding="utf-8")
+    monkeypatch.setattr(config, "_get_config_path", lambda: str(config_path))
+    monkeypatch.setattr(config, "_cfg_path", str(config_path))
+    monkeypatch.setattr(config, "_cfg_mtime", config_path.stat().st_mtime - 1.0)
+
+    provider_ids = _provider_ids(config.get_available_models())
+
+    assert provider_ids[0] == "copilot", provider_ids
+    assert "anthropic" in provider_ids[1:], provider_ids
