@@ -7064,14 +7064,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _preSettleOldestIdx=(typeof _oldestIdx!=='undefined')?_oldestIdx:null;
           const _preSettleMessagesTruncated=(typeof _messagesTruncated!=='undefined')&&!!_messagesTruncated;
           const _preSettle=Array.isArray(S.messages)?S.messages:[];
-          // Preserve the loaded transcript window (virtualization): a full
-          // `done` snapshot only carries the server-side window, so re-attach
-          // the rows the reader already has loaded before assignment.
-          const _loadedWindow=typeof _captureLoadedMessageWindow==='function'
-            ? _captureLoadedMessageWindow(activeSid) : null;
-          if(typeof _preserveLoadedMessageWindow==='function'){
-            d.session=_preserveLoadedMessageWindow(d.session,_loadedWindow);
-          }
+          // #8913's guarded resident-prefix adoption below owns any retained
+          // older rows; do not pre-slice the canonical done snapshot.
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           if(_pendingTitleUpdates.has(completedSid)){
             applySessionTitleUpdate(completedSid, _pendingTitleUpdates.get(completedSid), {expectedCurrent:_pendingTitleExpectedCurrent.get(completedSid)});
@@ -7551,11 +7545,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(isRecoveryControlMessage){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
           } else if(d.session&&typeof d.session==='object'){
-            // Keep the reader's loaded boundary on same-session terminal snapshots.
-            // Continuation/revision changes take the canonical helper fallback.
-            if(typeof _preserveLoadedMessageWindow==='function'){
-              d.session=_preserveLoadedMessageWindow(d.session,_captureLoadedMessageWindow(activeSid));
-            }
+            // Adopt the terminal snapshot through the canonical recovery path.
             if(typeof _oldestIdx!=='undefined') _oldestIdx=d.session._messages_offset||0;
             if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!d.session._messages_truncated;
             S.session=d.session;
@@ -7823,9 +7813,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           && !((typeof _isMessageReaderUnpinned==='function')
             ? _isMessageReaderUnpinned()
             : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
-        if(typeof _preserveLoadedMessageWindow==='function'){
-          sessionPayload=_preserveLoadedMessageWindow(sessionPayload,_captureLoadedMessageWindow(activeSid));
-        }
+        // Canonical cancel recovery owns snapshot adoption.
         if(typeof _oldestIdx!=='undefined') _oldestIdx=sessionPayload._messages_offset||0;
         if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!sessionPayload._messages_truncated;
         S.session=sessionPayload;
@@ -8224,9 +8212,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(isActiveSession){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
-        if(typeof _preserveLoadedMessageWindow==='function'){
-          session=_preserveLoadedMessageWindow(session,_captureLoadedMessageWindow(activeSid));
-        }
+        // Immediate Markdown settlement remains ahead of the guarded #8913 merge.
         if(typeof _oldestIdx!=='undefined') _oldestIdx=session._messages_offset||0;
         if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!session._messages_truncated;
         S.session=session;

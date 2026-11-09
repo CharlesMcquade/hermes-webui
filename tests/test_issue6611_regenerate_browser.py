@@ -150,10 +150,15 @@ def test_metadata_without_revision_loads_messages_before_regenerating():
     sessions = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
     ui = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     functions = "\n".join([
-        extract_function(sessions, "_captureLoadedMessageWindow"),
-        extract_function(sessions, "_loadedMessageBoundarySignature"),
-        extract_function(sessions, "_preserveLoadedMessageWindow"),
+        # Shared #7925 proof helpers and #8913 recovery replace the old
+        # loaded-window projection, which no longer exists.
         extract_function(sessions, "_adoptRegenerationRevision"),
+        # #7925 re-gate (2026-11-02, proof-gated fast path): the reload flow
+        # gates the append-only fast path on per-row provenance, so the three
+        # helpers it calls travel with the extracted loaders.
+        extract_function(sessions, "_markPrefixProvenRows"),
+        extract_function(sessions, "_heldRowsArePrefixProven"),
+        extract_function(sessions, "_adoptPrefixProof"),
         extract_function(sessions, "_ensureMessagesLoaded", "async function"),
         extract_function(sessions, "_ensureAllMessagesLoaded", "async function"),
         extract_function(ui, "regenerateResponse", "async function"),
@@ -165,6 +170,11 @@ let S, _messagesTruncated, _oldestIdx, _loadingOlder=false;
 let _loadingSessionId='s1', _loadSessionGeneration=1, _msgLimitMax=500;
 let _sameSessionForceReloadHint=null;
 const _MSG_LIMIT_MAX=500;
+// #7925 re-gate (2026-11-02): module state the extracted loaders reference. No
+// digest and an empty provenance store, so the append-only fast path stays
+// skipped and every reload takes the replace / msg_limit=all path asserted on
+// below.
+let _sessionPrefixFp='', _sessionPrefixFpEnd=-1, _prefixProvenRows=new WeakSet();
 function _clearSameSessionForceReloadHint(){{}}
 function _messageReloadLimitForSession(){{return 30;}}
 function _syncToolCallsForLoadedMessages(){{}}

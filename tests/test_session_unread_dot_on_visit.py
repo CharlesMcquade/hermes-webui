@@ -355,11 +355,7 @@ def _hidden_completion_script(*, hidden: bool) -> str:
     """Build a Node harness that drives the REAL _ensureMessagesLoaded() through a
     delayed messages fetch, marks a completion mid-fetch, and reports whether the
     completion-unread marker survives."""
-    ensure = "\n".join([
-        _extract("_loadedMessageBoundarySignature"),
-        _extract("_preserveLoadedMessageWindow"),
-        _extract_async("_ensureMessagesLoaded"),
-    ])
+    ensure = _extract_async("_ensureMessagesLoaded")
     set_viewed = _extract("_setSessionViewedCount")
     clear_unread = _extract("_clearSessionCompletionUnread")
     get_unread = _extract("_getSessionCompletionUnread")
@@ -368,6 +364,16 @@ def _hidden_completion_script(*, hidden: bool) -> str:
     get_counts = _extract("_getSessionViewedCounts")
     save_counts = _extract("_saveSessionViewedCounts")
     actively_viewed = _extract("_isSessionActivelyViewedForList")
+    # #7925 re-gate (2026-11-02, proof-gated fast path): the reload flow now
+    # gates on per-row provenance, so the harness needs the three helpers it
+    # calls and the store they read — the same convention the file already
+    # follows for `_sessionPrefixFp` (module state the extracted loader
+    # references). Empty digest ⇒ the fast path stays skipped here, exactly as
+    # before.
+    prefix_proof = "\n".join(
+        _extract(name)
+        for name in ("_markPrefixProvenRows", "_heldRowsArePrefixProven", "_adoptPrefixProof")
+    )
 
     visibility = "'hidden'" if hidden else "'visible'"
     has_focus = "false" if hidden else "true"
@@ -395,6 +401,12 @@ let _pendingCarryForwardSnapshot = null;
 let _sameSessionForceReloadHint = null;
 let _loadingSessionId = 'open';
 let _loadSessionGeneration = 0;
+// #7925 re-gate (2026-11-02): module state the extracted loader references —
+// an empty digest plus an empty provenance store, so the append-only fast path
+// stays skipped (this harness drives the bounded/full replace path).
+let _sessionPrefixFp = '';
+let _sessionPrefixFpEnd = -1;
+let _prefixProvenRows = new WeakSet();
 const window = {{}};
 // Tab starts VISIBLE+FOCUSED: the load begins while the user is watching.
 let _visibility = 'visible';
@@ -410,6 +422,13 @@ function _clearSameSessionForceReloadHint() {{}}
 function _messageReloadLimitForSession() {{ return 0; }}
 function _syncToolCallsForLoadedMessages() {{}}
 function clearLiveToolCards() {{}}
+
+// #7925 re-gate SHOULD-FIX: the prefix-proof/stitch stubs this harness used to
+// bind are gone with the unreachable machinery itself; the harness no longer
+// references them.
+// #7925 re-gate (2026-11-02): the proof-gated fast path's helpers are back in
+// the reload flow, so they travel with the extracted loader again.
+{prefix_proof}
 
 // Delayed messages fetch: resolves only when we release it, simulating a slow
 // /api/session?messages=1 response that spans the tab going hidden.
