@@ -34,7 +34,6 @@ EXPECTED_SUPPRESSED = [
     "hermes-theme",
     "hermes-skin",
     "hermes-font-size",
-    "hermes-content-width",
     "hermes-webui-workspace-panel",
     "hermes-webui-workspace-panel-pref",
     "hermes-webui-sidebar-collapsed",
