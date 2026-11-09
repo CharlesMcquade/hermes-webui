@@ -429,8 +429,8 @@ def test_set_reasoning_effort_accepts_empty_as_clear():
          mock.patch("api.config.reload_config"):
         result = cfg.set_reasoning_effort("", model_id="glm-4.6", provider_id="zai")
     # Empty effort must not write either a global or per-model empty string.
-    # S02 frozen serialization: with provider context the override key is
-    # "provider:model" ("zai:glm-4.6"), not the legacy model-only key.
+    # #7170 writes a model-context selection under its normalized bare-model
+    # key and also mirrors non-empty values to the historical global setting.
     assert "reasoning_effort" not in saved, (
         f"empty effort must not set agent.reasoning_effort; saved agent cfg={saved}"
     )
@@ -461,6 +461,7 @@ def test_set_reasoning_effort_still_accepts_valid_levels(effort):
     with mock.patch("api.config._save_yaml_config_file", side_effect=fake_save), \
          mock.patch("api.config.reload_config"):
         cfg.set_reasoning_effort(effort, model_id="glm-4.6", provider_id="zai")
-    # S02 frozen serialization: provider-scoped key "zai:glm-4.6".
-    assert saved.get("reasoning_overrides", {}).get("zai:glm-4.6") == effort
-    assert "reasoning_effort" not in saved
+    # _apply_reasoning_effort normalizes every spelling the reader accepts to
+    # one bare-model key, and preserves the legacy global write for CLI parity.
+    assert saved.get("reasoning_overrides", {}).get("glm-4.6") == effort
+    assert saved.get("reasoning_effort") == effort

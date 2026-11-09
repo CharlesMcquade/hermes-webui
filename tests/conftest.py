@@ -836,7 +836,17 @@ def allow_outbound_network(monkeypatch):
 
 # ── Real-checkout git guard ─────────────────────────────────────────────────
 # Installed once here, like the network guard above: see tests/_real_repo_git_guard.py.
-from tests import _real_repo_git_guard as _repo_git_guard  # noqa: E402
+# Load by this checkout's path: a paired Agent checkout also has a top-level
+# ``tests`` package, and cwd-based discovery can make ``from tests import ...``
+# resolve to that package instead (breaking every continuation setup probe).
+import importlib.util as _guard_importlib_util  # noqa: E402
+
+_guard_spec = _guard_importlib_util.spec_from_file_location(
+    "_webui_real_repo_git_guard", TESTS_DIR / "_real_repo_git_guard.py"
+)
+assert _guard_spec is not None and _guard_spec.loader is not None
+_repo_git_guard = _guard_importlib_util.module_from_spec(_guard_spec)
+_guard_spec.loader.exec_module(_repo_git_guard)
 
 from api.config import _AGENT_DIR as _PRODUCTION_AGENT_DIR  # noqa: E402  (the runtime's own discovery)
 

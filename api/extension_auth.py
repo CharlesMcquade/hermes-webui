@@ -520,7 +520,10 @@ def _handle_post(handler, parsed):
 
 def body_profile_allowed(handler, body):
     p = getattr(handler, '_extension_principal', None)
-    if not p:
+    # authenticate() stores a dict. Direct-call test handlers often use a bare
+    # MagicMock, whose unspecified attributes are truthy child mocks rather
+    # than an authenticated extension principal; do not mistake those for one.
+    if not isinstance(p, dict):
         return True
     if not isinstance(body, dict):
         return False
