@@ -27,7 +27,12 @@ def scene(tmp_path, monkeypatch):
     monkeypatch.setattr(streaming, "LOCK", threading.Lock())
     monkeypatch.setattr(streaming, "_aux_title_generation_enabled", lambda: True)
     monkeypatch.setattr("api.profiles.profile_env_for_background_worker", lambda *a, **k: nullcontext())
-    monkeypatch.setattr("api.state_sync.sync_session_title", lambda *a, **k: None)
+    # Match the DB-winner seam: these worker tests accept the generated LLM
+    # title, while title authority/CAS behavior has its own SQLite fixture.
+    monkeypatch.setattr(
+        "api.state_sync.sync_session_title",
+        lambda _sid, title, **_kwargs: (title, "llm"),
+    )
     return session, directory / (session.session_id + ".json")
 
 

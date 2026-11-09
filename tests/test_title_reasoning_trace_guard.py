@@ -1125,7 +1125,12 @@ def test_malformed_schema_worker_saves_and_publishes_recovered_title(route, tmp_
     monkeypatch.setattr(streaming, "_aux_title_generation_enabled", lambda: True)
     monkeypatch.setattr(streaming, "_aux_title_configured", lambda: route == "aux")
     monkeypatch.setattr("api.profiles.profile_env_for_background_worker", lambda *a, **k: nullcontext())
-    monkeypatch.setattr("api.state_sync.sync_session_title", lambda *a, **k: None)
+    # Match the DB-winner seam: these worker tests accept the generated LLM
+    # title, while title authority/CAS behavior has its own SQLite fixture.
+    monkeypatch.setattr(
+        "api.state_sync.sync_session_title",
+        lambda _sid, title, **_kwargs: (title, "llm"),
+    )
     calls = []
     def respond(**kwargs):
         calls.append(kwargs)
@@ -1350,7 +1355,12 @@ def test_worker_reasoning_trace_recovery_saves_canned_recovery(route, tmp_path, 
     monkeypatch.setattr(streaming, "_aux_title_generation_enabled", lambda: True)
     monkeypatch.setattr(streaming, "_aux_title_configured", lambda: route == "aux")
     monkeypatch.setattr("api.profiles.profile_env_for_background_worker", lambda *a, **k: nullcontext())
-    monkeypatch.setattr("api.state_sync.sync_session_title", lambda *a, **k: None)
+    # Match the DB-winner seam: these worker tests accept the generated LLM
+    # title, while title authority/CAS behavior has its own SQLite fixture.
+    monkeypatch.setattr(
+        "api.state_sync.sync_session_title",
+        lambda _sid, title, **_kwargs: (title, "llm"),
+    )
     calls = []
 
     def respond(**kwargs):
@@ -1394,7 +1404,12 @@ def test_worker_persistent_reasoning_trace_keeps_provisional_title(route, tmp_pa
     monkeypatch.setattr(streaming, "_aux_title_generation_enabled", lambda: True)
     monkeypatch.setattr(streaming, "_aux_title_configured", lambda: route == "aux")
     monkeypatch.setattr("api.profiles.profile_env_for_background_worker", lambda *a, **k: nullcontext())
-    monkeypatch.setattr("api.state_sync.sync_session_title", lambda *a, **k: None)
+    # Match the DB-winner seam: these worker tests accept the generated LLM
+    # title, while title authority/CAS behavior has its own SQLite fixture.
+    monkeypatch.setattr(
+        "api.state_sync.sync_session_title",
+        lambda _sid, title, **_kwargs: (title, "llm"),
+    )
     calls = []
 
     def respond(**kwargs):

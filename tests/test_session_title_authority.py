@@ -128,26 +128,30 @@ def test_shared_generator_owns_new_and_manual_titles(title_state, monkeypatch):
 
 @pytest.mark.parametrize("mode", ["initial", "refresh", "manual"])
 @pytest.mark.parametrize("fails", [False, True])
-def test_shared_generator_failure_keeps_provisional_title(title_state, monkeypatch, mode, fails):
+def test_shared_generator_failure_uses_raw_path_without_publishing_failure(title_state, monkeypatch, mode, fails):
     db, make, path = title_state
     title = "Untitled" if mode == "initial" else "Old automatic title"
     s = make("authority-shared-empty", title, None if mode == "initial" else "llm")
     original_db_title = db.get_session_title(s.session_id)
     monkeypatch.setattr(streaming, "_generate_llm_session_title_via_aux", _REAL_AUX_GENERATOR)
     module = types.ModuleType("agent.title_generator")
+    shared_calls = []
     def generate_title(*args, **kwargs):
+        shared_calls.append(args)
         if fails:
             raise RuntimeError("Provider unavailable")
         return None
     module.generate_title = generate_title
     monkeypatch.setitem(sys.modules, "agent.title_generator", module)
-    def divergent_fallback(*args, **kwargs):
-        pytest.fail("Modern generator failure must not use a divergent fallback")
-    monkeypatch.setattr(streaming, "generate_title_raw_via_aux", divergent_fallback)
-    monkeypatch.setattr(streaming, "generate_title_raw_via_agent", divergent_fallback)
-    # The local exchange-summary fallback is a deliberate #7318 behavior, not a
-    # divergent LLM title; stub it out so this test isolates the LLM failure
-    # path (provisional title kept, nothing published).
+    raw_calls = []
+    def raw_failure(*args, **kwargs):
+        raw_calls.append((args, kwargs))
+        return None, "llm_error_aux" if fails else "llm_empty_aux"
+    monkeypatch.setattr(streaming, "generate_title_raw_via_aux", raw_failure)
+    monkeypatch.setattr(streaming, "generate_title_raw_via_agent", raw_failure)
+    # Isolate the no-title outcome from the deterministic local #7318 fallback.
+    # The assertion under test is that the real raw/schema path is attempted,
+    # and its transport/empty verdict keeps the existing title unmodified.
     monkeypatch.setattr(streaming, "_fallback_title_from_exchange", lambda *a, **kw: None)
     if mode == "initial":
         events = _update(s)
@@ -161,6 +165,8 @@ def test_shared_generator_failure_keeps_provisional_title(title_state, monkeypat
     else:
         status, _payload = _regenerate_request(monkeypatch, s)
         assert status == 422
+    assert len(shared_calls) == 1
+    assert len(raw_calls) == 1
     _assert_projected(s, path, title)
     assert db.get_session_title(s.session_id) == original_db_title
 

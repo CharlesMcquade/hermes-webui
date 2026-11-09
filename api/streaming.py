@@ -7809,8 +7809,14 @@ def _generate_shared_session_title(user_text: str):
 def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str, str]:
     """Generate a title via active-agent route, then sanitize/validate result."""
     shared = _generate_shared_session_title(user_text)
-    if shared is not None:
+    if shared is not None and shared[0]:
         return shared
+    # Agent's shared generator deliberately collapses rejected model output and
+    # provider/configuration failures to ``None``.  ``shared_title_empty`` and
+    # ``shared_title_error`` therefore cannot decide whether the candidate was
+    # an invalid trace: let the fresh #7539 raw response make that diagnosis.
+    # A successful shared title above remains final; only its failed candidate
+    # pays for the schema/compatibility recovery path.
     # One snapshot drives both the prompt and validation: when a resolvable
     # language is pinned, the prompt asks for it and validation checks the
     # title against the pinned script instead of the conversation start.
@@ -7853,8 +7859,12 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
     if _title_provider_name_ambiguous(provider, base_url):
         return None, 'provider_name_ambiguous_aux', ''
     shared = _generate_shared_session_title(user_text)
-    if shared is not None:
+    if shared is not None and shared[0]:
         return shared
+    # A failed shared candidate is not a transport verdict.  Continue into the
+    # adopted schema/raw path so its own invalid-trace, empty, length, and
+    # transport/config statuses survive instead of becoming shared_title_*.
+    # The provider-ambiguity refusal above and shared success remain final.
     # Same snapshot-once contract as _generate_llm_session_title_for_agent:
     # a resolvable pin retargets language validation at the pinned script.
     # Snapshot before the context token, since the validation below runs
