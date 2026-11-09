@@ -41,8 +41,14 @@ def _catalog_config(model_catalog):
 
 @pytest.fixture
 def isolated_catalog(monkeypatch, tmp_path):
+    from contextlib import nullcontext
+
     _install_fake_hermes_cli(monkeypatch)
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    # This unit already owns its test profile's config, credentials and cache
+    # inputs. Synchronous catalog rebuilds must not re-enter an unrelated
+    # ambient request profile and rebind those inputs during evaluation.
+    monkeypatch.setattr(profiles, "profile_env_for_active_request", lambda *args, **kwargs: nullcontext())
     monkeypatch.setattr(config, "_cfg_has_in_memory_overrides", lambda: True)
     monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0)
     old_cfg = dict(config.cfg)
