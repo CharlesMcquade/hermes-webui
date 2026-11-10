@@ -10513,9 +10513,15 @@ document.addEventListener('DOMContentLoaded',function(){
   tooltip.addEventListener('click',function(e){e.stopPropagation();});
 });
 
+function _bottomFollowOwnsReader(el){
+  return !_messageUserUnpinned && _scrollPinned && !_recentNonMessageScrollIntent()
+    && !(el.scrollTop<_lastScrollTop-2 && el.scrollHeight-el.scrollTop-el.clientHeight>1);
+}
+
 function _setMessageScrollToBottom(){
   const el=$('messages');
   if(!el) return;
+  const inputGeneration=_messageScrollInputGeneration;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   el.scrollTop=el.scrollHeight;
   _lastScrollTop=el.scrollTop;_lastMessageClientHeight=el.clientHeight;
@@ -10528,7 +10534,7 @@ function _setMessageScrollToBottom(){
     // scrolled up — under the sticky-unpin model (#3343) _messageUserUnpinned
     // is the authoritative "user scrolled away" signal, so DON'T snap them back
     // or re-pin if so; only release the programmatic-scroll latch.
-    if(_messageUserUnpinned || !_scrollPinned || _recentNonMessageScrollIntent()){
+    if(inputGeneration!==_messageScrollInputGeneration || !_bottomFollowOwnsReader(el)){
       _deferClearProgrammaticScroll();
       return;
     }
@@ -10624,7 +10630,7 @@ function _settleMessageScrollToBottom(force, explicit){
   // active one that may now be in the global _settleRO. (Codex review #3.)
   const ro=new ResizeObserver(()=>{
     if(token!==_bottomSettleToken){ ro.disconnect(); if(_settleRO===ro) _settleRO=null; return; }
-    if((!window._autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){
+    if((!window._autoScrollFollow&&!explicit)||!_bottomFollowOwnsReader(el)){
       ro.disconnect(); if(_settleRO===ro) _settleRO=null;
       _programmaticScroll=false;
       return;
@@ -10633,13 +10639,13 @@ function _settleMessageScrollToBottom(force, explicit){
     // notifications per frame, so this is at most one write per frame.
     cancelAnimationFrame(_settleRAF);
     _settleRAF=requestAnimationFrame(()=>{
-      if(token!==_bottomSettleToken) return;
+      if(token!==_bottomSettleToken||!_bottomFollowOwnsReader(el)) return;
       _setMessageScrollToBottom();
     });
     // After 300ms of quiet, disconnect — layout is stable.
     clearTimeout(_settleTimer);
     _settleTimer=setTimeout(()=>{
-      if(token!==_bottomSettleToken) return;
+      if(token!==_bottomSettleToken||!_bottomFollowOwnsReader(el)) return;
       ro.disconnect(); if(_settleRO===ro) _settleRO=null;
       _setMessageScrollToBottom();
     },300);
@@ -10663,7 +10669,7 @@ function _settleMessageScrollToBottom(force, explicit){
   _settleFinalTimer=setTimeout(()=>{
     if(token!==_bottomSettleToken) return;
     ro.disconnect(); if(_settleRO===ro) _settleRO=null;
-    if((!window._autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()){ _programmaticScroll=false; return; }
+    if((!window._autoScrollFollow&&!explicit)||!_bottomFollowOwnsReader(el)){ _programmaticScroll=false; return; }
     _settleFinalScroll(token);
   },2000);
 }
@@ -10672,7 +10678,7 @@ function _settleFinalScroll(token){
   if(token!==_bottomSettleToken) return;
   const el=document.getElementById('messages');
   if(!el){ _programmaticScroll=false; return; }
-  if(_messageUserUnpinned||!_scrollPinned||_recentNonMessageScrollIntent()||_recentMessageTouchScrollIntent()){
+  if(!_bottomFollowOwnsReader(el)||_recentMessageTouchScrollIntent()){
     _programmaticScroll=false;
     return;
   }
