@@ -1264,7 +1264,7 @@ class RunJournalWriter:
             session_dir=self.session_dir,
         )
 
-    def append_and_publish_sse_event(self, event_name: str, payload, publish) -> dict:
+    def append_and_publish_sse_event(self, event_name: str, payload, publish) -> dict | None:
         """Append and publish one SSE event in the per-run ordering domain.
 
         The callback receives the canonical journal envelope while the per-path
@@ -1272,6 +1272,10 @@ class RunJournalWriter:
         use this transaction so queue order cannot disagree with journal ``seq``.
         """
         with _lock_for(self._path):
+            if str(event_name or "").strip() in REPLAY_SKIPPED_SSE_EVENTS:
+                # Live-only telemetry: publish without a journal row or seq.
+                publish(None)
+                return None
             event = _append_run_event_locked(
                 self._path,
                 self.session_id,
