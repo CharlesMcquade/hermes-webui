@@ -9407,6 +9407,7 @@ function _appearancePayloadFromUi(){
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
     // Font size deliberately excluded from this payload: per-device
     // (localStorage-only) setting — never sent to the server.
+    content_width: localStorage.getItem('hermes-content-width') || 'default',
     chat_activity_display_mode: chatActivityModeSel&&(chatActivityModeSel.value==='transparent_stream'||chatActivityModeSel.value==='turn_worklog'||chatActivityModeSel.value==='hide_all_activity')
       ? chatActivityModeSel.value
       : 'compact_worklog',
@@ -9498,6 +9499,7 @@ function _rememberAppearanceSaved(payload){
   _settingsThemeOnOpen=payload.theme||localStorage.getItem('hermes-theme')||'dark';
   _settingsSkinOnOpen=payload.skin||localStorage.getItem('hermes-skin')||'default';
   _settingsFontSizeOnOpen=localStorage.getItem('hermes-font-size')||'default';
+  if(payload.content_width) localStorage.setItem('hermes-content-width',payload.content_width);
 }
 
 function _scheduleAppearanceAutosave(){
@@ -9516,6 +9518,11 @@ async function _autosaveAppearanceSettings(payload){
     const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
     _settingsAppearanceAutosaveRetryPayload=null;
     _rememberAppearanceSaved(payload);
+    if(saved&&saved.content_width){
+      localStorage.setItem('hermes-content-width',saved.content_width);
+      if(typeof _applyContentWidth==='function') _applyContentWidth(saved.content_width);
+      if(typeof _syncContentWidthPicker==='function') _syncContentWidthPicker(saved.content_width);
+    }
     if(saved){
       window._sessionJumpButtonsEnabled=!!saved.session_jump_buttons;
       if(Object.prototype.hasOwnProperty.call(saved,'chat_activity_display_mode')){

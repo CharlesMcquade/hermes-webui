@@ -226,8 +226,8 @@ def test_playwright_regression_ensures_font_contract_for_syntax_and_edit_surface
                 )
                 """
             )
-            # Sorting controls inherit their table's monospace typeface at desktop and
-            # phone widths; #7497 retired the remaining local conversation-font rule.
+            # Tables stay monospace by default; reading-focused skins opt into
+            # conversation type for both cells and sorting controls at every width.
             for width in (1024, 390):
                 page.set_viewport_size({"width": width, "height": 768})
                 for skin in ("default", "graphite", "codex", "terracotta", "github"):
@@ -236,7 +236,7 @@ def test_playwright_regression_ensures_font_contract_for_syntax_and_edit_surface
                         () => ["markdownTableSort", "markdownTableCell"]
                             .map(id => getComputedStyle(document.getElementById(id)).fontFamily)
                     """)
-                    expected = "MonoFontSentinel"
+                    expected = "MonoFontSentinel" if skin == "default" else "ConvoFontSentinel"
                     assert expected in sort_font, (width, skin, sort_font)
                     assert sort_font == cell_font, (width, skin, sort_font, cell_font)
             page.evaluate("() => delete document.documentElement.dataset.skin")
