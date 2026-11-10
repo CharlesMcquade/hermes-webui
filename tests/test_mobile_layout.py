@@ -1100,6 +1100,8 @@ def test_composer_controls_switch_to_fit_stage_classes():
         "_fitComposerFooter() should measure actual left-cluster overflow"
     assert "cf-shrink" in fit_body and "cf-icons" in fit_body and "cf-burger" in fit_body, \
         "_fitComposerFooter() should toggle the compact stage classes"
+    assert ".composer-footer .composer-left > *{flex-shrink:0;}" in CSS, \
+        "full as well as compact fit stages must preserve direct-child control footprints"
     # Stage ladder order: shrink is tried before icons, icons before burger.
     shrink_add = fit_body.index("classList.add('cf-shrink')")
     icons_add = fit_body.index("classList.add('cf-icons')")
@@ -1129,6 +1131,7 @@ def test_composer_controls_switch_to_fit_stage_classes():
     # ellipsize — it must NOT hide the label elements (that is cf-icons' job).
     for selector in (
         ".composer-footer.cf-shrink .composer-left",
+        ".composer-footer.cf-shrink .composer-left > *",
         ".composer-footer.cf-shrink .composer-divider",
         ".composer-footer.cf-shrink #btnSavedPrompts",
         ".composer-footer.cf-shrink .composer-profile-chip",
@@ -1141,7 +1144,8 @@ def test_composer_controls_switch_to_fit_stage_classes():
     shrink_rules = CSS[CSS.index(".composer-footer.cf-shrink"):CSS.index(".composer-footer.cf-burger .composer-left")]
     allowed_hidden = {
         ".composer-footer.cf-shrink .composer-divider{display:none;}",
-        ".composer-footer.cf-shrink #btnSavedPrompts{display:none!important;}",
+        ".composer-footer.cf-shrink #btnSavedPrompts,",
+        ".composer-footer.cf-shrink .saved-prompts-popup{display:none!important;}",
         ".composer-footer.cf-shrink .composer-profile-label,",
         ".composer-footer.cf-shrink .composer-profile-chevron,",
         ".composer-footer.cf-shrink #composerProfileLabel{display:none;}",
@@ -1156,22 +1160,19 @@ def test_composer_controls_switch_to_fit_stage_classes():
     assert ".composer-footer.cf-shrink .composer-workspace-group{max-width:" in shrink_rules, \
         ".cf-shrink should cap the workspace group so its label ellipsizes"
 
-    # Idle tooltips must not occupy the strip's scroll region: the global
-    # .has-tooltip::after is an opacity:0 absolute pseudo-element parked right
-    # of its button — inside .composer-left (overflow-x:auto) it inflated the
-    # measured scrollWidth that drives the collapse ladder, collapsing the
-    # footer while plenty of visible space remained.
-    assert ".composer-left .has-tooltip::after{content:none;}" in CSS, \
-        "idle tooltips must be removed from the .composer-left scroll region"
-    assert ".composer-left .has-tooltip:hover::after," in CSS and \
-           ".composer-left .has-tooltip:focus-visible::after{content:attr(data-tooltip);" in CSS, \
-        "hover/focus must restore the tooltip inside the composer strip"
-    assert "animation:composer-tooltip-in .14s ease .15s both;" in CSS, \
-        "restored tooltips must keep the global delay+fade behavior"
-    assert ".composer-left .has-tooltip[aria-haspopup][aria-expanded=\"true\"]::after{content:none;}" in CSS, \
-        "an open menu must still suppress the strip tooltip"
-    assert "@keyframes composer-tooltip-in{from{opacity:0;}to{opacity:1;}}" in CSS, \
-        "the tooltip-in keyframe must be defined"
+    # The fit pass must exclude pseudo-element geometry without destroying the
+    # generated tooltip: its text supplies accessible names to icon-only
+    # controls, and deleting/recreating it resets a visible reveal animation.
+    # tests/browser_composer_tooltip_geometry.py supplies the executed proof for
+    # both behaviors plus the measurement path.
+    assert ".composer-footer.cf-measuring .has-tooltip::after{position:fixed!important;}" in CSS, \
+        "the fit guard must take generated tooltip boxes out of measured scroll overflow"
+    assert ".composer-left .has-tooltip::after{content:none;}" not in CSS, \
+        "idle generated tooltip content must survive for accessible naming"
+    assert ".composer-footer.cf-measuring .has-tooltip::after{content:none!important;}" not in CSS, \
+        "the fit guard must not reset an already-visible tooltip's reveal lifecycle"
+    assert ".has-tooltip[aria-haspopup][aria-expanded=\"true\"]::after{content:none;}" in CSS, \
+        "the existing open-menu tooltip suppression must remain intact"
 
     for selector in (
         ".composer-footer.cf-burger .composer-workspace-group",
