@@ -1241,6 +1241,88 @@ def _append_event_transaction(
         return event
 
 
+# Incremental (malformed, terminal) scan state for steer acceptance, keyed by
+# path and mutated only under ``_lock_for(path)``. Entry:
+# (dev, ino, scanned_size, tail_guard_bytes, malformed_seen, terminal_seen).
+_ACCEPT_SCAN_CACHE: "OrderedDict[str, tuple]" = OrderedDict()
+_ACCEPT_SCAN_CACHE_MAX = 128
+_ACCEPT_SCAN_GUARD = 256
+
+
+def _classify_jsonl_line(raw: str) -> tuple[bool, bool]:
+    """(malformed, terminal) for one line, mirroring ``_read_jsonl`` exactly."""
+    if not raw.strip():
+        return False, False
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return True, False
+    if not isinstance(parsed, dict):
+        return True, False
+    return False, bool(parsed.get("terminal"))
+
+
+def _accept_scan_locked(path: Path) -> tuple[bool, bool]:
+    """Return ``_read_jsonl``'s (any malformed, any terminal) incrementally.
+
+    Caller holds ``_lock_for(path)``. Only committed (newline-terminated) bytes
+    of a provably archive-less live file are cached; the uncommitted tail is
+    re-classified every call. Any doubt falls back to the full read.
+    """
+    key = str(path)
+    cached = _ACCEPT_SCAN_CACHE.pop(key, None)
+    try:
+        if _archive_cache_signature(path) != ():
+            raise LookupError
+        with open(path, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if cached is None or cached[:2] != (st.st_dev, st.st_ino) or st.st_size < cached[2]:
+                raise LookupError
+            _dev, _ino, scanned, guard, malformed, terminal = cached
+            fh.seek(scanned - len(guard))
+            if fh.read(len(guard)) != guard:
+                raise LookupError
+            data = fh.read(st.st_size - scanned)
+    except (LookupError, OSError):
+        existing, bad = _read_jsonl(path)
+        malformed = bool(bad)
+        terminal = any(event.get("terminal") for event in existing)
+        _accept_scan_rebuild(path, key)
+        return malformed, terminal
+    cut = data.rfind(b"\n") + 1
+    for raw in data[:cut].split(b"\n")[:-1]:
+        m, t = _classify_jsonl_line(raw.decode("utf-8", errors="surrogateescape"))
+        malformed, terminal = malformed or m, terminal or t
+    scanned += cut
+    if cut:
+        guard = (guard + data[:cut])[-_ACCEPT_SCAN_GUARD:]
+    _ACCEPT_SCAN_CACHE[key] = (_dev, _ino, scanned, guard, malformed, terminal)
+    m, t = _classify_jsonl_line(data[cut:].decode("utf-8", errors="surrogateescape"))
+    return malformed or m, terminal or t
+
+
+def _accept_scan_rebuild(path: Path, key: str) -> None:
+    """Seed the cache from the committed prefix of an archive-less live file."""
+    try:
+        if _archive_cache_signature(path) != ():
+            return
+        with open(path, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            data = fh.read()
+    except OSError:
+        return
+    cut = data.rfind(b"\n") + 1
+    malformed = terminal = False
+    for raw in data[:cut].split(b"\n")[:-1]:
+        m, t = _classify_jsonl_line(raw.decode("utf-8", errors="surrogateescape"))
+        malformed, terminal = malformed or m, terminal or t
+    _ACCEPT_SCAN_CACHE[key] = (
+        st.st_dev, st.st_ino, cut, data[:cut][-_ACCEPT_SCAN_GUARD:], malformed, terminal,
+    )
+    while len(_ACCEPT_SCAN_CACHE) > _ACCEPT_SCAN_CACHE_MAX:
+        _ACCEPT_SCAN_CACHE.popitem(last=False)
+
+
 class RunJournalWriter:
     """Stateful writer for one WebUI stream/run."""
 
@@ -1297,10 +1379,10 @@ class RunJournalWriter:
         with _lock_for(self._path):
             if self._path in _CLOSED_ACCEPTANCE:
                 return False, None, "fence_closed", None
-            existing, malformed = _read_jsonl(self._path)
+            malformed, terminal = _accept_scan_locked(self._path)
             if malformed:
                 return False, None, "journal_malformed", None
-            if any(event.get("terminal") for event in existing):
+            if terminal:
                 return False, None, "terminal", None
             accepted = bool(accept())
             if not accepted:
