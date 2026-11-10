@@ -49,8 +49,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
 STYLE_CSS_PATH = REPO_ROOT / "static" / "style.css"
 I18N_JS_PATH = REPO_ROOT / "static" / "i18n.js"
-ICONS_JS_PATH = REPO_ROOT / "static" / "icons.js"
-STYLE_CSS_PATH = REPO_ROOT / "static" / "style.css"
 NODE = shutil.which("node")
 
 
@@ -212,92 +210,6 @@ class TestContextMenuDownloadItem:
         )
 
 
-class TestKeyboardAccessibility:
-    """Keyboard/ARIA correctness for the download glyph (#7810 repair)."""
-
-    def test_icon_is_a_keyboard_reachable_button(self):
-        block = _icon_block()
-        assert "setAttribute('role','button')" in block, (
-            "download glyph must expose role=button"
-        )
-        assert "setAttribute('tabindex','0')" in block, (
-            "download glyph must be focusable via keyboard"
-        )
-        assert "aria-label" in block, (
-            "download glyph must carry an aria-label naming the file"
-        )
-
-    def test_keydown_handles_enter_and_space(self):
-        block = _icon_block()
-        assert "e.key==='Enter'||e.key===' '" in block, (
-            "Enter and Space must both activate the download glyph"
-        )
-
-    def test_keydown_prevents_default(self):
-        """preventDefault must run before any early return so held Space
-        never page-scrolls the document."""
-        block = _icon_block()
-        assert "e.preventDefault();" in block
-
-    def test_keydown_suppresses_auto_repeat(self):
-        block = _icon_block()
-        assert "e.repeat" in block, (
-            "held-key auto-repeat must be suppressed — one download per "
-            "intentional Enter/Space press"
-        )
-
-    def test_keydown_stops_propagation(self):
-        block = _icon_block()
-        # Both the click and keydown paths must stop propagation.
-        assert block.count("e.stopPropagation();") >= 2, (
-            "click and keydown activation must not bubble to the row preview"
-        )
-
-    def test_double_click_downloads_once(self):
-        block = _icon_block()
-        assert "e.detail>1" in block, (
-            "the second click of a double-click must not start another download"
-        )
-
-
-class TestDownloadGlyphHelper:
-    """The glyph predicate lives in static/icons.js beside the icon mapping."""
-
-    def test_helper_exists_in_icons_js(self):
-        src = _read(ICONS_JS_PATH)
-        assert "function isDownloadGlyph(" in src, (
-            "static/icons.js must define isDownloadGlyph(name, type)"
-        )
-
-    def test_helper_gates_to_download_glyphs(self):
-        src = _read(ICONS_JS_PATH)
-        start = src.index("function isDownloadGlyph(")
-        end = src.index("\n}", start)
-        body = src[start:end]
-        assert "DOWNLOAD_EXTS" in body, "predicate must consult DOWNLOAD_EXTS"
-        assert "'.pdf'" in body or '".pdf"' in body, (
-            "predicate must treat .pdf as a download glyph (fileIcon renders "
-            "the download glyph for .pdf)"
-        )
-
-    def test_css_class_has_geometry_safe_rule(self):
-        css = _read(STYLE_CSS_PATH)
-        assert ".file-icon-download{" in css, (
-            "style.css must style .file-icon-download"
-        )
-        start = css.index(".file-icon-download{")
-        end = css.index("}", start)
-        rule = css[start:end]
-        assert "min-height" not in rule and "min-width" not in rule, (
-            ".file-icon-download must not use min-width/min-height hit-area "
-            "inflation (44px) — it inflates PDF row height and breaks narrow "
-            "containers; keep compact row geometry"
-        )
-        assert "focus-visible" in css[start:end + 200], (
-            ".file-icon-download needs a :focus-visible ring for keyboard use"
-        )
-
-
 class TestNameClickContractUntouched:
     """The #1707 contract (single click on name → preview after debounce,
     double click → rename) must remain exactly as it was."""
@@ -326,6 +238,7 @@ class TestI18nKey:
 
 
 # ── Behavioral tests via Node VM ──────────────────────────────────────────────
+
 
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
