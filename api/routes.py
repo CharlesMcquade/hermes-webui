@@ -13536,7 +13536,37 @@ def _display_rebased_tool_calls(tool_calls, owner_positions):
     return projected
 
 
-def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None, owner_positions=None, _prefix_fp_out=None):
+def _display_merge_summary(messages):
+    """Full-transcript values GET /api/session derives from the merged rows.
+
+    Computed once when a merge is memoized so a cache hit can answer the
+    todo/visible-count/last-timestamp/turn-token post-passes without
+    rescanning every row. Each value uses the exact expression the handler
+    uses on the uncached path, so responses stay byte-identical.
+    """
+    try:
+        last_ts = max(
+            (float((m or {}).get("timestamp") or 0) for m in messages if isinstance(m, dict)),
+            default=0,
+        )
+    except (TypeError, ValueError):
+        last_ts = 0
+    try:
+        todo_state = derive_todo_state(messages) if messages else None
+    except Exception:
+        logger.debug("todo_state summary failed", exc_info=True)
+        todo_state = None
+    return {
+        "last_ts": last_ts,
+        "todo_state": todo_state,
+        "visible_count": sum(
+            1 for m in messages if isinstance(m, dict) and not is_hidden_transcript_row(m)
+        ),
+        "turn_token": any(isinstance(m, dict) and m.get("_active_turn_token") for m in messages),
+    }
+
+
+def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None, owner_positions=None, _prefix_fp_out=None, summary_out=None):
     """Return the memoized merged transcript, or None when it can't be reused.
 
     Lets GET /api/session skip loading the state.db rows entirely on a hit. That
@@ -13590,6 +13620,12 @@ def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None
         if _prefix_fp_out is not None:
             _prefix_fp_out.append(entry.get("prefix_fp"))
         _display_merge_cache.move_to_end(sid, last=True)
+        if summary_out is not None and isinstance(entry.get("summary"), dict):
+            # Window-only contract: hand back the cached list itself (READ-ONLY)
+            # and let the caller copy just the rows it returns.
+            summary_out.clear()
+            summary_out.update(entry["summary"])
+            return entry["messages"]
         return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
 
 
@@ -13772,6 +13808,7 @@ def _limited_webui_messages_for_display_with_sidecar(
                 "key": cache_key,
                 "messages": merged,
                 "owner_positions": projected_owners,
+                "summary": _display_merge_summary(merged),
                 "stored_at": time.monotonic(),
             }
             if prefix_fp_entry is not None:
@@ -15705,7 +15742,7 @@ from api.run_journal import (
     terminal_settled_prompt_events,
     SSE_RELAY_CLOSE_EVENTS,
 )
-from api.todo_state import attach_todo_state
+from api.todo_state import attach_todo_state, derive_todo_state
 from api.providers import (
     get_providers,
     get_provider_quota,
@@ -18592,6 +18629,9 @@ def _handle_session_get(handler, parsed) -> bool:
         # whole-document prefix digest out of the cache probe; the mint reuses
         # it on a hit instead of re-hashing every row.
         _prefix_fp_out = []
+        # Set by a window-only merge-cache hit: _all_msgs is then the cached
+        # list itself (never mutate it) and this carries its O(N) summaries.
+        _display_cache_summary = {}
         _display_state_db_signature = None
         _display_owner_positions = ({} if load_messages and _cancelled_journal_turn_owner(
             getattr(s, "messages", None) or [], include_live_partial=True
@@ -18657,6 +18697,7 @@ def _handle_session_get(handler, parsed) -> bool:
                     msg_before=msg_before,
                     owner_positions=_display_owner_positions,
                     _prefix_fp_out=_prefix_fp_out,
+                    summary_out=_display_cache_summary,
                 )
             if _display_cache_hit is not None:
                 state_db_messages = []
@@ -18897,6 +18938,10 @@ def _handle_session_get(handler, parsed) -> bool:
                 cached=_prefix_fp_out,
                 inputs=_display_fp_inputs,
             )
+            if _display_cache_summary:
+                # Window-only cache hit: _all_msgs is the cached list; copy
+                # just the delivered rows so callers can't mutate the cache.
+                _truncated_msgs = [dict(m) if isinstance(m, dict) else m for m in _truncated_msgs]
             if _append_mode_anchor is not None and not _append_prefix_proof_matches(
                 (_projected_rows, _projected_cards),
                 # The client's HELD range — up to and including its last
@@ -19032,7 +19077,9 @@ def _handle_session_get(handler, parsed) -> bool:
             )
         _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
         _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
-        if _summary_last_message_at is None and _all_msgs:
+        if _summary_last_message_at is None and _all_msgs and _display_cache_summary:
+            _merged_last_message_at = _display_cache_summary["last_ts"]
+        elif _summary_last_message_at is None and _all_msgs:
             try:
                 _merged_last_message_at = max(
                     float((m or {}).get("timestamp") or 0)
@@ -19092,7 +19139,10 @@ def _handle_session_get(handler, parsed) -> bool:
         # tool result is outside msg_limit, and treats an explicit empty
         # todo list as the current state instead of falling through to an
         # older non-empty write.
-        if load_messages and _all_msgs:
+        if load_messages and _all_msgs and _display_cache_summary:
+            if _display_cache_summary["todo_state"] is not None:
+                raw["todo_state"] = copy.deepcopy(_display_cache_summary["todo_state"])
+        elif load_messages and _all_msgs:
             attach_todo_state(raw, _all_msgs)
         if _merged_last_message_at:
             raw["last_message_at"] = max(
@@ -19125,9 +19175,11 @@ def _handle_session_get(handler, parsed) -> bool:
             # (it trusts the sidecar prefix / metadata counts). On message
             # loads the merged display transcript is the authority — derive
             # the visible total from it.
-            raw["visible_message_count"] = sum(
-                1 for m in _all_msgs
-                if isinstance(m, dict) and not is_hidden_transcript_row(m)
+            raw["visible_message_count"] = (
+                _display_cache_summary["visible_count"] if _display_cache_summary else sum(
+                    1 for m in _all_msgs
+                    if isinstance(m, dict) and not is_hidden_transcript_row(m)
+                )
             )
         # Signal to the frontend that older messages were omitted. The
         # message window cursor already reflects visible-row pagination and
@@ -19209,9 +19261,11 @@ def _handle_session_get(handler, parsed) -> bool:
                 logger.debug("[webui] #8517: memory status unavailable for session %s", sid, exc_info=True)
             if _memory_status:
                 raw["memory_status"] = _memory_status
-        imported_turn_marker = any(
-            isinstance(row, dict) and row.get("_active_turn_token")
-            for row in _all_msgs
+        imported_turn_marker = (
+            _display_cache_summary["turn_token"] if _display_cache_summary else any(
+                isinstance(row, dict) and row.get("_active_turn_token")
+                for row in _all_msgs
+            )
         )
         if (
             load_messages
