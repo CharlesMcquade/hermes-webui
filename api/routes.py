@@ -10794,6 +10794,9 @@ def _resolve_compatible_session_model_state(
             catalog = get_available_models()
     else:
         catalog = get_available_models()
+    if model and isinstance(catalog, dict) and catalog.get("_prefer_cache_miss"):
+        # No cached catalog: keep the request verbatim rather than rewrite it.
+        return model, _split_provider_qualified_model(model)[1] or requested_provider, False
     default_model = str(catalog.get("default_model") or DEFAULT_MODEL or "").strip()
 
     # Profile-aware resolution: when the caller supplies profile context
@@ -11384,6 +11387,7 @@ def _session_model_state_from_request(
         model_value, provider, _changed = _resolve_compatible_session_model_state(
             model_value,
             provider,
+            prefer_cached_catalog=True,
         )
     return model_value, provider
 

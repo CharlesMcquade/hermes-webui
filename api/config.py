@@ -13549,6 +13549,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # of re-entering the cold path (avoids duplicate 10s zai load_pool calls).
         if should_wait:
             wait_timeout = 60.0
+            if prefer_cache:
+                # prefer_cache callers must never block behind a rebuild.
+                wait_timeout = 0.0
             if force_refresh and force_refresh_started_at is not None:
                 if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
                     # The legacy synchronous path is explicitly unbounded. A
@@ -13667,7 +13670,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # prematurely release that rebuild's serialization, waking waiters
             # to an empty cache and triggering a second live rebuild. Just
             # serve the network-free minimal catalog and leave the flag alone.
-            return copy.deepcopy(_minimal_static_models_catalog())
+            _minimal = copy.deepcopy(_minimal_static_models_catalog())
+            _minimal["_prefer_cache_miss"] = True  # no real catalog to judge against
+            return _minimal
 
         # Cold path: full rebuild — only one thread reaches here at a time
         with _cache_build_cv:
@@ -14289,7 +14294,9 @@ def get_available_models_for_session_visit() -> dict:
             return copy.deepcopy(stale_cached)
         _mark("prefer_cache_fallback")
         _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-        return get_available_models(prefer_cache=True)
+        fallback = get_available_models(prefer_cache=True)
+        fallback.pop("_prefer_cache_miss", None)  # internal marker; not part of the API payload
+        return fallback
 
 
 def _maybe_log_slow_stages(
