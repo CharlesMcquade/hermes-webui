@@ -12990,6 +12990,26 @@ def _prefix_fingerprint_over_projection(projected_rows, projected_cards) -> str:
     return digest.hexdigest()
 
 
+def _raw_display_prefix_fingerprint(messages, count, *, inputs) -> str:
+    """Cheap, conservative proof for a window whose prefix was not projected.
+
+    Raw rows and every out-of-row projection input are hashed without redaction.
+    This can refuse an append after a stripped-field-only edit, but can never
+    accept one after a delivered-row change; the response remains safe while
+    avoiding a full credential-redaction pass just to mint an opaque token.
+    """
+    digest = hashlib.blake2b(digest_size=20)
+    digest.update(b"prefix_fp/raw-v1\x1f")
+    digest.update(b"coverage=" + str(count).encode("ascii") + b"\x1f")
+    for row in messages[:count]:
+        digest.update(_projection_row_bytes(row))
+        digest.update(b"\x1f")
+    for value in (inputs.scenes, inputs.tool_calls, inputs.meta):
+        digest.update(_projection_row_bytes(value))
+        digest.update(b"\x1f")
+    return digest.hexdigest()
+
+
 def _display_prefix_fingerprint(
     messages,
     count,
@@ -13042,6 +13062,8 @@ def _display_prefix_fingerprint(
     delivered rows for the response body does not compute them a second time
     for the proof. ``messages``/``count`` are then documentation only.
     """
+    if projection is not None and len(projection[0]) != count:
+        return _raw_display_prefix_fingerprint(messages, count, inputs=inputs)
     if projection is None:
         projection = _display_prefix_projection(
             messages,
@@ -13057,6 +13079,15 @@ def _display_prefix_fingerprint(
             # client's next reload takes the authoritative full fetch.
             return ""
     return _prefix_fingerprint_over_projection(projection[0], projection[1])
+
+
+def _build_raw_prefix_fingerprint_entry(messages, *, inputs):
+    return {
+        "meta": inputs.meta,
+        "format": "raw",
+        "digest": _raw_display_prefix_fingerprint(messages, len(messages), inputs=inputs),
+        "coverage": len(messages),
+    }
 
 
 def _build_prefix_fingerprint_entry(session, messages, *, inputs=None):
@@ -13144,17 +13175,38 @@ def _mint_display_prefix_fingerprint(session, messages, count, cached, *, inputs
     """
     if inputs is None:
         inputs = _display_prefix_fp_inputs(session)
+    raw_proof = projection is not None and len(projection[0]) != count
     if cached and count == len(messages):
         entry = cached[0] if isinstance(cached, list) and cached else None
         if (
             isinstance(entry, dict)
             and entry.get("meta") == inputs.meta
             and entry.get("coverage") == count
+            and entry.get("format", "full") == ("raw" if raw_proof else "full")
         ):
             digest = entry.get("digest")
             if isinstance(digest, str) and digest:
                 return digest
     return _display_prefix_fingerprint(messages, count, inputs=inputs, projection=projection)
+
+
+class _WindowProofContext(list):
+    """Raw-prefix inputs and lazy legacy-proof fallback for one window."""
+
+    def __init__(self, messages, coverage_end, window_rows):
+        super().__init__()
+        self.messages = messages
+        self.coverage_end = coverage_end
+        self.window_rows = window_rows
+        self.projection = None
+
+    def adopt_projection(self):
+        rows, cards = self.projection or ((), ())
+        # The captured returned tuple continues to describe the full legacy
+        # compatibility projection, if append validation actually needed it.
+        self.window_rows[:] = rows
+        self[:] = cards
+        return self.window_rows, self
 
 
 def _delivered_window_projection(
@@ -13201,10 +13253,31 @@ def _delivered_window_projection(
         expand_renderable=expand_renderable,
     )
     coverage_end = offset + len(window)
-    rows, cards = _response_prefix_projection(
-        session, messages, coverage_end, cached, inputs=inputs
-    )
-    delivered = rows[coverage_end - len(window) :]
+    if msg_limit is None:
+        # Full-transcript requests retain the existing projection and proof.
+        rows, cards = _response_prefix_projection(
+            session, messages, coverage_end, cached, inputs=inputs
+        )
+        delivered = rows[coverage_end - len(window) :]
+    else:
+        if inputs is None:
+            inputs = _display_prefix_fp_inputs(session)
+        # Scene matching needs the covered prefix for duplicate-ref detection,
+        # but public projection (and its expensive redaction) is window-only.
+        scene_rows = messages[:coverage_end]
+        if inputs.scenes:
+            scene_rows = _hydrate_anchor_activity_scenes(
+                scene_rows, inputs.scenes, message_offset=0, tool_calls=inputs.tool_calls,
+            )
+        rows = [
+            _public_message_projection(
+                row, _enabled=inputs.redact_enabled,
+                _active_turn_token=inputs.active_turn_token,
+            )
+            for row in scene_rows[offset:coverage_end]
+        ]
+        cards = _WindowProofContext(messages, coverage_end, rows)
+        delivered = rows
     if msg_limit is not None:
         # Transport-layer clipping only (a payload bound on over-long
         # hidden tool results). It is NOT part of a row's semantic
@@ -13311,6 +13384,19 @@ def _append_prefix_proof_matches(projection, count, prefix_fp_raw, *, inputs) ->
     verification re-scopes the very projection the delivered rows were built
     from (2026-10-31 finding 1).
     """
+    context = projection[1] if isinstance(projection[1], _WindowProofContext) else None
+    if context is not None:
+        if _raw_display_prefix_fingerprint(
+            context.messages, count, inputs=inputs,
+        ) == str(prefix_fp_raw):
+            return True
+        # Views established by a full GET carry the legacy projected proof.
+        # Scope hydration to the whole response coverage, then re-scope to the
+        # held prefix, preserving duplicate-ref refusal semantics.
+        context.projection = _display_prefix_projection(
+            context.messages, context.coverage_end, inputs=inputs,
+        )
+        projection = context.projection
     rows, cards = _display_prefix_projection_scoped(
         projection,
         count,
@@ -13794,7 +13880,7 @@ def _limited_webui_messages_for_display_with_sidecar(
         # the scene/tool-call meta so an in-process scene change cannot reuse
         # a pre-save digest, and invalidated with the entry's key by any
         # sidecar write (scene saves persist through the sidecar).
-        prefix_fp_entry = _build_prefix_fingerprint_entry(session, merged, inputs=inputs)
+        prefix_fp_entry = _build_raw_prefix_fingerprint_entry(merged, inputs=inputs)
         # #7925 re-gate (2026-10-30, cold double-hash): the entry's digest
         # covers the WHOLE merged document, and the response mint wants the
         # digest over [0, count) with count = the window's coverage end. Those
@@ -13805,8 +13891,6 @@ def _limited_webui_messages_for_display_with_sidecar(
         # entry over so the cold load does not hash the document a second
         # time (the maintainer measured 2 full-document hashes per cold GET
         # and 0 on the warm hit; the cold path is now 1).
-        if _prefix_fp_out is not None and prefix_fp_entry is not None:
-            _prefix_fp_out.append(prefix_fp_entry)
         with _display_merge_cache_lock:
             entry = {
                 "key": cache_key,
@@ -18653,21 +18737,9 @@ def _handle_session_get(handler, parsed) -> bool:
         if is_messaging_session:
             cli_messages = get_cli_session_messages(sid)
         elif load_messages:
-            if _limited_display_request:
-                (
-                    state_db_since_timestamp,
-                    limited_sidecar_messages,
-                ) = _state_db_since_timestamp_for_limited_display(
-                    s,
-                    msg_limit,
-                    msg_before=msg_before,
-                    owner_positions=_display_owner_positions,
-                )
             _state_db_reader_kwargs = {"profile": _session_profile}
             if _cancelled_journal_turn_owner(getattr(s, "messages", None) or [], include_live_partial=True):
                 _state_db_reader_kwargs["include_row_identity"] = True
-            if state_db_since_timestamp is not None:
-                _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
             # Apply the display-path row backstop ONLY on provably-safe
             # reads where no truncation_boundary prefix is required for the
             # merge — see _state_db_backstop_limit_for_display. Compressed
@@ -18706,6 +18778,18 @@ def _handle_session_get(handler, parsed) -> bool:
             if _display_cache_hit is not None:
                 state_db_messages = []
             else:
+                if _limited_display_request:
+                    # A warm merge hit needs neither the sidecar timestamp scan
+                    # nor the state.db rows; pay for this selection only on a miss.
+                    (
+                        state_db_since_timestamp,
+                        limited_sidecar_messages,
+                    ) = _state_db_since_timestamp_for_limited_display(
+                        s, msg_limit, msg_before=msg_before,
+                        owner_positions=_display_owner_positions,
+                    )
+                    if state_db_since_timestamp is not None:
+                        _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
                 if (
                     _limited_display_request
                     and not getattr(s, "active_stream_id", None)
@@ -18946,6 +19030,7 @@ def _handle_session_get(handler, parsed) -> bool:
                 # Window-only cache hit: _all_msgs is the cached list; copy
                 # just the delivered rows so callers can't mutate the cache.
                 _truncated_msgs = [dict(m) if isinstance(m, dict) else m for m in _truncated_msgs]
+            _window_proof = _projected_cards if isinstance(_projected_cards, _WindowProofContext) else None
             if _append_mode_anchor is not None and not _append_prefix_proof_matches(
                 (_projected_rows, _projected_cards),
                 # The client's HELD range — up to and including its last
@@ -18964,7 +19049,11 @@ def _handle_session_get(handler, parsed) -> bool:
                 # response, exactly what master does today.
                 _append_mode_anchor = None
                 _window_limit = None
-                if _coverage_end >= len(_all_msgs):
+                if _window_proof is not None and _window_proof.projection is not None:
+                    _projected_rows, _projected_cards = _window_proof.adopt_projection()
+                    _messages_offset = 0
+                    _truncated_msgs = list(_projected_rows)
+                elif _coverage_end >= len(_all_msgs) and len(_projected_rows) == _coverage_end:
                     # The discarded projection already reached the end of the
                     # document — the usual focus-refresh refusal, where the
                     # client holds everything and nothing new arrived — so it
@@ -18992,6 +19081,8 @@ def _handle_session_get(handler, parsed) -> bool:
                         cached=_prefix_fp_out,
                         inputs=_display_fp_inputs,
                     )
+            if _window_proof is not None and _window_proof.projection is not None:
+                _projected_rows, _projected_cards = _window_proof.adopt_projection()
         else:
             _truncated_msgs = []
             _messages_offset = 0
