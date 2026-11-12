@@ -121,7 +121,7 @@ def test_steer_admission_and_renderer_contract():
     assert "source.addEventListener('steer_delivered'" in messages
     assert "_steerAdmissions.set(streamId,_admitSteer)" in messages
     assert "const receipt=result.steer_event" in commands
-    assert "_showSteerIndicator(originalMsg,steerUploadedPaths)" in commands
+    assert "_showSteerIndicator(originalMsg,steerUploadedPaths," in commands
     assert "if(!admitted&&_steerOwnerIsCurrent(ownerSid))" in commands
     assert "node.innerHTML=_steerRowInnerHtml(text,labels,'',S.session&&S.session.session_id||'',true)" in ui
     assert "row.source_event_type==='steer_delivered'" in ui
@@ -210,6 +210,39 @@ assert.strictEqual(run(()=>true),0);      // admitted: scene owns the row
 assert.strictEqual(run(()=>false),1);     // rejected: fallback live row
 assert.strictEqual(run(null),1);          // hook missing (expired): fallback
 assert.strictEqual(run(()=>{{throw new Error('x')}}),1);
+"""
+    result = subprocess.run([node, '-e', script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_scene_admission_removes_matching_fallback_row_only():
+    node = shutil.which('node')
+    assert node
+    messages = (ROOT / 'static/messages.js').read_text()
+    commands = (ROOT / 'static/commands.js').read_text()
+    start = messages.index('  const _admitSteer=(envelope)=>{')
+    end = messages.index('  _steerAdmissions.set(streamId,_admitSteer);', start)
+    block = messages[start:end]
+    assert "_showSteerIndicator(originalMsg,steerUploadedPaths,typeof rid==='string'?rid:'')" in commands
+    assert "el.dataset.steerReceipt=receiptId" in commands
+    script = f"""
+const vm=require('vm'),assert=require('assert');
+const rows=[{{r:'uuid-1',removed:false}},{{r:'other',removed:false}}];
+const document={{querySelectorAll:sel=>{{
+  const m=/data-steer-receipt="([^"]+)"/.exec(sel);
+  return rows.filter(x=>x.r===m[1]).map(x=>({{remove(){{x.removed=true;}}}}));}}}};
+const ctx={{document,CSS:{{escape:s=>s}},activeSid:'sid',
+  _anchorRegistry:{{anchor:{{identity:{{run_id:'run'}}}}}},
+  _applyToAnchor:()=>({{applied:true}})}};
+vm.runInNewContext({json.dumps(block)}+';this.admit=_admitSteer;',ctx);
+assert.strictEqual(ctx.admit({{event_id:'run:3',run_id:'run',session_id:'sid',seq:3,
+  payload:{{text:'t',receipt_id:'uuid-1'}}}}),true);
+assert.deepStrictEqual(rows.map(x=>x.removed),[true,false]);
+ctx._applyToAnchor=()=>({{applied:false,reason:'stale'}});
+rows[1].removed=false;
+assert.strictEqual(ctx.admit({{event_id:'run:4',run_id:'run',session_id:'sid',seq:4,
+  payload:{{text:'t',receipt_id:'other'}}}}),false);
+assert.strictEqual(rows[1].removed,false);  // rejected admission keeps fallback
 """
     result = subprocess.run([node, '-e', script], text=True, capture_output=True)
     assert result.returncode == 0, result.stderr

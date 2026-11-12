@@ -3276,7 +3276,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const result=_applyToAnchor('steer_delivered',{
       ...event,run_id:run,session_id:sid,seq:event.seq,payload:{...payload,receipt_id:receipt},
     },{lastEventId:eventId});
-    return !!(result&&(result.applied||result.reason==='duplicate'));
+    const ok=!!(result&&(result.applied||result.reason==='duplicate'));
+    // The scene now owns this Steer: drop a DOM fallback row for the same receipt.
+    if(ok&&typeof document!=='undefined'&&typeof CSS!=='undefined'&&CSS.escape){
+      document.querySelectorAll(`.steer-row-live[data-steer-receipt="${CSS.escape(receipt)}"]`).forEach(n=>n.remove());
+    }
+    return ok;
   };
   _steerAdmissions.set(streamId,_admitSteer);
   // The creation-time backstop must never expire a run that is still live:

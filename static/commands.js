@@ -1779,7 +1779,7 @@ function _steerFailureMessageKey(fallback) {
 // it sits where the guidance entered the run instead of trailing the stream.
 // It is browser-only and retired on terminal settlement; the Agent's persisted
 // row replaces it when the session reloads its settled messages.
-function _showSteerIndicator(text, files){
+function _showSteerIndicator(text, files, receiptId){
   const inner=document.getElementById('msgInner');
   if(!inner) return;
   const body=String(text||'').trim();
@@ -1792,6 +1792,7 @@ function _showSteerIndicator(text, files){
   el.dataset.role='steer';
   el.dataset.liveSteer='1';
   el.dataset.rawText=body;
+  if(typeof receiptId==='string'&&receiptId) el.dataset.steerReceipt=receiptId;
   const sid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||'';
   el.innerHTML=(typeof _steerRowInnerHtml==='function')
     ? _steerRowInnerHtml(body,uploaded,'',sid)
@@ -2300,7 +2301,8 @@ async function _trySteer(msg, explicitSteer){
       }
     }
     if(!admitted&&_steerOwnerIsCurrent(ownerSid)){
-      _showSteerIndicator(originalMsg,steerUploadedPaths);
+      const rid=receipt&&receipt.payload&&receipt.payload.receipt_id;
+      _showSteerIndicator(originalMsg,steerUploadedPaths,typeof rid==='string'?rid:'');
     }
     showToast(result.durable===false
       ? 'Steer accepted, but its timeline position was not saved.'
