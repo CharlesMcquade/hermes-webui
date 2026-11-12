@@ -458,7 +458,7 @@ class TestFrontendWiring:
         # Retired independent admission (#7188): no persistenceDegraded gate
         # remains; the live steer row is unconditional on acceptance.
         assert "persistenceDegraded" not in try_body
-        indicator_idx = try_body.index("_showSteerIndicator(originalMsg,steerUploadedPaths)")
+        indicator_idx = try_body.index("_showSteerIndicator(originalMsg,steerUploadedPaths,")
         assert indicator_idx > try_body.index("if(result&&result.accepted)")
         assert "_showSteerIndicator(steerText)" not in try_body
 
