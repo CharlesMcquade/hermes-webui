@@ -153,6 +153,34 @@ def test_redaction_inside_window_equals_full_projection_slice(session_get):
     assert "..." in actual["messages"][0]["content"]
 
 
+def test_5000_message_window_projects_only_returned_rows(session_get, monkeypatch):
+    import api.models as models
+    import api.routes as routes
+
+    session = models.Session.load(SID)
+    assert session is not None
+    session.messages = (session.messages * 17)[:5000]
+    session.save(touch_updated_at=False)
+    routes._display_merge_cache.clear()
+    full = session_get("msg_limit=all")
+    assert len(full["messages"]) == 5000
+    expected, offset = _expected(full, msg_limit=30)
+
+    calls = 0
+    original = routes._public_message_projection
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(routes, "_public_message_projection", counted)
+    actual = session_get("msg_limit=30")
+    assert json.loads(json.dumps(actual["messages"])) == expected
+    assert actual["_messages_offset"] == offset
+    assert calls == len(expected)
+
+
 def test_after_paging_equals_full_projection_slice(session_get):
     import api.routes as routes
 
