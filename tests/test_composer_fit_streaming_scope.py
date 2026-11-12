@@ -44,6 +44,7 @@ const production = [
   'let _composerFitResizeListenerBound=false;',
   'let _composerFitLastFooter=null;',
   'let _composerFitLastKey="";',
+  'function _fitComposerTooltipDirectionFromEvent(){}',
   extractFunc('_fitComposerFooter'),
   extractFunc('_scheduleComposerFit'),
   extractFunc('_initComposerFooterFit'),
@@ -57,6 +58,7 @@ function makeWorld(contentWidth) {
   const classes = new Set();
   const left = {
     name: 'left',
+    addEventListener() {},
     clientWidth: 400,
     get scrollWidth() { return contentWidth; },
     children: [{hidden: false}, {hidden: true}, {display: 'none'}],
