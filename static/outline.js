@@ -10,6 +10,7 @@ let _outlineSid = null;       // session id the panel was last built for
 let _panelOpen  = false;      // whether the panel is currently visible
 let _outlineResizeObserver = null;
 let _outlineWorkspaceObserver = null;
+let _outlineTurnEntries = [];
 
 // Returns the current session id, or null if no session is loaded.
 function _currentSid() {
@@ -60,19 +61,71 @@ function _expandOutlineRenderWindow() {
   );
 }
 
+function _outlineNeedsTurnIndex() {
+  return (typeof _messagesTruncated !== 'undefined' && _messagesTruncated) || _messageSessionIndexBase() > 0;
+}
+
 function _ensureOutlineMessagesLoaded(sid) {
-  if (!sid || S.busy || S.activeStreamId) return Promise.resolve(false);
-  if (typeof _messagesTruncated === 'undefined' || !_messagesTruncated) {
-    return Promise.resolve(false);
-  }
-  if (typeof _ensureAllMessagesLoaded !== 'function') return Promise.resolve(false);
-  return _ensureAllMessagesLoaded().then(function() {
-    if (!S.session || S.session.session_id !== sid) return false;
-    _expandOutlineRenderWindow();
+  if (!sid || S.busy || S.activeStreamId || !_outlineNeedsTurnIndex()) return Promise.resolve(false);
+  if (_outlineSid !== sid) _outlineTurnEntries = [];
+  _outlineSid = sid;
+  return api('/api/session/turns?session_id=' + encodeURIComponent(sid)).then(function(data) {
+    if (_outlineSid !== sid || _currentSid() !== sid || !data || !Array.isArray(data.turns)) return false;
+    _outlineTurnEntries = data.turns.map(function(turn) {
+      return { rawIdx: turn.msg_idx, label: turn.k, excerpt: _excerptText(turn.preview) };
+    });
     return true;
-  }).catch(function() {
-    return false;
-  });
+  }).catch(function() { return false; });
+}
+
+// Extend the held tail to fullIdx with one msg_before page. A detached window
+// cannot be represented by the renderer's contiguous _oldestIdx index space,
+// so only a window which joins the current oldest row is installed.
+async function _loadOutlineTurnWindow(fullIdx, sid) {
+  const oldest = _messageSessionIndexBase();
+  const max = (typeof _msgLimitMax === 'number' && _msgLimitMax) || 500;
+  if (_loadingOlder || fullIdx < 0 || fullIdx >= oldest || fullIdx + 31 < oldest || oldest - fullIdx + 31 > max) {
+    return _ensureAllMessagesLoaded({ rejectIfStale: true });
+  }
+  _loadingOlder = true;
+  const generation = _messagesGeneration;
+  let succeeded = false;
+  try {
+    const data = await api('/api/session?session_id=' + encodeURIComponent(sid) +
+      '&messages=1&resolve_model=0&msg_before=' + (fullIdx + 31) +
+      '&msg_limit=' + (oldest - fullIdx + 31), { timeoutMs: 120000 });
+    const rs = data && data.session;
+    if (!rs || _currentSid() !== sid || (_loadingSessionId !== null && _loadingSessionId !== sid) ||
+        _messagesGeneration !== generation) return false;
+    const offset = Number(rs._messages_offset) || 0;
+    const rows = (rs.messages || []).filter(function(m) { return m && m.role; });
+    const current = (S.messages || []).filter(function(m) { return m && m.role && !m._displayOnlyRow; });
+    if (offset > fullIdx || offset + rows.length !== oldest) throw new Error('Discontiguous turn window');
+    let next = rows.concat(current);
+    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
+      next = window._carryForwardEphemeralTurnFields(S.messages || [], next);
+    }
+    const recovered = (S.messages || []).filter(function(m) { return m && m._displayOnlyRow; });
+    if (recovered.length && typeof _reconcileRecoveredPromptRows === 'function') {
+      _reconcileRecoveredPromptRows(next, recovered, Number(S.session.pending_started_at) || 0);
+    }
+    S.messages = next;
+    const cards = _mergeSessionToolCards(S.session.tool_calls, rs.tool_calls, rows.length, 0);
+    S.session.tool_calls = cards;
+    _syncToolCallsForLoadedMessages(next, cards);
+    _advanceVisibleBaselineForServerKnownRows(sid, rows.filter(function(m) { return m._source !== 'delegation_wakeup'; }).length);
+    _messagesTruncated = !!rs._messages_truncated;
+    _oldestIdx = offset;
+    _msgLimitMax = Number(rs._msg_limit_max) || max;
+    _markPrefixProvenRows(rows);
+    _adoptPrefixProof(rs.prefix_fp, offset + (rs.messages || []).length);
+    succeeded = true;
+  } catch (_) {}
+  finally {
+    _loadingOlder = false;
+  }
+  if (!succeeded && _currentSid() === sid) return _ensureAllMessagesLoaded({ rejectIfStale: true });
+  return succeeded;
 }
 
 // Extracts the first 60 visible characters from a message content value.
@@ -97,12 +150,13 @@ async function _jumpToMessage(rawIdx) {
   // The user's own outline navigation supersedes a search-hit jump still in flight.
   window._sessionSearchJumpGen = (Number(window._sessionSearchJumpGen) || 0) + 1;
 
-  const rowId = 'msg-user-' + rawIdx;
+  const fullIdx = Number(rawIdx);
   const targetRow = function() {
-    const row = document.getElementById(rowId);
-    // Loading full history changes local indices without rebuilding the DOM.
-    // A tail row with the same local id must not impersonate this target.
-    return row && Number(row.dataset.sessionMsgIdx) === _messageSessionIndexForRawIdx(rawIdx) ? row : null;
+    const localIdx = typeof _messageRawIdxForSessionIndex === 'function'
+      ? _messageRawIdxForSessionIndex(fullIdx)
+      : (typeof _messageSessionIndexBase === 'function' ? fullIdx - _messageSessionIndexBase() : fullIdx);
+    const row = document.getElementById('msg-user-' + localIdx);
+    return row && Number(row.dataset.sessionMsgIdx) === fullIdx ? row : null;
   };
   const scrollToRow = function() {
     if (_currentSid() !== sid) return;
@@ -126,13 +180,16 @@ async function _jumpToMessage(rawIdx) {
 
   if (S.busy || S.activeStreamId) return;
   try {
-    // A missing DOM row is not missing history. The shared loader requests
-    // /api/session with msg_limit=all only while truncated, and preserves
-    // message generations, ephemeral turn fields and tool-call metadata.
-    if (typeof _ensureAllMessagesLoaded !== 'function') return;
-    await _ensureAllMessagesLoaded();
-    if (_currentSid() !== sid || S.busy || S.activeStreamId) return;
-    if (typeof _messagesTruncated !== 'undefined' && _messagesTruncated) return;
+    // Load a contiguous bounded window when possible; await _ensureAllMessagesLoaded()
+    // remains the fallback for detached/over-limit or failed windows.
+    const localIdx = typeof _messageRawIdxForSessionIndex === 'function'
+      ? _messageRawIdxForSessionIndex(fullIdx)
+      : (typeof _messageSessionIndexBase === 'function' ? fullIdx - _messageSessionIndexBase() : fullIdx);
+    const loaded = Number.isSafeInteger(localIdx) && localIdx >= 0 && localIdx < (S.messages || []).length &&
+      (!_messagesTruncated || targetRow() || typeof _loadOutlineTurnWindow === 'function');
+    const ready = loaded || (typeof _loadOutlineTurnWindow === 'function'
+      ? await _loadOutlineTurnWindow(fullIdx, sid) : await _ensureAllMessagesLoaded());
+    if ((!ready && _messagesTruncated) || _currentSid() !== sid || S.busy || S.activeStreamId) return;
     _cancelBottomSettle();
     _beginMessageJumpScroll(document.getElementById('messages'));
     _expandOutlineRenderWindow();
@@ -334,8 +391,9 @@ function _renderPanel() {
     return;
   }
 
+  if (_outlineSid !== sid) _outlineTurnEntries = [];
   _outlineSid = sid;
-  const entries = _buildEntries();
+  const entries = _outlineNeedsTurnIndex() ? _outlineTurnEntries : _buildEntries();
 
   if (!entries.length) {
     panel.innerHTML = '<p class="outline-empty">' + t('outline_empty') + '</p>';
@@ -457,6 +515,41 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   }
 });
+document.addEventListener('keydown', async function(event) {
+  if (!event.altKey || event.ctrlKey || event.metaKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
+  const panel = (typeof _currentPanel === 'undefined') ? 'chat' : (_currentPanel || 'chat');
+  if (panel !== 'chat' && panel !== 'todos') return;
+  const target = event.target;
+  if (target && (/^(INPUT|TEXTAREA)$/.test(target.tagName) || target.isContentEditable ||
+      (target.closest && target.closest('[contenteditable="true"]')))) return;
+  const sid = _currentSid();
+  if (!sid || S.busy || S.activeStreamId) return;
+  if (_outlineNeedsTurnIndex() && _outlineSid !== sid) await _ensureOutlineMessagesLoaded(sid);
+  if (_currentSid() !== sid) return;
+  const source = _outlineNeedsTurnIndex() ? _outlineTurnEntries : _buildEntries();
+  const entries = source.map(function(entry) {
+    return { rawIdx: Number(entry.rawIdx) + (_outlineNeedsTurnIndex() ? 0 : _messageSessionIndexBase()) };
+  });
+  const container = document.getElementById('messages');
+  if (!container || !entries.length) return;
+  const top = container.getBoundingClientRect().top;
+  const rows = container.querySelectorAll('[data-session-msg-idx]');
+  let topIdx = -1;
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].getBoundingClientRect().bottom > top) {
+      topIdx = Number(rows[i].dataset.sessionMsgIdx);
+      break;
+    }
+  }
+  if (!Number.isFinite(topIdx)) return;
+  let current = -1;
+  for (let i = 0; i < entries.length && entries[i].rawIdx <= topIdx; i++) current = i;
+  const next = current + (event.key === 'ArrowUp' ? -1 : 1);
+  if (next < 0 || next >= entries.length) return;
+  event.preventDefault();
+  await _jumpToMessage(entries[next].rawIdx);
+});
+
 window.addEventListener('resize', applyConversationOutlinePreference);
 
 })();
