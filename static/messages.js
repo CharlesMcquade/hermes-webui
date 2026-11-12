@@ -3279,9 +3279,27 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return !!(result&&(result.applied||result.reason==='duplicate'));
   };
   _steerAdmissions.set(streamId,_admitSteer);
-  function _scheduleAnchorRegistryCleanup(delayMs=600000){
+  // The creation-time backstop must never expire a run that is still live:
+  // the registry and Steer admission hook ARE the live presentation surface.
+  // Expiring them mid-run (any turn >10 min) made accepted Steers toast
+  // "delivered" with no row until settlement/reload. Terminal paths and
+  // detached/stale attachments still expire normally.
+  const _ANCHOR_BACKSTOP_MAX_DEFER_MS=6*60*60*1000;
+  const _anchorBackstopStartedAt=Date.now();
+  function _anchorRunStillLive(){
+    if(_terminalStateReached||_streamFinalized) return false;
+    const live=(typeof LIVE_STREAMS==='object'&&LIVE_STREAMS)?LIVE_STREAMS[activeSid]:null;
+    return !!(live&&live.streamId===streamId);
+  }
+  function _scheduleAnchorRegistryCleanup(delayMs=600000, opts){
     if(!_anchorRegistryMap||!_anchorRegistry) return;
+    const deferWhileLive=!!(opts&&opts.deferWhileLive);
     setTimeout(()=>{
+      if(deferWhileLive&&_anchorRunStillLive()
+         &&Date.now()-_anchorBackstopStartedAt<_ANCHOR_BACKSTOP_MAX_DEFER_MS){
+        _scheduleAnchorRegistryCleanup(delayMs,opts);
+        return;
+      }
       if(_anchorRegistryMap.get(streamId)===_anchorRegistry){
         _anchorRegistryMap.delete(streamId);
         if(_steerAdmissions.get(streamId)===_admitSteer) _steerAdmissions.delete(streamId);
@@ -3293,7 +3311,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // (incl. external ones like sidebar cancelSessionStream() that bypass the
   // in-closure SSE handlers). Explicit terminal-path calls above just expire it
   // sooner; this guarantees window._liveAnchorRegistries can't grow unbounded.
-  _scheduleAnchorRegistryCleanup(600000);
+  _scheduleAnchorRegistryCleanup(600000,{deferWhileLive:true});
   // Applying an event and painting it are separate outcomes. Reasoning uses the
   // optional holder to decide whether a temporary visible fallback is needed.
   function _applyToAnchor(sourceEventType, rawEventData, sseEvent, renderOutcome, options={}){
