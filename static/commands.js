@@ -2289,10 +2289,17 @@ async function _trySteer(msg, explicitSteer){
     // existing live preview rather than making accepted guidance disappear.
     const receipt=result.steer_event;
     const admissions=typeof window!=='undefined'&&window._steerAnchorAdmissions;
+    // If the receipt cannot enter the live scene (hook expired/missing or
+    // admission rejected), fall back to the DOM-only live row rather than
+    // leaving only a toast. The settled scene replaces it at settlement.
+    let admitted=false;
     if(receipt&&admissions&&typeof admissions.get==='function'){
       const admit=admissions.get(ownerStreamId);
-      if(typeof admit==='function') admit(receipt);
-    }else if(!receipt&&_steerOwnerIsCurrent(ownerSid)){
+      if(typeof admit==='function'){
+        try{ admitted=!!admit(receipt); }catch(_){ admitted=false; }
+      }
+    }
+    if(!admitted&&_steerOwnerIsCurrent(ownerSid)){
       _showSteerIndicator(originalMsg,steerUploadedPaths);
     }
     showToast(result.durable===false

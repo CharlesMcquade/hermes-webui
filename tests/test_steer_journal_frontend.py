@@ -122,6 +122,94 @@ def test_steer_admission_and_renderer_contract():
     assert "_steerAdmissions.set(streamId,_admitSteer)" in messages
     assert "const receipt=result.steer_event" in commands
     assert "_showSteerIndicator(originalMsg,steerUploadedPaths)" in commands
-    assert "else if(!receipt&&_steerOwnerIsCurrent(ownerSid))" in commands
+    assert "if(!admitted&&_steerOwnerIsCurrent(ownerSid))" in commands
     assert "node.innerHTML=_steerRowInnerHtml(text,labels,'',S.session&&S.session.session_id||'',true)" in ui
     assert "row.source_event_type==='steer_delivered'" in ui
+
+
+def _backstop_harness(live_after_ms):
+    """Run the real creation-time backstop with fake timers.
+
+    `live_after_ms`: run stays live until this simulated time (None = never live).
+    Returns ms at which the registry + Steer admission hook were deleted.
+    """
+    messages = (ROOT / 'static/messages.js').read_text()
+    start = messages.index('  const _ANCHOR_BACKSTOP_MAX_DEFER_MS=')
+    end = messages.index('  // Applying an event and painting it are separate outcomes.', start)
+    block = messages[start:end]
+    live = 'null' if live_after_ms is None else str(live_after_ms)
+    return f"""
+const vm=require('vm'),assert=require('assert');
+let now=0;const timers=[];
+const ctx={{
+  Date:{{now:()=>now}},
+  setTimeout:(fn,ms)=>timers.push({{at:now+ms,fn}}),
+  streamId:'run',activeSid:'sid',
+  _anchorRegistry:{{}},_admitSteer:()=>true,
+  _terminalStateReached:false,_streamFinalized:false,
+  LIVE_STREAMS:{{}},
+}};
+ctx._anchorRegistryMap=new Map([['run',ctx._anchorRegistry]]);
+ctx._steerAdmissions=new Map([['run',ctx._admitSteer]]);
+const liveUntil={live};
+function step(){{
+  timers.sort((a,b)=>a.at-b.at);const t=timers.shift();if(!t)return false;now=t.at;
+  ctx.LIVE_STREAMS.sid=(liveUntil!==null&&now<liveUntil)?{{streamId:'run'}}:undefined;
+  t.fn();return true;
+}}
+vm.runInNewContext({json.dumps(block)},ctx);
+let deletedAt=null;
+while(step()){{ if(deletedAt===null&&!ctx._anchorRegistryMap.has('run')){{deletedAt=now;
+  assert.strictEqual(ctx._steerAdmissions.has('run'),false);}} if(now>24*3600e3)break; }}
+console.log(JSON.stringify({{deletedAt}}));
+"""
+
+
+def _run_backstop(live_after_ms):
+    node = shutil.which('node')
+    assert node
+    result = subprocess.run([node, '-e', _backstop_harness(live_after_ms)], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])['deletedAt']
+
+
+def test_backstop_does_not_expire_live_run_registry_or_steer_hook():
+    # Regression: turns >10 min lost their live Steer admission hook, so
+    # accepted Steers showed only a toast until settlement/reload.
+    # Run stays live for 47 min: cleanup must wait until the first tick after.
+    assert _run_backstop(47 * 60_000) == 50 * 60_000
+
+
+def test_backstop_still_expires_dead_or_detached_runs_on_schedule():
+    assert _run_backstop(None) == 10 * 60_000
+
+
+def test_backstop_defer_is_bounded():
+    # Never-ending "live" run: bounded at 6h so the registry cannot leak.
+    assert _run_backstop(10 ** 12) == 6 * 60 * 60_000
+
+
+def test_steer_post_falls_back_to_live_row_when_admission_fails():
+    node = shutil.which('node')
+    assert node
+    commands = (ROOT / 'static/commands.js').read_text()
+    start = commands.index('    const receipt=result.steer_event;')
+    end = commands.index('    showToast(result.durable===false', start)
+    block = commands[start:end]
+    script = f"""
+const vm=require('vm'),assert=require('assert');
+function run(hook){{
+  const shown=[];
+  const window={{_steerAnchorAdmissions:new Map(hook?[['run',hook]]:[])}};
+  vm.runInNewContext({json.dumps(block)},{{window,result:{{steer_event:{{event_id:'run:1'}}}},
+    ownerStreamId:'run',ownerSid:'sid',originalMsg:'m',steerUploadedPaths:[],
+    _steerOwnerIsCurrent:()=>true,_showSteerIndicator:(t)=>shown.push(t)}});
+  return shown.length;
+}}
+assert.strictEqual(run(()=>true),0);      // admitted: scene owns the row
+assert.strictEqual(run(()=>false),1);     // rejected: fallback live row
+assert.strictEqual(run(null),1);          // hook missing (expired): fallback
+assert.strictEqual(run(()=>{{throw new Error('x')}}),1);
+"""
+    result = subprocess.run([node, '-e', script], text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
