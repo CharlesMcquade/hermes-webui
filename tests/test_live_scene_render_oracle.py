@@ -311,3 +311,63 @@ def test_turn_worklog_non_text_status_change_rerenders(browser):
         page.close()
     assert result["sameNode"] is True, result
     assert result["changed"] is True, result
+
+
+@pytest.mark.parametrize("mode", ["compact_worklog", "turn_worklog"])
+def test_unlisted_and_nested_row_fields_force_rerender(browser, mode):
+    page = browser.new_page()
+    page.route(
+        "**/*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/html" if route.request.url == "http://harness.test/" else "text/plain",
+            body=HARNESS_HTML if route.request.url == "http://harness.test/" else "",
+        ),
+    )
+    try:
+        page.goto("http://harness.test/", wait_until="domcontentloaded")
+        for script in SUPPORT_SCRIPTS:
+            page.add_script_tag(content=script)
+        page.add_script_tag(content=UI_JS)
+        result = page.evaluate(
+            """async ({mode}) => {
+              const stream = 'whole-row-oracle-stream';
+              window._chatActivityDisplayMode = mode;
+              window._liveSceneIncremental = true;
+              S.session = {session_id: 'whole-row-oracle', messages: []};
+              S.activeStreamId = stream;
+              $('msgInner').innerHTML = '';
+              const turn = _createAssistantTurn();
+              turn.id = 'liveAssistantTurn';
+              $('msgInner').appendChild(turn);
+              const tool = {id:'whole-row-tool', name:'terminal', args:{command:'pwd'},
+                done:true, nested_unlisted:{revision:1}};
+              let rows = [
+                {row_id:'hint-row', local_id:'hint-row', role:'lifecycle',
+                  kind:'lifecycle_status', source_event_type:'interim_assistant',
+                  status:'running', text:'Working', display_hint:{revision:1}},
+                {row_id:'tool:whole-row', local_id:'whole-row-tool', role:'tool',
+                  kind:'tool_call', source_event_type:'tool_delta', status:'running', tool},
+              ];
+              const render = () => renderLiveAnchorActivityScene(stream, {
+                version:'activity_scene_v1', mode,
+                identity:{session_id:'whole-row-oracle', stream_id:stream, run_id:stream},
+                activity_rows:rows.map(row => JSON.parse(JSON.stringify(row))),
+              }, {sessionId:'whole-row-oracle'});
+              render();
+              const originalBuilder = _anchorSceneNodeForRow;
+              let builderCalls = 0;
+              window._anchorSceneNodeForRow = function(...args) {
+                builderCalls++;
+                return originalBuilder.apply(this, args);
+              };
+              rows[0].display_hint.revision = 2;
+              rows[1].tool.nested_unlisted.revision = 2;
+              render();
+              return {builderCalls};
+            }""",
+            {"mode": mode},
+        )
+    finally:
+        page.close()
+    assert result == {"builderCalls": 2}, result

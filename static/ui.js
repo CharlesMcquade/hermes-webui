@@ -18864,6 +18864,57 @@ function _anchorSceneToolRenderSignature(row, opts){
   return JSON.stringify([row,opts||{},document.documentElement.lang,
     typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling()]);
 }
+function _liveSceneIncrementalEnabled(){ return window._liveSceneIncremental!==false; }
+function _anchorSceneRenderKeyPart(value, seen, cache){
+  seen=seen||new Set();
+  const normalize=(item)=>{
+    if(item===undefined) return '~undefined';
+    if(item===null) return null;
+    if(typeof item==='string'){
+      return item.length>48
+        ? `string:${item.length}:${item.slice(0,16)}:${item.slice(-32)}`
+        : item;
+    }
+    if(typeof item==='number'||typeof item==='boolean') return item;
+    if(typeof item!=='object') return `${typeof item}:${String(item)}`;
+    if(item instanceof Date) return `date:${item.getTime()}`;
+    if(cache&&cache.has(item)) return cache.get(item);
+    if(seen.has(item)) return '~circular';
+    seen.add(item);
+    let out;
+    if(Array.isArray(item)) out=item.map(normalize);
+    else{
+      out={};
+      for(const key of Object.keys(item).sort()) out[key]=normalize(item[key]);
+    }
+    seen.delete(item);
+    if(cache) cache.set(item,out);
+    return out;
+  };
+  return JSON.stringify(normalize(value));
+}
+function _anchorSceneRowRenderKey(row, opts, cache){
+  if(!row) return null;
+  try{
+    // Positional reconciliation metadata changes when rows are coalesced. Neither
+    // row builder reads it: its only ui.js use is _anchorSceneMergeToolRows,
+    // which retains the original value while merging the payload before render.
+    const rowForKey=Object.assign({},row);
+    delete rowForKey.order_index;
+    return _anchorSceneRenderKeyPart({
+      row:rowForKey,
+      opts:opts||{},
+      language:document.documentElement.lang,
+      simplified:typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling(),
+      showThinking:window._showThinking,
+      detailsExpanded:_worklogDetailsExpandedDefault(),
+      mode:typeof chatActivityMode==='function'?chatActivityMode():'',
+      timestamps:window._transparentEventTimestamps,
+      sessionId:S.session&&S.session.session_id,
+      proseIncremental:typeof window.__anchorProseIncrementalNode==='function',
+    },null,cache);
+  }catch(_){ return null; }
+}
 function _anchorSceneDataRowKey(row, streamId){
   const id=String(row.row_id||row.local_id||'').trim();
   if(!id) return '';
@@ -18890,6 +18941,9 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
     if(key) existing.set(key,node);
   });
   const children=[];
+  const incremental=typeof _liveSceneIncrementalEnabled==='function'&&
+    typeof _anchorSceneRowRenderKey==='function'&&_liveSceneIncrementalEnabled();
+  const keyCache=incremental?new Map():null;
   let currentTools=null;
   let toolNodes=[];
   const flushTools=()=>{
@@ -18908,13 +18962,16 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   for(const row of rows){
     const key=_anchorSceneDataRowKey(row,'');
     const previous=key?existing.get(key):null;
-    const signature=_anchorSceneRetainedRowSignature(row,opts);
-    const toolSignature=_anchorSceneToolRenderSignature(row,opts);
+    const renderKey=incremental?_anchorSceneRowRenderKey(row,opts,keyCache):null;
+    const signature=incremental?null:_anchorSceneRetainedRowSignature(row,opts);
+    const toolSignature=incremental?null:_anchorSceneToolRenderSignature(row,opts);
     const retained=previous&&(
+      (renderKey&&previous._anchorSceneRowRenderKey===renderKey)||
       (signature&&previous._anchorRowRenderSignature===signature)||
       (toolSignature&&previous._anchorToolRenderSignature===toolSignature));
     const node=retained?previous:_anchorSceneNodeForRow(row,opts);
     if(!node) continue;
+    if(renderKey) node._anchorSceneRowRenderKey=renderKey;
     if(signature) node._anchorRowRenderSignature=signature;
     if(toolSignature) node._anchorToolRenderSignature=toolSignature;
     if(row.role==='tool'){
@@ -19225,24 +19282,6 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
 }
-function _liveSceneIncrementalEnabled(){ return window._liveSceneIncremental!==false; }
-function _turnWorklogRowRenderKey(row){
-  if(!row) return null;
-  try{
-    return JSON.stringify({
-      row,
-      language:document.documentElement.lang,
-      showThinking:window._showThinking,
-      detailsExpanded:_worklogDetailsExpandedDefault(),
-      simplified:typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling(),
-      sessionId:S.session&&S.session.session_id,
-      proseIncremental:typeof window.__anchorProseIncrementalNode==='function',
-    },(_key,value)=>{
-      if(typeof value!=='string'||value.length<=64) return value;
-      return ['~string',value.length,value.slice(0,16),value.slice(-32)];
-    });
-  }catch(_){ return null; }
-}
 // Transparent Stream retains its independently executable renderer; the opt-in
 // Turn Worklog switches only its row presentation, reusing its stream/session
 // ownership, stable-row reconciliation, and scroll preservation.
@@ -19318,6 +19357,9 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts, turnWo
     blocks.querySelectorAll(':scope > .transparent-event-controls,:scope > .transparent-turn-footer').forEach(el=>el.remove());
   }
   const renderedRows=[];
+  const incremental=typeof _liveSceneIncrementalEnabled==='function'&&
+    typeof _anchorSceneRowRenderKey==='function'&&_liveSceneIncrementalEnabled();
+  const keyCache=incremental?new Map():null;
   for(const row of rows){
     const rowEventTs=typeof _anchorSceneRowTimestampSeconds==='function'?_anchorSceneRowTimestampSeconds(row):null;
     const rowOpts={
@@ -19326,14 +19368,13 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts, turnWo
       streamId:streamId||S.activeStreamId||'',
       sessionId:S.session&&S.session.session_id,
     };
-    const retainedSignature=turnWorklog
+    const retainedSignature=turnWorklog||incremental
       ? null
       : (typeof _anchorSceneRetainedRowSignature==='function'?_anchorSceneRetainedRowSignature(row,rowOpts):null);
-    const toolSignature=turnWorklog?'':_anchorSceneToolRenderSignature(row,rowOpts);
-    const turnWorklogKey=turnWorklog&&_liveSceneIncrementalEnabled()
-      ? _turnWorklogRowRenderKey(row) : '';
+    const toolSignature=turnWorklog||incremental?'':_anchorSceneToolRenderSignature(row,rowOpts);
+    const renderKey=incremental?_anchorSceneRowRenderKey(row,rowOpts,keyCache):null;
     const dataKey=turnWorklog
-      ? (turnWorklogKey?_anchorSceneDataRowKey(row,activeStreamId):'')
+      ? (renderKey?_anchorSceneDataRowKey(row,activeStreamId):'')
       : _anchorSceneDataRowKey(row,activeStreamId);
     const cached=dataKey?preserveByKey.get(dataKey):null;
     const signatureMatch=(toolSignature&&cached&&cached._anchorToolRenderSignature===toolSignature)||
@@ -19346,7 +19387,8 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts, turnWo
       renderedRows.push(cached);
       continue;
     }
-    if(turnWorklogKey&&cached&&cached._turnWorklogRowRenderKey===turnWorklogKey){
+    if(renderKey&&cached&&cached._anchorSceneRowRenderKey===renderKey){
+      if(!turnWorklog) _syncTransparentEventTimestampVisibility(cached);
       preserveByKey.delete(dataKey);
       renderedRows.push(cached);
       continue;
@@ -19370,7 +19412,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts, turnWo
     if(!renderedNode) continue;
     if(retainedSignature) renderedNode._anchorRowRenderSignature=retainedSignature;
     if(toolSignature) renderedNode._anchorToolRenderSignature=toolSignature;
-    if(turnWorklogKey) renderedNode._turnWorklogRowRenderKey=turnWorklogKey;
+    if(renderKey) renderedNode._anchorSceneRowRenderKey=renderKey;
     renderedRows.push(renderedNode);
   }
   // Stale replacement rows must not force every retained predecessor to move.
