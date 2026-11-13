@@ -18189,28 +18189,21 @@ function _anchorSceneRenderKeyPart(value, seen){
   return out;
 }
 function _anchorSceneRowRenderKey(row, opts){
-  opts=opts||{};
-  row=row||{};
-  const tool=row.role==='tool' ? _anchorSceneToolCallFromRow(row,{settled:!!opts.settled}) : null;
-  return _anchorSceneRenderKeyPart({
-    role:row.role, rowId:row.row_id, localId:row.local_id,
-    sourceEventType:row.source_event_type, rowStatus:row.status,
-    kind:row.kind, text:row.text, thinkingText:row.thinking&&row.thinking.text,
-    createdAt:row.created_at, timestamp:row.timestamp, ts:row.ts,
-    startedAt:row.started_at, completedAt:row.completed_at,
-    toolCallId:row.tool_call_id, tool,
-    segmentSeq:row.segment_seq, segmentSeqCamel:row.segmentSeq,
-    activityBurstId:row.activity_burst_id, burstId:row.burst_id, burstIdCamel:row.burstId,
-    settled:opts.settled, live:opts.live, finalAnswer:opts.finalAnswer,
-    liveTokenFinalPrefixEligible:opts.liveTokenFinalPrefixEligible,
-    streamId:opts.streamId, sessionId:opts.sessionId,
-    language:document.documentElement.lang,
-    simplified:typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling(),
-    showThinking:window._showThinking,
-    mode:typeof chatActivityMode==='function'?chatActivityMode():'',
-    detailsExpanded:window._worklogDetailsExpandedByDefault===true,
-    timestamps:window._transparentEventTimestamps,
-  });
+  if(!row) return null;
+  try{
+    return _anchorSceneRenderKeyPart({
+      row,
+      opts:opts||{},
+      language:document.documentElement.lang,
+      simplified:typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling(),
+      showThinking:window._showThinking,
+      detailsExpanded:_worklogDetailsExpandedDefault(),
+      mode:typeof chatActivityMode==='function'?chatActivityMode():'',
+      timestamps:window._transparentEventTimestamps,
+      sessionId:S.session&&S.session.session_id,
+      proseIncremental:typeof window.__anchorProseIncrementalNode==='function',
+    });
+  }catch(_){ return null; }
 }
 function _anchorSceneDataRowKey(row, streamId){
   const id=String(row.row_id||row.local_id||'').trim();
