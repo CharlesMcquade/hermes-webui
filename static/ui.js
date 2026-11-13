@@ -19225,6 +19225,24 @@ function renderLiveAnchorActivityScene(streamId, scene, opts){
   if(!scrollRebuildGuard.readerAwayFromBottom&&typeof scrollIfPinned==='function') scrollIfPinned();
   return true;
 }
+function _liveSceneIncrementalEnabled(){ return window._liveSceneIncremental!==false; }
+function _turnWorklogRowRenderKey(row){
+  if(!row) return null;
+  try{
+    return JSON.stringify({
+      row,
+      language:document.documentElement.lang,
+      showThinking:window._showThinking,
+      detailsExpanded:_worklogDetailsExpandedDefault(),
+      simplified:typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling(),
+      sessionId:S.session&&S.session.session_id,
+      proseIncremental:typeof window.__anchorProseIncrementalNode==='function',
+    },(_key,value)=>{
+      if(typeof value!=='string'||value.length<=64) return value;
+      return ['~string',value.length,value.slice(0,16),value.slice(-32)];
+    });
+  }catch(_){ return null; }
+}
 // Transparent Stream retains its independently executable renderer; the opt-in
 // Turn Worklog switches only its row presentation, reusing its stream/session
 // ownership, stable-row reconciliation, and scroll preservation.
@@ -19312,7 +19330,11 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts, turnWo
       ? null
       : (typeof _anchorSceneRetainedRowSignature==='function'?_anchorSceneRetainedRowSignature(row,rowOpts):null);
     const toolSignature=turnWorklog?'':_anchorSceneToolRenderSignature(row,rowOpts);
-    const dataKey=turnWorklog?'':_anchorSceneDataRowKey(row,activeStreamId);
+    const turnWorklogKey=turnWorklog&&_liveSceneIncrementalEnabled()
+      ? _turnWorklogRowRenderKey(row) : '';
+    const dataKey=turnWorklog
+      ? (turnWorklogKey?_anchorSceneDataRowKey(row,activeStreamId):'')
+      : _anchorSceneDataRowKey(row,activeStreamId);
     const cached=dataKey?preserveByKey.get(dataKey):null;
     const signatureMatch=(toolSignature&&cached&&cached._anchorToolRenderSignature===toolSignature)||
       (retainedSignature&&cached&&cached._anchorRowRenderSignature===retainedSignature);
@@ -19320,6 +19342,11 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts, turnWo
       // Timestamp visibility is presentation state, independent of tool content.
       // Reconcile it in place so toggles preserve disclosure and text selection.
       _syncTransparentEventTimestampVisibility(cached);
+      preserveByKey.delete(dataKey);
+      renderedRows.push(cached);
+      continue;
+    }
+    if(turnWorklogKey&&cached&&cached._turnWorklogRowRenderKey===turnWorklogKey){
       preserveByKey.delete(dataKey);
       renderedRows.push(cached);
       continue;
@@ -19343,6 +19370,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts, turnWo
     if(!renderedNode) continue;
     if(retainedSignature) renderedNode._anchorRowRenderSignature=retainedSignature;
     if(toolSignature) renderedNode._anchorToolRenderSignature=toolSignature;
+    if(turnWorklogKey) renderedNode._turnWorklogRowRenderKey=turnWorklogKey;
     renderedRows.push(renderedNode);
   }
   // Stale replacement rows must not force every retained predecessor to move.

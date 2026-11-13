@@ -23,10 +23,11 @@ HARNESS_HTML = re.sub(r"<script\b[^>]*>.*?</script>", "", INDEX_HTML, flags=re.I
 HARNESS_HTML = re.sub(r"<link\b[^>]*>", "", HARNESS_HTML, flags=re.I)
 
 _SCENARIO = r"""
-async (mode) => {
+async ({mode, incremental=true}) => {
   const stream = 'oracle-stream';
   Date.now = () => 1700000001000;  // Freeze elapsed timer labels across A and B.
   window._chatActivityDisplayMode = mode;
+  window._liveSceneIncremental = incremental;
   window._showThinking = true;
   window._simplifiedToolCalling = true;
   S.session = {session_id: 'oracle-session', messages: [], pending_started_at: 1700000000};
@@ -226,7 +227,8 @@ def browser():
 
 
 @pytest.mark.parametrize("mode", ["compact_worklog", "turn_worklog", "transparent_stream"])
-def test_300_step_live_scene_matches_fresh_render(browser, mode):
+@pytest.mark.parametrize("incremental", [True, False], ids=["incremental", "legacy"])
+def test_300_step_live_scene_matches_fresh_render(browser, mode, incremental):
     page = browser.new_page()
     page.set_default_timeout(600_000)
     errors = []
@@ -244,7 +246,7 @@ def test_300_step_live_scene_matches_fresh_render(browser, mode):
         for script in SUPPORT_SCRIPTS:
             page.add_script_tag(content=script)
         page.add_script_tag(content=UI_JS)
-        result = page.evaluate(_SCENARIO, mode)
+        result = page.evaluate(_SCENARIO, {"mode": mode, "incremental": incremental})
     finally:
         page.close()
     assert not errors, errors
@@ -260,3 +262,52 @@ def test_300_step_live_scene_matches_fresh_render(browser, mode):
         "disclosureRetained": True,
     }, result
     assert result["rows"] > 50, result
+
+
+def test_turn_worklog_non_text_status_change_rerenders(browser):
+    page = browser.new_page()
+    page.route(
+        "**/*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/html" if route.request.url == "http://harness.test/" else "text/plain",
+            body=HARNESS_HTML if route.request.url == "http://harness.test/" else "",
+        ),
+    )
+    try:
+        page.goto("http://harness.test/", wait_until="domcontentloaded")
+        for script in SUPPORT_SCRIPTS:
+            page.add_script_tag(content=script)
+        page.add_script_tag(content=UI_JS)
+        result = page.evaluate(
+            """async () => {
+              const stream = 'status-oracle-stream';
+              window._chatActivityDisplayMode = 'turn_worklog';
+              S.session = {session_id: 'status-oracle', messages: []};
+              S.activeStreamId = stream;
+              $('msgInner').innerHTML = '';
+              const turn = _createAssistantTurn();
+              turn.id = 'liveAssistantTurn';
+              $('msgInner').appendChild(turn);
+              let row = {row_id:'status-row', local_id:'status-row', role:'lifecycle',
+                kind:'lifecycle_status', source_event_type:'interim_assistant',
+                status:'running', text:'Working'};
+              const render = () => renderLiveAnchorActivityScene(stream, {
+                version:'activity_scene_v1', mode:'turn_worklog',
+                identity:{session_id:'status-oracle', stream_id:stream, run_id:stream},
+                activity_rows:[JSON.parse(JSON.stringify(row))],
+              }, {sessionId:'status-oracle'});
+              render();
+              const beforeNode = turn.querySelector('[data-anchor-row-id="status-row"]');
+              const before = beforeNode.outerHTML;
+              row = {...row, status:'completed'};  // Text and tool payload are unchanged.
+              render();
+              const afterNode = turn.querySelector('[data-anchor-row-id="status-row"]');
+              return {changed:before !== afterNode.outerHTML, sameNode:beforeNode === afterNode,
+                before, after:afterNode.outerHTML};
+            }"""
+        )
+    finally:
+        page.close()
+    assert result["sameNode"] is True, result
+    assert result["changed"] is True, result
