@@ -18865,35 +18865,18 @@ function _anchorSceneToolRenderSignature(row, opts){
     typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling()]);
 }
 function _liveSceneIncrementalEnabled(){ return window._liveSceneIncremental!==false; }
-function _anchorSceneRenderKeyPart(value, seen, cache){
-  seen=seen||new Set();
-  const normalize=(item)=>{
-    if(item===undefined) return '~undefined';
-    if(item===null) return null;
-    if(typeof item==='string'){
-      return item.length>48
-        ? `string:${item.length}:${item.slice(0,16)}:${item.slice(-32)}`
-        : item;
-    }
-    if(typeof item==='number'||typeof item==='boolean') return item;
-    if(typeof item!=='object') return `${typeof item}:${String(item)}`;
-    if(item instanceof Date) return `date:${item.getTime()}`;
-    if(cache&&cache.has(item)) return cache.get(item);
-    if(seen.has(item)) return '~circular';
-    seen.add(item);
-    let out;
-    if(Array.isArray(item)) out=item.map(normalize);
-    else{
-      out={};
-      for(const key of Object.keys(item).sort()) out[key]=normalize(item[key]);
-    }
-    seen.delete(item);
-    if(cache) cache.set(item,out);
-    return out;
-  };
-  return JSON.stringify(normalize(value));
+function _anchorSceneRenderKeyPart(value){
+  try{
+    return JSON.stringify(value,(_key,item)=>typeof item==='string'&&item.length>48
+      ? `string:${item.length}:${item.slice(0,16)}:${item.slice(-32)}`
+      : item);
+  }catch(_){ return null; }
 }
-function _anchorSceneRowRenderKey(row, opts, cache){
+function _anchorSceneRowRenderPrefs(opts){
+  return {opts:opts||{},language:document.documentElement.lang,showThinking:window._showThinking,timestamps:window._transparentEventTimestamps,
+    simplified:typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling(),detailsExpanded:_worklogDetailsExpandedDefault(),mode:typeof chatActivityMode==='function'?chatActivityMode():'',sessionId:S.session&&S.session.session_id,proseIncremental:typeof window.__anchorProseIncrementalNode==='function'};
+}
+function _anchorSceneRowRenderKey(row, prefs){
   if(!row) return null;
   try{
     // Positional reconciliation metadata changes when rows are coalesced. Neither
@@ -18901,18 +18884,7 @@ function _anchorSceneRowRenderKey(row, opts, cache){
     // which retains the original value while merging the payload before render.
     const rowForKey=Object.assign({},row);
     delete rowForKey.order_index;
-    return _anchorSceneRenderKeyPart({
-      row:rowForKey,
-      opts:opts||{},
-      language:document.documentElement.lang,
-      simplified:typeof isSimplifiedToolCalling==='function'&&isSimplifiedToolCalling(),
-      showThinking:window._showThinking,
-      detailsExpanded:_worklogDetailsExpandedDefault(),
-      mode:typeof chatActivityMode==='function'?chatActivityMode():'',
-      timestamps:window._transparentEventTimestamps,
-      sessionId:S.session&&S.session.session_id,
-      proseIncremental:typeof window.__anchorProseIncrementalNode==='function',
-    },null,cache);
+    return _anchorSceneRenderKeyPart([rowForKey,prefs]);
   }catch(_){ return null; }
 }
 function _anchorSceneDataRowKey(row, streamId){
@@ -18943,7 +18915,7 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   const children=[];
   const incremental=typeof _liveSceneIncrementalEnabled==='function'&&
     typeof _anchorSceneRowRenderKey==='function'&&_liveSceneIncrementalEnabled();
-  const keyCache=incremental?new Map():null;
+  const rowRenderPrefs=incremental?_anchorSceneRowRenderPrefs(opts):null;
   let currentTools=null;
   let toolNodes=[];
   const flushTools=()=>{
@@ -18962,7 +18934,7 @@ function _renderAnchorSceneRowsIntoWorklog(group, rows, opts){
   for(const row of rows){
     const key=_anchorSceneDataRowKey(row,'');
     const previous=key?existing.get(key):null;
-    const renderKey=incremental?_anchorSceneRowRenderKey(row,opts,keyCache):null;
+    const renderKey=incremental?_anchorSceneRowRenderKey(row,rowRenderPrefs):null;
     const signature=incremental?null:_anchorSceneRetainedRowSignature(row,opts);
     const toolSignature=incremental?null:_anchorSceneToolRenderSignature(row,opts);
     const retained=previous&&(
@@ -19359,7 +19331,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts, turnWo
   const renderedRows=[];
   const incremental=typeof _liveSceneIncrementalEnabled==='function'&&
     typeof _anchorSceneRowRenderKey==='function'&&_liveSceneIncrementalEnabled();
-  const keyCache=incremental?new Map():null;
+  const rowRenderPrefs=incremental?_anchorSceneRowRenderPrefs({live:true,settled:false,streamId:streamId||S.activeStreamId||'',sessionId:S.session&&S.session.session_id}):null;
   for(const row of rows){
     const rowEventTs=typeof _anchorSceneRowTimestampSeconds==='function'?_anchorSceneRowTimestampSeconds(row):null;
     const rowOpts={
@@ -19372,7 +19344,7 @@ function _renderLiveAnchorActivitySceneTransparent(streamId, scene, opts, turnWo
       ? null
       : (typeof _anchorSceneRetainedRowSignature==='function'?_anchorSceneRetainedRowSignature(row,rowOpts):null);
     const toolSignature=turnWorklog||incremental?'':_anchorSceneToolRenderSignature(row,rowOpts);
-    const renderKey=incremental?_anchorSceneRowRenderKey(row,rowOpts,keyCache):null;
+    const renderKey=incremental?_anchorSceneRowRenderKey(row,rowRenderPrefs):null;
     const dataKey=turnWorklog
       ? (renderKey?_anchorSceneDataRowKey(row,activeStreamId):'')
       : _anchorSceneDataRowKey(row,activeStreamId);
