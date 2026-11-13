@@ -13081,7 +13081,13 @@ def _display_prefix_fingerprint(
     return _prefix_fingerprint_over_projection(projection[0], projection[1])
 
 
-def _build_raw_prefix_fingerprint_entry(messages, *, inputs):
+def _build_raw_prefix_fingerprint_entry(session, messages, *, inputs=None):
+    # Same contract as _build_prefix_fingerprint_entry: empty documents publish
+    # no entry, and callers without a request snapshot read one here.
+    if not messages:
+        return None
+    if inputs is None:
+        inputs = _display_prefix_fp_inputs(session)
     return {
         "meta": inputs.meta,
         "format": "raw",
@@ -13880,7 +13886,7 @@ def _limited_webui_messages_for_display_with_sidecar(
         # the scene/tool-call meta so an in-process scene change cannot reuse
         # a pre-save digest, and invalidated with the entry's key by any
         # sidecar write (scene saves persist through the sidecar).
-        prefix_fp_entry = _build_raw_prefix_fingerprint_entry(merged, inputs=inputs)
+        prefix_fp_entry = _build_raw_prefix_fingerprint_entry(session, merged, inputs=inputs)
         # #7925 re-gate (2026-10-30, cold double-hash): the entry's digest
         # covers the WHOLE merged document, and the response mint wants the
         # digest over [0, count) with count = the window's coverage end. Those
