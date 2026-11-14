@@ -4757,6 +4757,43 @@ def _run_journal_state_saved_side_effect(
     }
 
 
+def _steer_text_lines(value) -> list[str]:
+    return [line.strip() for line in str(value or "").split("\n") if line.strip()]
+
+
+def _retire_leftover_steer_events(steers: list[dict], leftovers: list[dict]) -> list[dict]:
+    """Drop accepted-but-unconsumed steers that came back as a leftover.
+
+    A ``pending_steer_leftover`` is re-sent as the next turn's user message, so
+    keeping the in-turn Steer row would show the text twice. Each leftover
+    line-block cancels at most one earlier, still-``received`` steer
+    (latest-first). Mirrors ``_retireLeftoverSteerRows`` in static/ui.js.
+    """
+    if not steers or not leftovers:
+        return steers
+    dropped: set[int] = set()
+    for leftover in sorted(leftovers, key=lambda e: e.get("seq") or 0, reverse=True):
+        remaining = _steer_text_lines(leftover.get("text"))
+        lseq = leftover.get("seq") or 0
+        for idx in range(len(steers) - 1, -1, -1):
+            if not remaining:
+                break
+            steer = steers[idx]
+            if idx in dropped or (lseq and (steer.get("seq") or 0) > lseq):
+                continue
+            if str(steer.get("status") or "received") != "received":
+                continue
+            want = _steer_text_lines(steer.get("text"))
+            if not want:
+                continue
+            for pos in range(len(remaining) - len(want) + 1):
+                if remaining[pos:pos + len(want)] == want:
+                    dropped.add(idx)
+                    remaining = remaining[:pos] + remaining[pos + len(want):]
+                    break
+    return [s for i, s in enumerate(steers) if i not in dropped]
+
+
 def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
@@ -4830,6 +4867,7 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     side_effect_bytes = 0
     side_effects_truncated = False
     delivered_steer_events: list[dict] = []
+    leftover_steer_events: list[dict] = []
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     prose_segment_first_seq = 0
@@ -5060,6 +5098,11 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
         if event_name == "tool_complete":
             update_completed_tool(payload, event_seq)
             fresh_segment = True
+            continue
+        if event_name == "pending_steer_leftover":
+            leftover_text = str((payload or {}).get("text") or "").strip()
+            if leftover_text:
+                leftover_steer_events.append({"seq": event_seq or 0, "text": leftover_text})
             continue
         if event_name == "steer_delivered":
             text = str(payload.get("text") or "").strip()
@@ -5372,6 +5415,9 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     # Steer delivery is a durable control boundary, not assistant prose.  It
     # must be rebuilt from the journal independently of token/tool projection so
     # a refresh sees the same row that live SSE displayed.
+    delivered_steer_events = _retire_leftover_steer_events(
+        delivered_steer_events, leftover_steer_events
+    )
     for control in delivered_steer_events:
         event_id = control.get("event_id")
         event_seq = control.get("seq")

@@ -18449,8 +18449,40 @@ function _appendWorklogStep(group, anchor, cards, thinkingText, opts){
     _syncToolRowsContainer(tools, !!(opts&&opts.live));
   }
 }
+// A steer accepted mid-run but never consumed comes back as a later
+// pending_steer_leftover and is re-sent as the NEXT turn's user message. Its
+// in-turn Steer row would then show the same text twice (once misplaced).
+// Retire, latest-first, each still-"received" steer row whose text is a
+// line-block of a later leftover; each leftover block cancels at most one row.
+function _steerTextLines(value){
+  return String(value||'').split('\n').map(s=>s.trim()).filter(Boolean);
+}
+function _retireLeftoverSteerRows(rows){
+  const list=Array.isArray(rows)?rows:[];
+  if(!list.some(r=>r&&r.source_event_type==='pending_steer_leftover')) return list;
+  const drop=new Set();
+  for(let i=list.length-1;i>=0;i--){
+    const lo=list[i];
+    if(!lo||lo.source_event_type!=='pending_steer_leftover') continue;
+    let remaining=_steerTextLines(lo.text||(lo.payload&&lo.payload.text));
+    for(let j=i-1;j>=0&&remaining.length;j--){
+      const row=list[j];
+      if(drop.has(j)||!row||row.source_event_type!=='steer_delivered') continue;
+      const status=String(row.status||(row.payload&&row.payload.status)||'');
+      if(status&&status!=='received') continue;
+      const want=_steerTextLines(row.text||(row.payload&&row.payload.text));
+      if(!want.length) continue;
+      for(let p=0;p+want.length<=remaining.length;p++){
+        let ok=true;
+        for(let k=0;k<want.length;k++) if(remaining[p+k]!==want[k]){ok=false;break;}
+        if(ok){drop.add(j);remaining=remaining.slice(0,p).concat(remaining.slice(p+want.length));break;}
+      }
+    }
+  }
+  return drop.size?list.filter((_,idx)=>!drop.has(idx)):list;
+}
 function _anchorSceneRowsForRendering(scene, opts){
-  const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
+  const rows=_retireLeftoverSteerRows(Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[]);
   const settled=!!(opts&&opts.settled);
   const live=!settled;
   // #6948 follow-up (duplicate assistant answer; #2051): on a SETTLED turn the
