@@ -8096,12 +8096,12 @@ let _composerFitLastFooter=null;
 let _composerFitLastKey='';
 
 function _fitComposerTooltipDirections(left){
-  // Reorder and visibility settings can put any direct tooltip button at a
-  // different edge. Flip only when its right-facing box would actually clip
-  // and the left-facing alternative fits; hidden siblings and DOM order alone
-  // cannot make that decision (a sole visible Attach sits at the LEFT edge).
+  // Reorder and visibility settings can put any tooltip button at a different
+  // edge, including a button owned by a direct-child wrapper. Flip only when
+  // its right-facing box would actually clip and the left-facing alternative
+  // fits; hidden siblings and DOM order alone cannot make that decision.
   const clip=left.getBoundingClientRect();
-  left.querySelectorAll(':scope > button.has-tooltip').forEach(function(button){
+  left.querySelectorAll('button.has-tooltip').forEach(function(button){
     const rect=button.getBoundingClientRect();
     const tooltip=getComputedStyle(button,'::after');
     const width=parseFloat(tooltip.width)||0;
@@ -8114,7 +8114,7 @@ function _fitComposerTooltipDirections(left){
 
 function _fitComposerTooltipDirectionFromEvent(event){
   const button=event.target&&event.target.closest&&event.target.closest('button.has-tooltip');
-  if(!button||button.parentElement!==event.currentTarget) return;
+  if(!button||!event.currentTarget.contains(button)) return;
   _fitComposerTooltipDirections(event.currentTarget);
 }
 

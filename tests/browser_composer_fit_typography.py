@@ -5,8 +5,10 @@ The scene follows the #9045 gate reproduction: start with a visible default-skin
 composer, open Settings (which makes the left control group zero-width), select
 Nous through the real skin picker, then return to Chat with identical labels and
 available geometry.  The natural, observer-driven stage and overflow must match
-an explicit forced fit.  A subsequent unchanged scheduled fit must not probe
-scrollWidth.
+an explicit forced fit. A subsequent unchanged scheduled fit must not probe
+scrollWidth. Fork-local Live Voice and Content Width remain visible at their
+34px targets, and their restored (not just measuring-state) tooltips must not
+recreate horizontal overflow after the fit ladder compacted the real controls.
 """
 import json
 import os
@@ -55,9 +57,23 @@ _GEOMETRY = """() => {
   const footer = document.querySelector('.composer-footer');
   const left = footer.querySelector('.composer-left');
   const type = getComputedStyle(left);
+  const localControls = {};
+  for (const id of ['btnLiveVoice', 'composerContentWidthBtn']) {
+    const element = document.getElementById(id);
+    const rect = element.getBoundingClientRect();
+    localControls[id] = {
+      display: getComputedStyle(element).display,
+      flexShrink: getComputedStyle(element).flexShrink,
+      width: rect.width,
+      height: rect.height,
+      leftFacing: element.classList.contains('has-tooltip--left'),
+    };
+  }
   return {
+    localControls,
     stage: footer.classList.contains('cf-burger') ? 'burger'
       : footer.classList.contains('cf-icons') ? 'icons' : 'full',
+    footerClasses: footer.className,
     footerClientWidth: footer.clientWidth,
     leftClientWidth: left.clientWidth,
     leftScrollWidth: left.scrollWidth,
@@ -66,6 +82,20 @@ _GEOMETRY = """() => {
       type.fontStyle, type.lineHeight, type.letterSpacing].join('|'),
   };
 }"""
+
+
+def _check_local_controls(failures, label, geometry):
+    """Fork-local controls stay interactive and own right-edge tooltip geometry."""
+    for control_id, control in geometry["localControls"].items():
+        if control["display"] == "none" or abs(control["width"] - 34) > 0.5 or control["height"] != 34:
+            failures.append(f"{label}: fork-local {control_id} lost its 34px interactive target: {control}")
+        if control["flexShrink"] != "0":
+            failures.append(f"{label}: fork-local {control_id} was squeezed: {control}")
+        # Content Width is the wrapped control missed by the old direct-child
+        # selector. Live Voice keeps its existing clipping/left-fit decision;
+        # there is no universal requirement to flip when neither side fits.
+        if control_id == "composerContentWidthBtn" and not control["leftFacing"]:
+            failures.append(f"{label}: right-edge fork-local {control_id} tooltip did not flip left: {control}")
 
 
 def _check(browser, base, width):
@@ -95,6 +125,11 @@ def _check(browser, base, width):
         page.wait_for_timeout(1000)
         baseline = page.evaluate(_GEOMETRY)
         observations["default"] = baseline
+        _check_local_controls(failures, "default", baseline)
+        if baseline["leftScrollWidth"] > baseline["leftClientWidth"] + 1:
+            failures.append(
+                f"default overflow {baseline['leftScrollWidth']} > {baseline['leftClientWidth']} + 1"
+            )
         if baseline["stage"] != "full":
             failures.append(f"precondition: default stage was {baseline['stage']}, not full")
 
@@ -145,11 +180,13 @@ def _check(browser, base, width):
                 failures.append(
                     f"scene drift: {key} changed {baseline[key]} -> {natural[key]}"
                 )
-        if natural["stage"] != forced["stage"]:
+        if natural["footerClasses"] != forced["footerClasses"]:
             failures.append(
-                f"natural stage {natural['stage']} != forced stage {forced['stage']}"
+                f"natural footer classes {natural['footerClasses']!r} != "
+                f"forced {forced['footerClasses']!r}"
             )
         for name, geometry in (("natural", natural), ("forced", forced)):
+            _check_local_controls(failures, name, geometry)
             if geometry["leftScrollWidth"] > geometry["leftClientWidth"] + 1:
                 failures.append(
                     f"{name} overflow {geometry['leftScrollWidth']} > "
