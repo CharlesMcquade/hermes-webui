@@ -239,6 +239,21 @@ def _assert_scene(
             failures.append(f"{name}: populated control disappeared ({key}): {fixture}")
 
 
+def _assert_local_controls(
+    failures: list[str], name: str, geometry: dict, expected_width: float = 34,
+) -> None:
+    """The fork's non-setting-owned controls survive original upstream scenes."""
+    for control_id, control in geometry["localControls"].items():
+        if control["display"] == "none":
+            failures.append(f"{name}: protected local {control_id} was hidden: {control}")
+        if abs(control["width"] - expected_width) > 0.5 or control["height"] != expected_width:
+            failures.append(
+                f"{name}: protected local {control_id} lost its {expected_width}px target: {control}"
+            )
+        if control["flexShrink"] != "0":
+            failures.append(f"{name}: protected local {control_id} was squeezed: {control}")
+
+
 def _composer_geometry(page) -> dict:
     return page.evaluate(
         """() => {
@@ -249,7 +264,20 @@ def _composer_geometry(page) -> dict:
           const rect = attach.getBoundingClientRect();
           const micRect = mic.getBoundingClientRect();
           const quota = document.getElementById('providerQuotaChip');
+          const localControls = {};
+          for (const id of ['btnLiveVoice', 'composerContentWidthBtn']) {
+            const element = document.getElementById(id);
+            const localRect = element.getBoundingClientRect();
+            localControls[id] = {
+              display: getComputedStyle(element).display,
+              width: localRect.width,
+              height: localRect.height,
+              flexShrink: getComputedStyle(element).flexShrink,
+              leftFacing: element.classList.contains('has-tooltip--left'),
+            };
+          }
           return {
+            localControls,
             fixture: {
               workspaceText: document.getElementById('composerWorkspaceLabel').textContent,
               modelText: document.getElementById('composerModelLabel').textContent,
@@ -458,6 +486,7 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
         shrink = _composer_geometry(page)
         evidence["longName1120"] = shrink
         _assert_scene(failures, "longName1120", shrink, LONG_WORKSPACE_LABEL, LONG_MODEL_LABEL, require_populated=True)
+        _assert_local_controls(failures, "longName1120", shrink)
         if shrink["stage"] not in {"shrink", "icons"}:
             failures.append(f"populated 1120px scene missed the natural shrink-to-icons boundary: {shrink}")
         if not shrink["attachEnabled"]:
@@ -517,8 +546,17 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
             geometry = _composer_geometry(page)
             evidence["attachLast"][name] = geometry
             _assert_scene(failures, name, geometry, workspace_label, model_label, require_populated=True)
-            if geometry["controlOrder"][-1] != "btnAttach":
-                failures.append(f"{name}: supported reorder did not leave Attach-last: {geometry['controlOrder']}")
+            _assert_local_controls(failures, name, geometry)
+            # Attach is last among setting-owned controls. The fork's two
+            # non-setting-owned controls retain their DOM tail and must not be
+            # discarded merely to reproduce upstream's shorter child list.
+            expected_order_tail = ["btnAttach", "btnLiveVoice", "composerContentWidthWrap"]
+            if geometry["controlOrder"][-3:] != expected_order_tail:
+                failures.append(
+                    f"{name}: supported reorder did not leave Attach last among registered "
+                    f"controls followed by the fork-local tail {expected_order_tail}: "
+                    f"{geometry['controlOrder']}"
+                )
             if not geometry["attachEnabled"]:
                 failures.append(f"{name}: Attach unexpectedly disabled: {geometry}")
             for control in ("Attach", "Mic"):
@@ -561,9 +599,11 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
             if screenshot_dir:
                 os.makedirs(screenshot_dir, exist_ok=True)
                 page.screenshot(path=os.path.join(screenshot_dir, f"{name}-attach-hover.png"))
-        # Adversarial visibility control: DOM order alone must not flip a sole
-        # visible Attach at the LEFT edge into an empty left-facing tooltip.
-        # Hide every other left control through the supported settings owner.
+        # Adversarial visibility control: DOM order alone must not flip the
+        # leftmost visible Attach into an empty left-facing tooltip. Hide every
+        # other setting-owned left control; Live Voice and Content Width are
+        # deliberately not owned by those settings and stay as positive local
+        # controls rather than being hidden out of this fork's fixture.
         page.evaluate(
             """() => {
               const defs = window._COMPOSER_CONTROL_TOGGLE_DEFS.concat(
@@ -588,8 +628,13 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
             and child["display"] != "none"
             and child["width"] > 0
         ]
-        if [child["id"] for child in visible_controls] != ["btnAttach"]:
-            failures.append(f"soleVisible1920: supported visibility did not leave only Attach: {visible_controls}")
+        expected_visible = ["btnAttach", "btnLiveVoice", "composerContentWidthWrap"]
+        if [child["id"] for child in visible_controls] != expected_visible:
+            failures.append(
+                "soleVisible1920: supported visibility did not leave Attach first "
+                f"with the protected local tail {expected_visible}: {visible_controls}"
+            )
+        _assert_local_controls(failures, "soleVisible1920", sole)
         page.hover("#btnAttach")
         if not _wait_until(
             page,
@@ -629,6 +674,7 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
                 require_populated=width > 640,
             )
             expected_width = 44 if width <= 640 else 34
+            _assert_local_controls(failures, f"{name} recovery", geometry, expected_width)
             for control in ("Attach", "Mic"):
                 if geometry[f"{control.lower()}FlexShrink"] != "0":
                     failures.append(
