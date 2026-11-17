@@ -226,6 +226,116 @@ def browser():
         instance.close()
 
 
+def _oracle_page(browser, incremental):
+    page = browser.new_page()
+    page.set_default_timeout(600_000)
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.route(
+        "**/*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/html" if route.request.url == "http://harness.test/" else "text/plain",
+            body=HARNESS_HTML if route.request.url == "http://harness.test/" else "",
+        ),
+    )
+    page.goto("http://harness.test/", wait_until="domcontentloaded")
+    for script in SUPPORT_SCRIPTS:
+        page.add_script_tag(content=script)
+    page.add_script_tag(content=UI_JS)
+    page.evaluate("enabled => { window._liveSceneIncremental=enabled; }", incremental)
+    return page, errors
+
+
+_CORRECTION_SCENARIO = r"""
+async ({mode, field}) => {
+  const stream='oracle-correction-stream';
+  Date.now=()=>1700000001000;
+  window._chatActivityDisplayMode=mode;
+  window._showThinking=true;
+  window._simplifiedToolCalling=true;
+  S.session={session_id:'oracle-session',messages:[],pending_started_at:1700000000};
+  S.messages=[]; S.toolCalls=[]; S.activeStreamId=stream;
+  $('msgInner').innerHTML='';
+  const makeTurn=()=>{const turn=_createAssistantTurn();turn.id='liveAssistantTurn';return turn;};
+  const prefix='PREFIX-123456789'; // exactly 16 characters
+  const suffix='SUFFIX-abcdefghijklmnopqrstuvwxy'; // exactly 32 characters
+  if(prefix.length!==16||suffix.length!==32)throw new Error('bad collision fixture ends');
+  const originalText=prefix+'a'.repeat(96)+suffix;
+  const correctedText=prefix+'b'.repeat(96)+suffix;
+  const row={row_id:'tool:collision',local_id:'collision',role:'tool',kind:'tool_call',
+    source_event_type:'tool_complete',status:'completed',created_at:1700000000,
+    tool:{id:'collision',tid:'collision',name:'terminal',args:{command:originalText},
+      preview:originalText,snippet:originalText,done:true,duration:0.25,created_at:1700000000}};
+  row.payload=row.tool;
+  const scene=()=>({version:'activity_scene_v1',mode,
+    identity:{session_id:'oracle-session',stream_id:stream,run_id:stream},
+    activity_rows:[JSON.parse(JSON.stringify(row))]});
+  let retained=makeTurn();$('msgInner').appendChild(retained);
+  renderLiveAnchorActivityScene(stream,scene(),{sessionId:'oracle-session'});
+  const select=turn=>turn.querySelector('[data-anchor-row-id="tool:collision"]');
+  const first=select(retained);
+  const firstDetail=first.querySelector('.tool-card-detail');
+  const header=first.querySelector('.tool-card-header');
+  if(header)header.click();
+  const openedDetail=first.querySelector('.tool-card-detail');
+  const beforeHtml=first.innerHTML;
+  renderLiveAnchorActivityScene(stream,scene(),{sessionId:'oracle-session'});
+  const unchanged=select(retained)===first&&first.isConnected&&first.innerHTML===beforeHtml&&
+    first.querySelector('.tool-card-detail')===openedDetail;
+  if(field==='nested_argument')row.tool.args.command=correctedText;
+  else {row.tool.preview=correctedText;row.tool.snippet=correctedText;}
+  const currentScene=scene();
+  retained.remove();
+  const fresh=makeTurn();$('msgInner').appendChild(fresh);
+  renderLiveAnchorActivityScene(stream,currentScene,{sessionId:'oracle-session'});
+  const freshHeader=select(fresh).querySelector('.tool-card-header');
+  if(freshHeader)freshHeader.click();
+  const freshHtml=select(fresh).innerHTML;
+  const freshText=select(fresh).textContent;
+  fresh.remove();$('msgInner').appendChild(retained);
+  renderLiveAnchorActivityScene(stream,currentScene,{sessionId:'oracle-session'});
+  const corrected=select(retained);
+  return {unchanged,correctedVisible:corrected.textContent.includes(correctedText),
+    freshVisible:freshText.includes(correctedText),freshMatches:corrected.innerHTML===freshHtml,
+    detailReused:corrected.querySelector('.tool-card-detail')===firstDetail,
+    nodeReused:corrected===first};
+}
+"""
+
+
+_STATUS_SCENARIO = r"""
+async (mode) => {
+  const stream='oracle-status-stream';
+  Date.now=()=>1700000001000;
+  window._chatActivityDisplayMode=mode;
+  window._showThinking=true;
+  window._simplifiedToolCalling=true;
+  S.session={session_id:'oracle-session',messages:[],pending_started_at:1700000000};
+  S.messages=[]; S.toolCalls=[]; S.activeStreamId=stream;
+  $('msgInner').innerHTML='';
+  const turn=_createAssistantTurn(); turn.id='liveAssistantTurn';
+  $('msgInner').appendChild(turn);
+  const row={row_id:'lifecycle-status',local_id:'lifecycle-status',role:'lifecycle',
+    kind:'lifecycle_status',source_event_type:'custom_status',status:'running',text:'',
+    created_at:1700000000};
+  const scene=()=>({version:'activity_scene_v1',mode,
+    identity:{session_id:'oracle-session',stream_id:stream,run_id:stream},
+    activity_rows:[{...row}]});
+  renderLiveAnchorActivityScene(stream,scene(),{sessionId:'oracle-session'});
+  const label=()=>turn.querySelector('.agent-activity-status-label').textContent;
+  const before=label();
+  const builder=mode==='compact_worklog'?'_anchorSceneNodeForRow':'_anchorSceneTransparentNodeForRow';
+  const original=window[builder]; let builds=0;
+  window[builder]=function(...args){builds++; return original.apply(this,args);};
+  row.status='completed';
+  renderLiveAnchorActivityScene(stream,scene(),{sessionId:'oracle-session'});
+  window[builder]=original;
+  return {before,after:label(),builds};
+}
+"""
+
+
 @pytest.mark.parametrize("mode", ["compact_worklog", "turn_worklog", "transparent_stream"])
 @pytest.mark.parametrize("incremental", [True, False], ids=["incremental", "legacy"])
 def test_300_step_live_scene_matches_fresh_render(browser, mode, incremental):
@@ -262,6 +372,32 @@ def test_300_step_live_scene_matches_fresh_render(browser, mode, incremental):
         "disclosureRetained": True,
     }, result
     assert result["rows"] > 50, result
+
+
+@pytest.mark.parametrize("mode", ["compact_worklog", "transparent_stream"])
+@pytest.mark.parametrize("field", ["tool_result", "nested_argument"])
+def test_middle_only_tool_correction_matches_fresh_render(browser, mode, field):
+    page, errors = _oracle_page(browser, True)
+    try:
+        result = page.evaluate(_CORRECTION_SCENARIO, {"mode": mode, "field": field})
+    finally:
+        page.close()
+    assert not errors, errors
+    assert result["unchanged"] is True, result
+    assert result["freshVisible"] is True, result
+    assert result["correctedVisible"] is True, result
+    assert result["freshMatches"] is True, result
+
+
+@pytest.mark.parametrize("mode", ["compact_worklog", "transparent_stream"])
+def test_non_tool_status_only_change_renders(browser, mode):
+    page, errors = _oracle_page(browser, True)
+    try:
+        result = page.evaluate(_STATUS_SCENARIO, mode)
+    finally:
+        page.close()
+    assert not errors, errors
+    assert result == {"before": "running", "after": "completed", "builds": 1}, result
 
 
 def test_turn_worklog_non_text_status_change_rerenders(browser):
