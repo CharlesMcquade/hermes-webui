@@ -114,6 +114,7 @@ from api.memory_profile_scope import (
 from api.models import (
     StateDBSessionMessagesSnapshot,
     _cancelled_journal_turn_owner,
+    _session_marked_foreign,
     _WEBUI_TRUSTED_AGENT_INPUT_FIELD,
     _is_empty_partial_activity_message,
     _message_exact_timestamp_details,
@@ -3672,7 +3673,7 @@ def _resolve_current_session_for_write(session):
     worker-held snapshot: that object may be a detached LRU-evicted
     generation whose save would overwrite the current session state.
     """
-    if getattr(session, "_sidecar_names_other_session", None):
+    if _session_marked_foreign(session):
         # #8852: the object's id is that other session's, so resolving it
         # would hand that session to this write.
         return None
@@ -3686,7 +3687,7 @@ def _resolve_current_session_for_write(session):
         # session's id and path (the #8852 loader marks it), so a write through
         # it (the cwd mirror, an ephemeral cancel's unlink) would land on the
         # other conversation. Fail closed instead.
-        if getattr(current, "_sidecar_names_other_session", None):
+        if _session_marked_foreign(current):
             logger.info(
                 "Not resolving session %s for a delayed write: its file now "
                 "holds session %r (#9000)",

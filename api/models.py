@@ -5839,6 +5839,16 @@ def _has_compression_continuation(session) -> bool:
     return False
 
 
+def _session_marked_foreign(session) -> bool:
+    """True when the #8852 loader marked this object as holding another
+    session's file. The marker is that other session's id (a non-empty str);
+    unmarked sessions and test doubles whose attribute lookups return
+    arbitrary truthy objects are not foreign. Fail-closed stays intact for
+    every real marker the loader writes."""
+    marker = getattr(session, "_sidecar_names_other_session", None)
+    return marker is True or (isinstance(marker, str) and bool(marker))
+
+
 def _repair_stale_pending(session) -> bool:
     """Recover a sidecar stuck with messages=[] and stale pending state.
 
@@ -5853,7 +5863,7 @@ def _repair_stale_pending(session) -> bool:
     Returns True if repair was applied, False otherwise.
     Must never raise — all errors are caught and logged.
     """
-    if getattr(session, '_sidecar_names_other_session', None):
+    if _session_marked_foreign(session):
         # #8852: the repair saves, and save() refuses a session whose file's
         # body names another session. Nothing to repair in this file's name.
         return False
@@ -7661,7 +7671,7 @@ class SessionFileNamesOtherSession(KeyError):
 
 
 def _refuse_session_from_other_file(sid, session):
-    if getattr(session, '_sidecar_names_other_session', None):
+    if _session_marked_foreign(session):
         with LOCK:
             # The resolver drops an entry cached under the wrong id on its next read;
             # drop it now so direct cache readers never act on it either.
@@ -8862,7 +8872,7 @@ def persist_recovered_workspace_binding(
     per-session mutation lock keeps compare-and-replace ordered with other
     compliant session writers.
     """
-    if getattr(session, "_sidecar_names_other_session", None):
+    if _session_marked_foreign(session):
         # #8852: this writer patches SESSION_DIR/<session_id>.json directly,
         # not through save(), so it needs the same refusal: the id came from
         # a file whose body names another session.
