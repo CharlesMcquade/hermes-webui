@@ -5457,10 +5457,12 @@ def _sanitize_generated_title(text: str) -> str:
         return ''
     if _is_bad_new_title(s):
         return ''
+    if _looks_like_leaked_reasoning(s):
+        return ''
     s = s.strip(" \t\r\n\"'`*_~")
     s = re.sub(r'\s+', ' ', s).strip()
     # Guard against chain-of-thought leakage, meta-reasoning, and trivial echo.
-    if _is_bad_new_title(s) or _looks_like_leaked_reasoning(s) or (s.isascii() and len(s.split()) > 12):
+    if _is_bad_new_title(s) or (s.isascii() and len(s.split()) > 12):
         return ''
     return s[:80]
 
@@ -5730,8 +5732,22 @@ _TITLE_LEAK_RE = re.compile(
 
 
 def _looks_like_leaked_reasoning(title: str) -> bool:
-    """True when a fresh title candidate is reasoning rather than a title."""
-    return bool(_TITLE_REASONING_LEAD_RE.search(title) or _TITLE_LEAK_RE.search(title))
+    """Reject payload fragments and the extra lead shapes beyond the fork's
+    subject-aware opinion checks. Bare capitalized opinion leads and literal
+    container subjects remain titles.
+    """
+    if re.search(r'</?(?:think|thinking|thought|reasoning|analysis)>|["\']title["\']\s*:', title, re.IGNORECASE):
+        return True
+    stripped = title.lstrip()
+    if stripped.startswith('{') and not stripped.startswith('{}'):
+        return True
+    return bool(
+        re.match(r'^\s*(?:perhaps|possibly|probably)\s*:', title, re.IGNORECASE)
+        # Lowercase explanatory meta-commentary is a trace; the fork keeps
+        # title-cased subjects and "… is a Subject Complement" prose.
+        or re.match(r'^The best title is (?!(?:a|an|the)\b)', title)
+        or re.match(r'^\s*[*_~]{2}\s*(?:maybe|perhaps|possibly|probably)\s*[*_~]{2}\s+\S', title, re.IGNORECASE)
+    )
 
 
 def _is_bad_new_title(text: str) -> bool:
