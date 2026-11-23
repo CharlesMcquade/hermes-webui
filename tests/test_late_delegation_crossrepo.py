@@ -54,15 +54,18 @@ evt = {
 }
 token = set_hermes_home_override(feature_home)
 try:
-    with ledger._DB_LOCK, ledger._transaction() as conn:
-        assert not conn.execute("SELECT delegation_id FROM async_delegations WHERE delegation_id=?", (ident,)).fetchone(), (ledger._db_path(), feature_home, os.environ["HERMES_HOME"])
-        conn.execute("""INSERT INTO async_delegations
-            (delegation_id, origin_session, origin_ui_session_id, parent_session_id,
-             state, dispatched_at, completed_at, updated_at, event_json, result_json)
-            VALUES (?, 'webui-parent', 'parent', 'parent', 'completed', ?, ?, ?, ?, ?)""",
-            (ident, now-1, now, now, json.dumps(evt), json.dumps({
-                "status": "completed", "summary": "Child checked the report"
-            })))
+    with ledger._DB_LOCK:
+        def _seed(conn):
+            assert not conn.execute("SELECT delegation_id FROM async_delegations WHERE delegation_id=?", (ident,)).fetchone(), (ledger._db_path(), feature_home, os.environ["HERMES_HOME"])
+            conn.execute("""INSERT INTO async_delegations
+                (delegation_id, origin_session, origin_ui_session_id, parent_session_id,
+                 state, dispatched_at, completed_at, updated_at, event_json, result_json)
+                VALUES (?, 'webui-parent', 'parent', 'parent', 'completed', ?, ?, ?, ?, ?)""",
+                (ident, now-1, now, now, json.dumps(evt), json.dumps({
+                    "status": "completed", "summary": "Child checked the report"
+                })))
+        ledger._triage_write(_seed)
+    # finalize_parent_delegations owns _DB_LOCK itself; do not nest it.
     assert ledger.finalize_parent_delegations("other", [ident]) == []
     assert ledger.finalize_parent_delegations("parent", [ident]) == [ident]
 finally:

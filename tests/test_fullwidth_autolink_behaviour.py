@@ -81,6 +81,7 @@ eval(extractFunc('renderMd'));
 // a multibyte UTF-8 character corrupts the input before renderMd sees it.
 process.stdin.setEncoding('utf8');
 let buf = '';
+process.stdin.setEncoding('utf8');
 process.stdin.on('data', c => { buf += c; });
 process.stdin.on('end', () => {
   const started = process.hrtime.bigint();

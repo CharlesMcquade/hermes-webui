@@ -910,7 +910,6 @@ def test_minimax_aux_schema_request_keeps_reasoning_split():
 
 @pytest.mark.parametrize("candidate", (
     'Something Like "Summer" Discussion',
-    "Analysis: Q3 Sales Trends",
     "Thinking: Fast and Slow Summary",
     "Reasoning: Deductive vs Inductive",
     "Thought: Experiments in Ethics",
@@ -920,13 +919,23 @@ def test_minimax_aux_schema_request_keeps_reasoning_split():
     "Title should: Something Else Entirely",
     '<analysis mode="fast">We need a title</analysis> Login Repair',
     "<analysis>We need to inspect this</analysis> Safe Title",
-    "Analysis: User Retention",
-    "Analysis: User Authentication",
     "Thinking: You and Your Research",
 ))
 def test_ambiguous_headings_are_candidate_only(candidate):
     assert not streaming._looks_invalid_generated_title(candidate)
     assert streaming._is_bad_new_title(candidate)
+
+
+@pytest.mark.parametrize("title", (
+    "Analysis: Q3 Sales Trends",
+    "Analysis: User Retention",
+    "Analysis: User Authentication",
+))
+def test_ordinary_analysis_subject_labels(title):
+    """An Analysis heading alone is a category, not a reasoning confession."""
+    assert streaming._looks_invalid_generated_title(title) is False
+    assert streaming._is_bad_new_title(title) is False
+    assert streaming._sanitize_generated_title(title) == title
 
 
 @pytest.mark.parametrize("candidate", (
