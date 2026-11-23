@@ -11,10 +11,11 @@ async function api(path,opts={}){
   const url=new URL(rel,document.baseURI||location.href);
   const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
   const timeoutToast=opts.timeoutToast!==false;
-  const redirect401=opts.redirect401!==false&&!_embedNoRedirect401();
+  const embedNoRedirect401=typeof _embedNoRedirect401==='function'&&_embedNoRedirect401();
+  const redirect401=opts.redirect401!==false&&!embedNoRedirect401;
   // Embed policy (contract §3 no-retry): exactly one attempt per op under
   // the broker — ambiguity is surfaced as an error, never auto-resubmitted.
-  const maxAttempts=_embedNoRedirect401()?1:(Object.prototype.hasOwnProperty.call(opts,'retries')?Math.max(0,Number(opts.retries)||0)+1:3);
+  const maxAttempts=embedNoRedirect401?1:(Object.prototype.hasOwnProperty.call(opts,'retries')?Math.max(0,Number(opts.retries)||0)+1:3);
   const retryTimeouts=opts.retryTimeouts===true;
   const retryStatuses=Array.isArray(opts.retryStatuses)?opts.retryStatuses.map(Number).filter(Number.isFinite):[];
   const retryDelayMs=Object.prototype.hasOwnProperty.call(opts,'retryDelayMs')?Math.max(0,Number(opts.retryDelayMs)||0):350;
