@@ -35698,7 +35698,7 @@ def _handle_cron_delivery_options(handler):
         {"value": "local", "label": "Local (save output only)"},
         {"value": "origin", "label": "Origin (reply to creator)"}
     ]
-    for name in sorted((set(_KNOWN_DELIVERY_PLATFORMS) | _registry_names) - {"local", "origin"}):
+    for name in sorted((set(_known_delivery_platforms) | _registry_names) - {"local", "origin"}):
         platforms.append({"value": name, "label": _registry_labels.get(name) or name.capitalize()})
     return j(handler, {"platforms": platforms})
 
