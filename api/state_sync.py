@@ -106,6 +106,46 @@ class _StoreStateDB:
     def set_session_title(self, session_id, title):
         return self._handle.sessions.set_title(session_id, title)
 
+    def record_auxiliary_usage(self, session_id, task, **usage):
+        """Forward the legacy auxiliary-usage delta to the storage interface."""
+        return _record_auxiliary_usage_delta(self._handle, session_id, task, **usage)
+
+
+def _record_auxiliary_usage_delta(store, session_id, task, **usage):
+    """Translate legacy token kwargs to the storage interface's TokenCounts."""
+    from persistence.conversation.usage import TokenCounts
+
+    token_names = (
+        "input_tokens", "output_tokens", "cache_read_tokens",
+        "cache_write_tokens", "reasoning_tokens",
+    )
+    tokens = TokenCounts(**{name: usage.pop(name, 0) for name in token_names})
+    return store.usage.record_auxiliary_usage(
+        session_id, task, tokens=tokens, **usage
+    )
+
+
+def _install_legacy_auxiliary_usage_adapter():
+    """Keep the voice overlay's legacy SessionDB consumer seam on new Agents."""
+    try:
+        from hermes_state import SessionDB
+    except ImportError:
+        return
+    if hasattr(SessionDB, "record_auxiliary_usage"):
+        return
+
+    def record_auxiliary_usage(self, session_id, task, **usage):
+        self._enter()
+        try:
+            return _record_auxiliary_usage_delta(self._store, session_id, task, **usage)
+        finally:
+            self._leave()
+
+    SessionDB.record_auxiliary_usage = record_auxiliary_usage
+
+
+_install_legacy_auxiliary_usage_adapter()
+
 
 def _open_state_db(db_path: Path, *, strict: bool = False):
     """Open a profile's ``state.db``: the legacy ``SessionDB`` when it carries
