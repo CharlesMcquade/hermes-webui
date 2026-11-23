@@ -191,12 +191,16 @@ def test_boot_embed_skips_check_inflight_on_boot():
 
 def test_workspace_embed_no_retry():
     """api() must force a single attempt under the embed flag (contract §3)."""
-    assert "_embedNoRedirect401()?1:" in WORKSPACE_JS
+    # api() resolves the embed verdict once (guarded so the extracted
+    # function also runs in harnesses that omit the helper) and forces a
+    # single attempt from it.
+    assert "const embedNoRedirect401=typeof _embedNoRedirect401==='function'&&_embedNoRedirect401();" in WORKSPACE_JS
+    assert "embedNoRedirect401?1:" in WORKSPACE_JS
 
 
 def test_workspace_embed_401_no_reload():
     """401 must not navigate/reload inside the frame (contract §3/§10)."""
-    assert "opts.redirect401!==false&&!_embedNoRedirect401()" in WORKSPACE_JS
+    assert "opts.redirect401!==false&&!embedNoRedirect401" in WORKSPACE_JS
     assert "function _embedNoRedirect401()" in WORKSPACE_JS
 
 
