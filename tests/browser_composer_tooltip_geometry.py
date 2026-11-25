@@ -233,10 +233,23 @@ def _set_default_scene(page, workspace_label: str, model_label: str, panel_open:
 
 
 def _assert_default_lossless_scene(failures: list[str], name: str, geometry: dict) -> None:
-    """Geometry-only/profile rungs must not hide Saved prompts or clip IDs."""
-    if geometry["stage"] not in {"full", "tight", "profile"}:
+    """Geometry-only/profile rungs must not hide Saved prompts or clip IDs.
+
+    The fork additionally owns Live Voice and Content Width controls. Those two
+    real, non-setting-owned 34px controls can make the genuine cf-shrink stage
+    necessary at panel-open widths where vanilla upstream still fits cf-tight.
+    Accept that fork-specific demotion only while both identifying labels stay
+    whole and every local control keeps its target; never weaken the label or
+    geometry assertions to accommodate it.
+    """
+    fork_controls = geometry.get("localControls") or {}
+    allowed_stages = {"full", "tight", "profile"}
+    if fork_controls:
+        allowed_stages.add("shrink")
+        _assert_local_controls(failures, name, geometry)
+    if geometry["stage"] not in allowed_stages:
         failures.append(f"{name}: ordinary composer advanced to {geometry['stage']} before lossless rungs: {geometry}")
-    if geometry["savedPromptsDisplay"] == "none":
+    if geometry["savedPromptsDisplay"] == "none" and geometry["stage"] != "shrink":
         failures.append(f"{name}: Saved prompts disappeared at a lossless/profile stage: {geometry}")
     labels = {label["id"]: label for label in geometry["labels"]}
     for label_id, text_key in (("composerWorkspaceLabel", "workspaceText"), ("composerModelLabel", "modelText")):
