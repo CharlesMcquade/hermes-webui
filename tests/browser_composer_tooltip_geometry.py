@@ -299,10 +299,14 @@ def _assert_local_controls(
             failures.append(f"{name}: protected local {control_id} was squeezed: {control}")
 
 
-def _composer_geometry(page) -> dict:
+def _composer_geometry(page, parked_shrink: bool = False) -> dict:
+    # Class assignment and every measurement deliberately share one browser
+    # task. Otherwise the production mutation observer can refit between the
+    # two evaluations and turn a parked-stage regression into a false green.
     return page.evaluate(
-        """() => {
+        """(parkedShrink) => {
           const footer = document.querySelector('.composer-footer');
+          if (parkedShrink) footer.className = 'composer-footer cf-shrink';
           const left = document.querySelector('.composer-left');
           const attach = document.querySelector('#btnAttach');
           const mic = document.querySelector('#btnMic');
@@ -375,7 +379,8 @@ def _composer_geometry(page) -> dict:
               width: element.getBoundingClientRect().width,
             })),
           };
-        }"""
+        }""",
+        parked_shrink,
     )
 
 
@@ -581,9 +586,10 @@ def _check(browser, base: str) -> tuple[list[str], dict]:
         # of stage selection: even here, ordinary realistic identifying text
         # must remain whole rather than collapsing to an ambiguous prefix.
         _set_default_scene(page, "hermes-webui", "Claude Sonnet 4.6", False)
-        page.evaluate("document.querySelector('.composer-footer').className = 'composer-footer cf-shrink'")
-        shrink_caps = _composer_geometry(page)
+        shrink_caps = _composer_geometry(page, parked_shrink=True)
         evidence["shrinkRealisticCaps"] = shrink_caps
+        if shrink_caps["stage"] != "shrink" or shrink_caps["footerClasses"] != "composer-footer cf-shrink":
+            failures.append(f"shrinkRealisticCaps: parked class was refit before measurement: {shrink_caps}")
         for label in shrink_caps["labels"]:
             if label["id"] != "composerProfileLabel" and (not label["visible"] or label["scrollWidth"] > label["clientWidth"] + 1):
                 failures.append(f"shrinkRealisticCaps: realistic label unnecessarily clipped: {label}")
